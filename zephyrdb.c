@@ -1727,6 +1727,13 @@ struct zdb_doc_field_hdr_v1 {
 #define ZDB_DOC_MAGIC 0x5A444F43u
 #define ZDB_DOC_VERSION 1u
 
+static int zdb_doc_build_root_path(const zdb_cfg_t *cfg, char *path, size_t path_len);
+static int zdb_doc_build_collection_path(const zdb_cfg_t *cfg, const char *collection, char *path,
+						 size_t path_len);
+static int zdb_doc_build_doc_path(const zdb_cfg_t *cfg, const char *collection,
+					  const char *document_id, char *path, size_t path_len);
+static int zdb_doc_ensure_dirs(const zdb_cfg_t *cfg, const char *collection);
+
 static void *zdb_alloc_copy(const void *src, size_t len)
 {
 	void *dst;

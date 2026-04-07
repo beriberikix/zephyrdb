@@ -1,7 +1,5 @@
 cmake_minimum_required(VERSION 3.20.0)
 
-# Build as a standalone Zephyr app while consuming ZephyrDB through a local
-# module wrapper that points at the repository root Kconfig/CMake.
 set(ZEPHYRDB_LOCAL_MODULE_DIR ${CMAKE_CURRENT_LIST_DIR}/modules/zephyrdb-local)
 set(ZEPHYRDB_REPO_MODULE_DIR ${CMAKE_CURRENT_LIST_DIR}/../..)
 if(EXISTS ${ZEPHYRDB_LOCAL_MODULE_DIR}/zephyr/module.yml OR
@@ -12,22 +10,21 @@ elseif(EXISTS ${ZEPHYRDB_REPO_MODULE_DIR}/zephyr/module.yml OR
   list(APPEND EXTRA_ZEPHYR_MODULES ${ZEPHYRDB_REPO_MODULE_DIR})
 else()
   message(FATAL_ERROR
-    "native_sim_harness: zephyrdb module not found. Expected module.yml (or zephyr/module.yml) in one of: "
+    "doc_query_filters: zephyrdb module not found. Expected module.yml (or zephyr/module.yml) in one of: "
     "${ZEPHYRDB_LOCAL_MODULE_DIR} or ${ZEPHYRDB_REPO_MODULE_DIR}")
 endif()
 
-# Stage 2 path needs flatcc-zephyr overlay module.
 set(FLATCC_ZEPHYR_MODULE_DIR ${CMAKE_CURRENT_LIST_DIR}/../../../flatcc-zephyr/modules/lib/flatcc-zephyr)
 if(EXISTS ${FLATCC_ZEPHYR_MODULE_DIR}/zephyr/module.yml)
   list(APPEND EXTRA_ZEPHYR_MODULES ${FLATCC_ZEPHYR_MODULE_DIR})
 else()
   message(FATAL_ERROR
-    "native_sim_harness: flatcc-zephyr module not found at ${FLATCC_ZEPHYR_MODULE_DIR}. "
+    "doc_query_filters: flatcc-zephyr module not found at ${FLATCC_ZEPHYR_MODULE_DIR}. "
     "Clone beriberikix/flatcc-zephyr next to zephyrdb.")
 endif()
 
 find_package(Zephyr REQUIRED HINTS $ENV{ZEPHYR_BASE})
-project(zephyrdb_native_sim_harness)
+project(zephyrdb_doc_query_filters)
 
 target_sources(app PRIVATE src/main.c)
 target_link_libraries(app PRIVATE flatccrt)
