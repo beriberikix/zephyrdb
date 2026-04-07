@@ -283,6 +283,25 @@ west build -p always -s samples/native_sim_harness -b native_sim
 west build -t run
 ```
 
+### Sample Suite (Per Data Model + Helpers)
+
+Dedicated samples are now provided for each model plus helper scenarios:
+
+- `samples/kv_basic` - KV open/set/get/delete flow (NVS-backed setups)
+- `samples/ts_basic` - TS open/append/flush/aggregate flow
+- `samples/doc_basic` - Document create/set/save/export flow
+- `samples/core_health_stats` - Core health + stats snapshot/reset helper
+- `samples/doc_query_filters` - Document query filter construction helper
+
+Build any sample with:
+
+```bash
+west build -p always -s samples/<sample_name> -b <board>
+west build -t run
+```
+
+See `samples/README.md` and per-sample README files for board/storage notes.
+
 ### native_sim harness (Stages 1-2.5)
 
 Run the harness on native_sim to validate all integrated stages:
