@@ -184,8 +184,24 @@ config ZDB_DEBUG
 
 endmenu
 
-# Reserved for Stage 2 (FlatBuffers + Document module)
-# config ZDB_FLATBUFFERS
-# config ZDB_DOC
+menu "Stage 2 (Experimental)"
+
+config ZDB_FLATBUFFERS
+	bool "Enable FlatBuffers helper APIs"
+	default n
+	depends on ZDB_TS && FLATCC
+	help
+	  Enables Stage 2 bootstrap helpers that export TS samples using
+	  FlatCC runtime primitives. Requires flatcc-zephyr module with
+	  CONFIG_FLATCC enabled.
+
+config ZDB_DOC
+	bool "Enable document model prototypes"
+	default n
+	depends on ZDB_FLATBUFFERS
+	help
+	  Reserved for upcoming document APIs built on top of FlatBuffers.
+
+endmenu
 
 endif # ZEPHYRDB

@@ -12,6 +12,10 @@
 #include <zephyr/fs/fs.h>
 #include <zephyr/sys/byteorder.h>
 #include <zephyr/sys/crc.h>
+
+#if defined(CONFIG_ZDB_FLATBUFFERS) && (CONFIG_ZDB_FLATBUFFERS)
+#include <flatcc/flatcc_builder.h>
+#endif
 #endif
 
 #ifndef CONFIG_ZDB_MAX_KEY_LEN
@@ -1096,6 +1100,96 @@ zdb_status_t zdb_ts_append_batch_i64(zdb_ts_t *ts, const zdb_ts_sample_i64_t *sa
 	}
 
 	return ZDB_OK;
+}
+
+zdb_status_t zdb_ts_sample_i64_export_flatbuffer(const zdb_ts_sample_i64_t *sample,
+						  uint8_t *out_buf,
+						  size_t out_capacity,
+						  size_t *out_len)
+{
+	if (sample == NULL) {
+		return ZDB_ERR_INVAL;
+	}
+
+	if ((out_buf == NULL) && (out_capacity > 0U)) {
+		return ZDB_ERR_INVAL;
+	}
+
+#if defined(CONFIG_ZDB_FLATBUFFERS) && (CONFIG_ZDB_FLATBUFFERS) && \
+	defined(CONFIG_FLATCC) && (CONFIG_FLATCC)
+	struct {
+		uint64_t ts_ms;
+		uint64_t value;
+	} payload;
+	flatcc_builder_t builder;
+	flatcc_builder_ref_t root;
+	flatcc_builder_ref_t buf_ref;
+	void *direct_buf;
+	size_t direct_size = 0U;
+	int rc;
+
+	payload.ts_ms = sys_cpu_to_le64(sample->ts_ms);
+	payload.value = sys_cpu_to_le64((uint64_t)sample->value);
+
+	rc = flatcc_builder_init(&builder);
+	if (rc != 0) {
+		return ZDB_ERR_NOMEM;
+	}
+
+	rc = flatcc_builder_start_buffer(&builder, 0, 0, 0);
+	if (rc != 0) {
+		flatcc_builder_clear(&builder);
+		return ZDB_ERR_IO;
+	}
+
+	root = flatcc_builder_create_struct(&builder, &payload, sizeof(payload), sizeof(uint64_t));
+	if (root == 0) {
+		flatcc_builder_clear(&builder);
+		return ZDB_ERR_NOMEM;
+	}
+
+	buf_ref = flatcc_builder_end_buffer(&builder, root);
+	if (buf_ref == 0) {
+		flatcc_builder_clear(&builder);
+		return ZDB_ERR_IO;
+	}
+
+	direct_buf = flatcc_builder_get_direct_buffer(&builder, &direct_size);
+	if ((direct_buf == NULL) || (direct_size == 0U)) {
+		flatcc_builder_clear(&builder);
+		return ZDB_ERR_IO;
+	}
+
+	if (out_buf == NULL) {
+		if (out_len == NULL) {
+			flatcc_builder_clear(&builder);
+			return ZDB_ERR_INVAL;
+		}
+
+		*out_len = direct_size;
+		flatcc_builder_clear(&builder);
+		return ZDB_OK;
+	}
+
+	if (out_len != NULL) {
+		*out_len = direct_size;
+	}
+	if (out_capacity < direct_size) {
+		flatcc_builder_clear(&builder);
+		return ZDB_ERR_NOMEM;
+	}
+
+	(void)memcpy(out_buf, direct_buf, direct_size);
+	flatcc_builder_clear(&builder);
+	return ZDB_OK;
+#else
+	ARG_UNUSED(out_buf);
+	ARG_UNUSED(out_capacity);
+	if (out_len != NULL) {
+		*out_len = 0U;
+	}
+	return ZDB_ERR_UNSUPPORTED;
+#endif
 }
 
 zdb_status_t zdb_ts_flush_async(zdb_ts_t *ts)
