@@ -196,11 +196,56 @@ config ZDB_FLATBUFFERS
 	  CONFIG_FLATCC enabled.
 
 config ZDB_DOC
-	bool "Enable document model prototypes"
+	bool "Enable document model (Stage 3)"
 	default n
 	depends on ZDB_FLATBUFFERS
 	help
-	  Reserved for upcoming document APIs built on top of FlatBuffers.
+	  Enables semi-structured document APIs built on FlatBuffers.
+	  Supports variable-length strings, nested objects, and dynamic queries
+	  on document properties.
+
+menu "Document Model (Stage 3)"
+	depends on ZDB_DOC
+
+config ZDB_DOC_MAX_FIELD_NAME_LEN
+	int "Max document field name length"
+	range 8 128
+	default 32
+	help
+	  Maximum length for field names in documents (excluding NUL).
+
+config ZDB_DOC_MAX_STRING_LEN
+	int "Max document string field length"
+	range 16 65536
+	default 256
+	help
+	  Maximum size of string-type fields within documents.
+
+config ZDB_DOC_MAX_FIELD_COUNT
+	int "Max fields per document"
+	range 1 256
+	default 32
+	help
+	  Upper bound for number of fields in a single document.
+
+config ZDB_DOC_MAX_NESTED_DEPTH
+	int "Max nesting depth for document objects"
+	range 1 16
+	default 4
+	help
+	  Maximum depth for nested object hierarchies.
+
+config ZDB_DOC_SLAB_BLOCK_SIZE
+	int "Document field slab block size (bytes)"
+	range 64 2048
+	default 256
+
+config ZDB_DOC_SLAB_BLOCK_COUNT
+	int "Document field slab block count"
+	range 1 256
+	default 16
+
+endmenu
 
 endmenu
 
