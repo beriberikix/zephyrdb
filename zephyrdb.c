@@ -1119,7 +1119,7 @@ zdb_status_t zdb_ts_sample_i64_export_flatbuffer(const zdb_ts_sample_i64_t *samp
 	defined(CONFIG_FLATCC) && (CONFIG_FLATCC)
 	struct {
 		uint64_t ts_ms;
-		int64_t value;
+		uint64_t value;
 	} payload;
 	flatcc_builder_t builder;
 	flatcc_builder_ref_t root;
@@ -1128,8 +1128,8 @@ zdb_status_t zdb_ts_sample_i64_export_flatbuffer(const zdb_ts_sample_i64_t *samp
 	size_t direct_size = 0U;
 	int rc;
 
-	payload.ts_ms = sample->ts_ms;
-	payload.value = sample->value;
+	payload.ts_ms = sys_cpu_to_le64(sample->ts_ms);
+	payload.value = sys_cpu_to_le64((uint64_t)sample->value);
 
 	rc = flatcc_builder_init(&builder);
 	if (rc != 0) {
