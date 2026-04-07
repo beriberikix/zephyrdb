@@ -2,7 +2,7 @@
 
 Embedded multi-model database for Zephyr RTOS designed for memory-constrained IoT and embedded systems.
 
-**First-Pass Scope:** Core + KV (NVS-backed) + TS (LittleFS-backed) modules with durability, recovery, and instrumentation.
+**Current Scope:** Core + KV (NVS-backed) + TS (LittleFS-backed) modules with durability, recovery, instrumentation, and Stage 2 FlatBuffers bootstrap helpers.
 
 ## Features
 
@@ -13,6 +13,7 @@ Embedded multi-model database for Zephyr RTOS designed for memory-constrained Io
 - **Observability**: Full stats instrumentation (6 TS-specific counters) with compact telemetry export format
 - **Cooperative scheduling**: Configurable yield points during scans to maintain real-time responsiveness
 - **Kconfig-driven**: Comprehensive configuration for module boundaries, buffer sizing, slab dimensions, and policy
+- **Stage 2 bootstrap**: Optional FlatBuffers export helper for TS samples via FlatCC runtime
 
 ## Quick Start
 
@@ -42,6 +43,10 @@ CONFIG_ZDB_TS=y
 # Diagnostics (optional)
 CONFIG_ZDB_STATS=y
 CONFIG_ZDB_TS_AUTO_RECOVER_ON_OPEN=y
+
+# Stage 2 bootstrap (optional)
+CONFIG_FLATCC=y
+CONFIG_ZDB_FLATBUFFERS=y
 ```
 
 ### 3. Initialize in your app
@@ -125,6 +130,35 @@ if (zdb_ts_stats_export_validate(&export) == ZDB_OK) {
 zdb_ts_stats_reset(&db);
 ```
 
+### 6. Stage 2 FlatBuffers bootstrap
+
+When `flatcc-zephyr` is available in your west workspace and enabled, ZephyrDB
+can export a TS sample as a minimal FlatBuffer payload:
+
+```c
+zdb_ts_sample_i64_t sample = {
+    .ts_ms = k_uptime_get(),
+    .value = 123,
+};
+
+/* Size query pass */
+size_t fb_size = 0;
+zdb_status_t rc = zdb_ts_sample_i64_export_flatbuffer(&sample, NULL, 0, &fb_size);
+
+if (rc == ZDB_OK && fb_size > 0) {
+    uint8_t out[64];
+    size_t out_len = 0;
+    rc = zdb_ts_sample_i64_export_flatbuffer(&sample, out, sizeof(out), &out_len);
+    if (rc == ZDB_OK) {
+        /* out[0..out_len-1] now contains FlatBuffer bytes */
+    }
+}
+```
+
+Notes:
+- If FlatBuffers support is not enabled, the API returns `ZDB_ERR_UNSUPPORTED`.
+- The exported FlatBuffer root is a struct with two fields: `ts_ms` and `value`.
+
 ## Architecture
 
 ### Memory Model
@@ -180,6 +214,7 @@ See `Kconfig.zephyrdb` for all 30+ options:
 | `CONFIG_ZDB_TS_INGEST_BUFFER_BYTES` | 1024 | RAM staging buffer size |
 | `CONFIG_ZDB_LFS_MOUNT_POINT` | "/lfs" | Filesystem mount for TS |
 | `CONFIG_ZDB_SCAN_YIELD_EVERY_N` | 100 | Yield during scans every N records |
+| `CONFIG_ZDB_FLATBUFFERS` | n | Enable Stage 2 FlatBuffers helper APIs |
 
 ## API Reference
 
@@ -205,6 +240,7 @@ See `Kconfig.zephyrdb` for all 30+ options:
 - `zdb_ts_stats_reset(db)` - Reset TS counters
 - `zdb_ts_stats_export(db, out)` - Export stats in compact format with CRC
 - `zdb_ts_stats_export_validate(export)` - Validate exported stats integrity
+- `zdb_ts_sample_i64_export_flatbuffer(sample, out, cap, out_len)` - Export TS sample as FlatBuffer bytes
 
 ### Cursor/Query
 
