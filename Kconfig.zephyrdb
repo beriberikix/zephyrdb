@@ -1,0 +1,191 @@
+# ZephyrDB Kconfig (first pass)
+# Scope: Core + KV + TS modules.
+# Document/FlatBuffers module knobs are intentionally deferred.
+
+menuconfig ZEPHYRDB
+	bool "ZephyrDB embedded multi-model database"
+	depends on FLASH
+	help
+	  Enable ZephyrDB core services for memory-constrained systems.
+	  First pass includes Core, KV (NVS) and TS (LittleFS).
+
+if ZEPHYRDB
+
+config ZDB_CORE
+	bool "Enable ZephyrDB Core"
+	default y
+	help
+	  Enables core engine pieces: storage abstraction hooks,
+	  cursor framework, and slab-based pool interfaces.
+
+config ZDB_KV
+	bool "Enable ZephyrDB KV module"
+	default y
+	depends on ZDB_CORE && NVS
+	help
+	  Enables NVS-backed key-value APIs.
+
+config ZDB_TS
+	bool "Enable ZephyrDB Time-Series module"
+	default y
+	depends on ZDB_CORE && FILE_SYSTEM && LITTLEFS
+	help
+	  Enables LittleFS-backed append-log time-series APIs.
+
+menu "Core Boundaries"
+	depends on ZDB_CORE
+
+config ZDB_MAX_KEY_LEN
+	int "Maximum key length"
+	range 8 128
+	default 48
+	help
+	  Upper bound for user-facing keys (excluding trailing NUL).
+
+config ZDB_MAX_OPEN_CURSORS
+	int "Maximum open cursors"
+	range 1 64
+	default 4
+	help
+	  Limits concurrent iterators across all enabled modules.
+
+config ZDB_SCAN_YIELD_EVERY_N
+	int "Yield after N scan iterations"
+	range 1 4096
+	default 64
+	help
+	  Cooperative scheduling interval for long scans.
+
+config ZDB_CORE_SLAB_BLOCK_SIZE
+	int "Core slab block size (bytes)"
+	range 32 2048
+	default 128
+
+config ZDB_CORE_SLAB_BLOCK_COUNT
+	int "Core slab block count"
+	range 1 256
+	default 16
+
+config ZDB_CURSOR_SLAB_BLOCK_SIZE
+	int "Cursor slab block size (bytes)"
+	range 32 2048
+	default 96
+
+config ZDB_CURSOR_SLAB_BLOCK_COUNT
+	int "Cursor slab block count"
+	range 1 256
+	default 8
+
+endmenu
+
+menu "KV Boundaries"
+	depends on ZDB_KV
+
+config ZDB_KV_NAMESPACE_MAX_LEN
+	int "KV namespace max length"
+	range 8 64
+	default 24
+
+config ZDB_KV_CACHE_ENTRIES
+	int "KV metadata cache entries"
+	range 1 512
+	default 16
+
+config ZDB_KV_IO_SLAB_BLOCK_SIZE
+	int "KV IO slab block size (bytes)"
+	range 16 1024
+	default 128
+
+config ZDB_KV_IO_SLAB_BLOCK_COUNT
+	int "KV IO slab block count"
+	range 1 256
+	default 8
+
+endmenu
+
+menu "TS Boundaries"
+	depends on ZDB_TS
+
+config ZDB_TS_STREAM_NAME_MAX_LEN
+	int "TS stream name max length"
+	range 8 64
+	default 24
+
+config ZDB_TS_INGEST_BUFFER_BYTES
+	int "TS ingest buffer bytes"
+	range 64 16384
+	default 1024
+	help
+	  Upper bound for RAM staging prior to sequential flush.
+
+config ZDB_TS_FLUSH_QUEUE_DEPTH
+	int "TS flush queue depth"
+	range 1 128
+	default 8
+
+config ZDB_TS_MAX_AGG_POINTS
+	int "TS aggregation max points"
+	range 1 1048576
+	default 4096
+
+config ZDB_TS_INGEST_SLAB_BLOCK_SIZE
+	int "TS ingest slab block size (bytes)"
+	range 16 2048
+	default 64
+
+config ZDB_TS_INGEST_SLAB_BLOCK_COUNT
+	int "TS ingest slab block count"
+	range 1 512
+	default 32
+
+config ZDB_TS_AUTO_RECOVER_ON_OPEN
+	bool "Auto recover TS stream on open"
+	default y
+	help
+	  If enabled, zdb_ts_open() scans and truncates trailing corrupt or
+	  partial records automatically.
+
+config ZDB_TS_MAX_RECOVERY_TRUNCATE_BYTES
+	int "Maximum bytes recover may truncate"
+	range 0 1048576
+	default 4096
+	help
+	  Safety cap for automatic recovery truncation. Set to 0 to disable
+	  truncation cap checks.
+
+endmenu
+
+menu "Storage Integration"
+
+config ZDB_USE_DT_CHOSEN_STORAGE
+	bool "Discover storage from zephyr,storage chosen node"
+	default y
+	help
+	  If enabled, ZephyrDB resolves storage layout from the
+	  zephyr,storage chosen node at runtime/init.
+
+config ZDB_LFS_MOUNT_POINT
+	string "LittleFS mount point"
+	default "/lfs"
+	help
+	  Mount path used by TS module for append-log files.
+
+endmenu
+
+menu "Diagnostics"
+
+config ZDB_STATS
+	bool "Enable ZephyrDB statistics counters"
+	default n
+
+config ZDB_DEBUG
+	bool "Enable ZephyrDB debug checks"
+	default n
+
+endmenu
+
+# Reserved for Stage 2 (FlatBuffers + Document module)
+# config ZDB_FLATBUFFERS
+# config ZDB_DOC
+
+endif # ZEPHYRDB
