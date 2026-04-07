@@ -1,8 +1,9 @@
 cmake_minimum_required(VERSION 3.20.0)
 
-# Build as a standalone Zephyr app while consuming ZephyrDB as a local module.
+# Build as a standalone Zephyr app while consuming ZephyrDB through a local
+# module wrapper that points at the repository root Kconfig/CMake.
 list(APPEND EXTRA_ZEPHYR_MODULES
-  ${CMAKE_CURRENT_LIST_DIR}/../..
+  ${CMAKE_CURRENT_LIST_DIR}/modules/zephyrdb-local
 )
 
 # Stage 2 path needs flatcc-zephyr overlay module.

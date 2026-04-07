@@ -4,7 +4,7 @@
 
 menuconfig ZEPHYRDB
 	bool "ZephyrDB embedded multi-model database"
-	depends on FLASH
+	depends on FLASH || BOARD_NATIVE_SIM
 	help
 	  Enable ZephyrDB core services for memory-constrained systems.
 	  First pass includes Core, KV (NVS) and TS (LittleFS).
@@ -28,7 +28,7 @@ config ZDB_KV
 config ZDB_TS
 	bool "Enable ZephyrDB Time-Series module"
 	default y
-	depends on ZDB_CORE && FILE_SYSTEM && LITTLEFS
+	depends on ZDB_CORE && FILE_SYSTEM
 	help
 	  Enables LittleFS-backed append-log time-series APIs.
 

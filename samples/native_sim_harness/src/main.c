@@ -5,7 +5,9 @@
 
 ZDB_DEFINE_CORE_SLAB(g_core_slab);
 ZDB_DEFINE_CURSOR_SLAB(g_cursor_slab);
+#if defined(CONFIG_ZDB_KV) && (CONFIG_ZDB_KV)
 ZDB_DEFINE_KV_IO_SLAB(g_kv_io_slab);
+#endif
 ZDB_DEFINE_TS_INGEST_SLAB(g_ts_ingest_slab);
 
 static zdb_t g_db;
@@ -31,7 +33,11 @@ int main(void)
 
 	g_db.core_slab = &g_core_slab;
 	g_db.cursor_slab = &g_cursor_slab;
+#if defined(CONFIG_ZDB_KV) && (CONFIG_ZDB_KV)
 	g_db.kv_io_slab = &g_kv_io_slab;
+#else
+	g_db.kv_io_slab = NULL;
+#endif
 	g_db.ts_ingest_slab = &g_ts_ingest_slab;
 
 	rc = zdb_init(&g_db, &g_cfg);

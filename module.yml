@@ -4,3 +4,4 @@ description: Embedded multi-model database for Zephyr RTOS with Core, KV (NVS-ba
 type: module
 build:
   cmake: .
+  kconfig: Kconfig

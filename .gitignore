@@ -1,0 +1,17 @@
+# Local Python environment
+.venv/
+
+# West workspace metadata
+.west/
+
+# Zephyr checkout created by `west init` in this repo
+zephyr/
+
+# Build output
+build/
+
+# Editor/OS noise
+.vscode/
+*.swp
+*.swo
+.DS_Store

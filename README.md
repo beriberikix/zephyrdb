@@ -258,15 +258,12 @@ See `Kconfig.zephyrdb` for all 30+ options:
 
 ## Testing
 
-Example code demonstrating initialization, append, recovery, and stats:
+Use the runnable sample app in `samples/native_sim_harness`:
 
 ```bash
-# Run example (must build within Zephyr application)
-west build -b <board> samples/zephyrdb
-west runners <runner>
+west build -p always -s samples/native_sim_harness -b native_sim
+west build -t run
 ```
-
-See `examples/first_pass_init_example.c` for full lifecycle demo and `zephyrdb_recovery_demo()` for corruption/recovery flow.
 
 ### native_sim harness (Stage 2)
 

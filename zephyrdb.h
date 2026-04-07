@@ -138,7 +138,7 @@ typedef struct {
 } zdb_cfg_t;
 
 typedef struct {
-	struct k_rwlock rwlock;
+	struct k_mutex rwlock;
 	struct k_mem_slab *core_slab;
 	struct k_mem_slab *cursor_slab;
 	struct k_mem_slab *kv_io_slab;
