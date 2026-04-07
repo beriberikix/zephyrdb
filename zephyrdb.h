@@ -399,6 +399,15 @@ zdb_status_t zdb_doc_field_get_bytes(const zdb_doc_t *doc, const char *field_nam
 zdb_status_t zdb_doc_query(zdb_t *db, const zdb_doc_query_t *query,
 			    zdb_doc_metadata_t *out_metadata, size_t *out_count);
 
+/**
+ * @brief Free metadata entries returned by zdb_doc_query().
+ *
+ * @param metadata Metadata array to free
+ * @param count Number of entries in metadata array to free
+ * @return ZDB_OK on success, ZDB_ERR_INVAL on invalid input
+ */
+zdb_status_t zdb_doc_metadata_free(zdb_doc_metadata_t *metadata, size_t count);
+
 zdb_status_t zdb_doc_export_flatbuffer(zdb_doc_t *doc, uint8_t *out_buf,
 				       size_t out_capacity, size_t *out_len);
 
