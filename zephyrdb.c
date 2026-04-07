@@ -1744,6 +1744,22 @@ static void *zdb_alloc_copy(const void *src, size_t len)
 	return dst;
 }
 
+static zdb_status_t zdb_fs_read_exact(struct fs_file_t *file, void *buf, size_t len)
+{
+	ssize_t rd;
+
+	rd = fs_read(file, buf, len);
+	if (rd < 0) {
+		return zdb_status_from_errno((int)rd);
+	}
+
+	if (rd != (ssize_t)len) {
+		return ZDB_ERR_CORRUPT;
+	}
+
+	return ZDB_OK;
+}
+
 static char *zdb_strdup_local(const char *s)
 {
 	size_t n;
@@ -1789,7 +1805,6 @@ static zdb_status_t zdb_doc_open_impl(zdb_t *db, const char *collection_name,
 	zdb_status_t lock_rc = ZDB_OK;
 	uint64_t saved_created_ms, saved_updated_ms;
 	int rc = 0;
-	ssize_t rd;
 	size_t i;
 	bool lock_held = false;
 	bool file_open = false;
@@ -1823,9 +1838,8 @@ static zdb_status_t zdb_doc_open_impl(zdb_t *db, const char *collection_name,
 	}
 	file_open = true;
 
-	rd = fs_read(&file, &hdr, sizeof(hdr));
-	if (rd != (ssize_t)sizeof(hdr)) {
-		ret = ZDB_ERR_CORRUPT;
+	ret = zdb_fs_read_exact(&file, &hdr, sizeof(hdr));
+	if (ret != ZDB_OK) {
 		goto cleanup;
 	}
 
@@ -1847,9 +1861,8 @@ static zdb_status_t zdb_doc_open_impl(zdb_t *db, const char *collection_name,
 		uint16_t name_len;
 		zdb_doc_field_type_t type;
 
-		rd = fs_read(&file, &field_hdr, sizeof(field_hdr));
-		if (rd != (ssize_t)sizeof(field_hdr)) {
-			ret = ZDB_ERR_CORRUPT;
+		ret = zdb_fs_read_exact(&file, &field_hdr, sizeof(field_hdr));
+		if (ret != ZDB_OK) {
 			goto cleanup;
 		}
 
@@ -1866,10 +1879,9 @@ static zdb_status_t zdb_doc_open_impl(zdb_t *db, const char *collection_name,
 			goto cleanup;
 		}
 
-		rd = fs_read(&file, name, name_len);
-		if (rd != (ssize_t)name_len) {
+		ret = zdb_fs_read_exact(&file, name, name_len);
+		if (ret != ZDB_OK) {
 			k_free(name);
-			ret = ZDB_ERR_CORRUPT;
 			goto cleanup;
 		}
 		name[name_len] = '\0';
@@ -1878,10 +1890,9 @@ static zdb_status_t zdb_doc_open_impl(zdb_t *db, const char *collection_name,
 		case ZDB_DOC_FIELD_INT64: {
 			uint64_t tmp_le;
 			int64_t tmp;
-			rd = fs_read(&file, &tmp_le, sizeof(tmp_le));
-			if (rd != (ssize_t)sizeof(tmp_le)) {
+			ret = zdb_fs_read_exact(&file, &tmp_le, sizeof(tmp_le));
+			if (ret != ZDB_OK) {
 				k_free(name);
-				ret = ZDB_ERR_CORRUPT;
 				goto cleanup;
 			}
 			tmp = (int64_t)sys_le64_to_cpu(tmp_le);
@@ -1891,10 +1902,9 @@ static zdb_status_t zdb_doc_open_impl(zdb_t *db, const char *collection_name,
 		case ZDB_DOC_FIELD_DOUBLE: {
 			uint64_t tmp_le;
 			double tmp;
-			rd = fs_read(&file, &tmp_le, sizeof(tmp_le));
-			if (rd != (ssize_t)sizeof(tmp_le)) {
+			ret = zdb_fs_read_exact(&file, &tmp_le, sizeof(tmp_le));
+			if (ret != ZDB_OK) {
 				k_free(name);
-				ret = ZDB_ERR_CORRUPT;
 				goto cleanup;
 			}
 			tmp_le = sys_le64_to_cpu(tmp_le);
@@ -1904,10 +1914,9 @@ static zdb_status_t zdb_doc_open_impl(zdb_t *db, const char *collection_name,
 		}
 		case ZDB_DOC_FIELD_BOOL: {
 			uint8_t tmp;
-			rd = fs_read(&file, &tmp, sizeof(tmp));
-			if (rd != (ssize_t)sizeof(tmp)) {
+			ret = zdb_fs_read_exact(&file, &tmp, sizeof(tmp));
+			if (ret != ZDB_OK) {
 				k_free(name);
-				ret = ZDB_ERR_CORRUPT;
 				goto cleanup;
 			}
 			rc = zdb_doc_field_set_bool(out_doc, name, (tmp != 0U));
@@ -1917,10 +1926,9 @@ static zdb_status_t zdb_doc_open_impl(zdb_t *db, const char *collection_name,
 			uint32_t str_len_le;
 			size_t str_len;
 			char *str;
-			rd = fs_read(&file, &str_len_le, sizeof(str_len_le));
-			if (rd != (ssize_t)sizeof(str_len_le)) {
+			ret = zdb_fs_read_exact(&file, &str_len_le, sizeof(str_len_le));
+			if (ret != ZDB_OK) {
 				k_free(name);
-				ret = ZDB_ERR_CORRUPT;
 				goto cleanup;
 			}
 			str_len = sys_le32_to_cpu(str_len_le);
@@ -1935,11 +1943,10 @@ static zdb_status_t zdb_doc_open_impl(zdb_t *db, const char *collection_name,
 				ret = ZDB_ERR_NOMEM;
 				goto cleanup;
 			}
-			rd = fs_read(&file, str, str_len);
-			if (rd != (ssize_t)str_len) {
+			ret = zdb_fs_read_exact(&file, str, str_len);
+			if (ret != ZDB_OK) {
 				k_free(str);
 				k_free(name);
-				ret = ZDB_ERR_CORRUPT;
 				goto cleanup;
 			}
 			str[str_len] = '\0';
@@ -1951,10 +1958,9 @@ static zdb_status_t zdb_doc_open_impl(zdb_t *db, const char *collection_name,
 			uint32_t bytes_len_le;
 			size_t bytes_len;
 			void *buf;
-			rd = fs_read(&file, &bytes_len_le, sizeof(bytes_len_le));
-			if (rd != (ssize_t)sizeof(bytes_len_le)) {
+			ret = zdb_fs_read_exact(&file, &bytes_len_le, sizeof(bytes_len_le));
+			if (ret != ZDB_OK) {
 				k_free(name);
-				ret = ZDB_ERR_CORRUPT;
 				goto cleanup;
 			}
 			bytes_len = sys_le32_to_cpu(bytes_len_le);
@@ -1971,11 +1977,10 @@ static zdb_status_t zdb_doc_open_impl(zdb_t *db, const char *collection_name,
 					ret = ZDB_ERR_NOMEM;
 					goto cleanup;
 				}
-				rd = fs_read(&file, buf, bytes_len);
-				if (rd != (ssize_t)bytes_len) {
+				ret = zdb_fs_read_exact(&file, buf, bytes_len);
+				if (ret != ZDB_OK) {
 					k_free(buf);
 					k_free(name);
-					ret = ZDB_ERR_CORRUPT;
 					goto cleanup;
 				}
 			}
@@ -2284,6 +2289,15 @@ zdb_status_t zdb_doc_create(zdb_t *db, const char *collection_name,
 	if (out_doc->fields == NULL) {
 		k_free((void *)out_doc->collection_name);
 		k_free((void *)out_doc->document_id);
+		out_doc->db = NULL;
+		out_doc->collection_name = NULL;
+		out_doc->document_id = NULL;
+		out_doc->fields = NULL;
+		out_doc->field_count = 0U;
+		out_doc->max_fields = 0U;
+		out_doc->created_ms = 0U;
+		out_doc->updated_ms = 0U;
+		out_doc->valid = false;
 		return ZDB_ERR_NOMEM;
 	}
 
@@ -2641,8 +2655,6 @@ zdb_status_t zdb_doc_field_set_string(zdb_doc_t *doc, const char *field_name,
 		k_free((void *)field->value.str);
 	}
 	field->value.str = dup;
-	field->value.bytes.data = NULL;
-	field->value.bytes.len = 0U;
 	doc->updated_ms = k_uptime_get();
 	return ZDB_OK;
 }
@@ -2815,6 +2827,7 @@ zdb_status_t zdb_doc_query(zdb_t *db, const zdb_doc_query_t *query,
 	size_t capacity;
 	size_t matched = 0U;
 	size_t written = 0U;
+	bool stop_scan = false;
 	uint32_t limit;
 
 	if ((db == NULL) || (query == NULL) || (out_count == NULL)) {
@@ -2851,7 +2864,8 @@ zdb_status_t zdb_doc_query(zdb_t *db, const zdb_doc_query_t *query,
 		return zdb_status_from_errno(rc);
 	}
 
-	while ((matched < limit) && (fs_readdir(&dir_collection, &collection_ent) == 0) &&
+	while (!stop_scan && (matched < limit) &&
+	       (fs_readdir(&dir_collection, &collection_ent) == 0) &&
 	       (collection_ent.name[0] != '\0')) {
 		char collection_path[ZDB_DOC_PATH_MAX];
 
@@ -2871,7 +2885,8 @@ zdb_status_t zdb_doc_query(zdb_t *db, const zdb_doc_query_t *query,
 			continue;
 		}
 
-		while ((matched < limit) && (fs_readdir(&dir_docs, &doc_ent) == 0) &&
+		while (!stop_scan && (matched < limit) &&
+		       (fs_readdir(&dir_docs, &doc_ent) == 0) &&
 		       (doc_ent.name[0] != '\0')) {
 			size_t name_len;
 			char doc_id[CONFIG_ZDB_MAX_KEY_LEN + 1];
@@ -2927,6 +2942,9 @@ zdb_status_t zdb_doc_query(zdb_t *db, const zdb_doc_query_t *query,
 					out_metadata[written].updated_ms = doc.updated_ms;
 					out_metadata[written].field_count = (uint32_t)doc.field_count;
 					written++;
+					if (written >= capacity) {
+						stop_scan = true;
+					}
 				}
 				matched++;
 			}
