@@ -75,6 +75,7 @@ int main(void)
     rc = zdb_doc_query(&g_db, &query, results, &result_count);
     if (rc == ZDB_OK) {
         printk("DOC query helper PASS: matched=%u\n", (unsigned)result_count);
+        zdb_doc_metadata_free(results, result_count);
     } else {
         printk("DOC query helper: query rc=%d\n", (int)rc);
     }

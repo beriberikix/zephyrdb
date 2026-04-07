@@ -61,7 +61,7 @@ int main(void)
 
     rc = zdb_ts_query_aggregate(&stream, window, ZDB_TS_AGG_AVG, &agg);
     if (rc == ZDB_OK) {
-        printk("TS sample PASS: avg=%d points=%u\n", (int)agg.value, agg.points);
+        printk("TS sample PASS: avg=%f points=%u\n", agg.value, agg.points);
     } else {
         printk("TS sample: aggregate query returned rc=%d\n", (int)rc);
     }
