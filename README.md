@@ -268,6 +268,26 @@ west runners <runner>
 
 See `examples/first_pass_init_example.c` for full lifecycle demo and `zephyrdb_recovery_demo()` for corruption/recovery flow.
 
+### native_sim harness (Stage 2)
+
+Run the Stage 2 bootstrap harness on native_sim:
+
+```bash
+west build -p always -s samples/native_sim_harness -b native_sim
+west build -t run
+```
+
+Expected output includes:
+
+```text
+PASS: native_sim harness exported <N> bytes
+```
+
+This harness validates:
+- ZephyrDB init/deinit lifecycle
+- FlatBuffers size-query/export helper (`zdb_ts_sample_i64_export_flatbuffer`)
+- Stage 2 dependency wiring with flatcc-zephyr (`flatccrt` linkage)
+
 ## Build System
 
 Integrates with Zephyr's build system via:
