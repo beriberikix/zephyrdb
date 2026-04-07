@@ -176,7 +176,8 @@ config ZDB_TS_MAX_DISCOVERABLE_STREAMS
 	default 16
 	depends on ZDB_TS_MULTISTREAM
 	help
-	  Limits stream discovery scan depth when enumerating available streams.
+	  Limits the number of streams discovered and returned when
+	  enumerating available streams.
 
 endmenu
 

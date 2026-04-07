@@ -353,7 +353,7 @@ zdb_ts_multistream_deinit(&manager);
 
 Key features:
 - **Concurrent streams**: Open up to `CONFIG_ZDB_TS_MAX_CONCURRENT_STREAMS` streams
-- **Unified operations**: Flush and aggregate across all open streams atomically
+- **Unified operations**: Flush and aggregate across all open streams through a single multistream API
 - **Stream discovery**: Enumerate all `.zts` files and get metadata (size, record count, timestamp bounds)
 - **Backward compatible**: Single-stream API remains unchanged; multistream is opt-in
 

@@ -348,7 +348,8 @@ zdb_ts_t *zdb_ts_multistream_find_stream(zdb_ts_multistream_t *manager,
 /*
  * Flush all managed streams synchronously.
  * Returns ZDB_OK only if all streams flushed successfully.
- * Partial flushing is rolled back automatically on first error.
+ * If an error occurs, any streams flushed before the error remain flushed;
+ * partial flushing is not rolled back automatically.
  */
 zdb_status_t zdb_ts_multistream_flush_sync(zdb_ts_multistream_t *manager,
 					    k_timeout_t timeout);

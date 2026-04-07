@@ -1994,23 +1994,32 @@ static zdb_status_t zdb_ts_get_stream_info(zdb_t *db, const char *stream_name,
 	}
 
 	rd = fs_read(&file, &hdr, sizeof(hdr));
-	if (rd == (ssize_t)sizeof(hdr)) {
-		/* Scan records (limited) */
-		while (rec_count < 1000000U) {
-			rd = fs_read(&file, &rec, sizeof(rec));
-			if (rd != (ssize_t)sizeof(rec)) {
-				break;
-			}
+	if (rd != (ssize_t)sizeof(hdr)) {
+		(void)fs_close(&file);
+		return zdb_status_from_errno(EIO);
+	}
 
-			uint64_t ts_ms = sys_le64_to_cpu(rec.ts_ms_le);
-			if (ts_ms < min_ts) {
-				min_ts = ts_ms;
-			}
-			if (ts_ms > max_ts) {
-				max_ts = ts_ms;
-			}
-			rec_count++;
+	rc = zdb_ts_stream_header_decode(&hdr);
+	if (rc < 0) {
+		(void)fs_close(&file);
+		return zdb_status_from_errno(EIO);
+	}
+
+	/* Scan records (limited) */
+	while (rec_count < 1000000U) {
+		rd = fs_read(&file, &rec, sizeof(rec));
+		if (rd != (ssize_t)sizeof(rec)) {
+			break;
 		}
+
+		uint64_t ts_ms = sys_le64_to_cpu(rec.ts_ms_le);
+		if (ts_ms < min_ts) {
+			min_ts = ts_ms;
+		}
+		if (ts_ms > max_ts) {
+			max_ts = ts_ms;
+		}
+		rec_count++;
 	}
 
 	(void)fs_close(&file);
