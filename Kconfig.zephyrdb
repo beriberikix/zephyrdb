@@ -153,6 +153,32 @@ config ZDB_TS_MAX_RECOVERY_TRUNCATE_BYTES
 	  Safety cap for automatic recovery truncation. Set to 0 to disable
 	  truncation cap checks.
 
+config ZDB_TS_MULTISTREAM
+	bool "Enable multi-stream time-series support (Stage 2.5)"
+	default n
+	depends on ZDB_TS
+	help
+	  If enabled, allows managing multiple independent time-series streams
+	  simultaneously with cross-stream operations (batch flush, unified stats,
+	  aggregation across streams).
+
+config ZDB_TS_MAX_CONCURRENT_STREAMS
+	int "Maximum concurrent TS streams"
+	range 2 32
+	default 8
+	depends on ZDB_TS_MULTISTREAM
+	help
+	  Upper bound for simultaneously open streams in multi-stream mode.
+
+config ZDB_TS_MAX_DISCOVERABLE_STREAMS
+	int "Maximum streams during enumeration"
+	range 1 128
+	default 16
+	depends on ZDB_TS_MULTISTREAM
+	help
+	  Limits the number of streams discovered and returned when
+	  enumerating available streams.
+
 endmenu
 
 menu "Storage Integration"

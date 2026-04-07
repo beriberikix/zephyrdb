@@ -16,6 +16,7 @@ Embedded multi-model database for Zephyr RTOS designed for memory-constrained Io
 - **Cooperative scheduling**: Configurable yield points during scans to maintain real-time responsiveness
 - **Kconfig-driven**: Comprehensive configuration for module boundaries, buffer sizing, slab dimensions, and policy
 - **Stage 2 bootstrap**: Optional FlatBuffers export helper for TS samples via FlatCC runtime
+- **Stage 2.5 multi-stream**: Optional concurrent stream management with unified flush and cross-stream aggregation
 
 ## Quick Start
 
@@ -217,6 +218,9 @@ See `Kconfig.zephyrdb` for all 30+ options:
 | `CONFIG_ZDB_LFS_MOUNT_POINT` | "/lfs" | Filesystem mount for TS |
 | `CONFIG_ZDB_SCAN_YIELD_EVERY_N` | 100 | Yield during scans every N records |
 | `CONFIG_ZDB_FLATBUFFERS` | n | Enable Stage 2 FlatBuffers helper APIs |
+| `CONFIG_ZDB_TS_MULTISTREAM` | n | Enable Stage 2.5 multi-stream support |
+| `CONFIG_ZDB_TS_MAX_CONCURRENT_STREAMS` | 8 | Max simultaneous open streams (multistream mode) |
+| `CONFIG_ZDB_TS_MAX_DISCOVERABLE_STREAMS` | 16 | Max streams during enumeration/discovery |
 
 ## API Reference
 
@@ -244,6 +248,18 @@ See `Kconfig.zephyrdb` for all 30+ options:
 - `zdb_ts_stats_export_validate(export)` - Validate exported stats integrity
 - `zdb_ts_sample_i64_export_flatbuffer(sample, out, cap, out_len)` - Export TS sample as FlatBuffer bytes
 
+### Multi-Stream Management (Stage 2.5, optional)
+
+- `zdb_ts_multistream_init(db, names, count, manager)` - Initialize multi-stream manager
+- `zdb_ts_multistream_deinit(manager)` - Shutdown multi-stream manager
+- `zdb_ts_multistream_count(manager)` - Get active stream count
+- `zdb_ts_multistream_get_stream(manager, idx)` - Get stream by index
+- `zdb_ts_multistream_find_stream(manager, name)` - Find stream by name
+- `zdb_ts_multistream_flush_sync(manager, timeout)` - Coordinate flush across all streams
+- `zdb_ts_multistream_query_aggregate(manager, window, agg, out)` - Aggregate query across all streams
+- `zdb_ts_enum_streams(db, callback, ctx)` - Enumerate discovered streams on disk
+- `zdb_ts_stream_info(db, name, out_info)` - Get stream metadata (size, record count, bounds)
+
 ### Cursor/Query
 
 - `zdb_ts_cursor_open(ts, window, predicate, ctx, cursor)` - Open iterator
@@ -267,9 +283,9 @@ west build -p always -s samples/native_sim_harness -b native_sim
 west build -t run
 ```
 
-### native_sim harness (Stage 2)
+### native_sim harness (Stages 1-2.5)
 
-Run the Stage 2 bootstrap harness on native_sim:
+Run the harness on native_sim to validate all integrated stages:
 
 ```bash
 west build -p always -s samples/native_sim_harness -b native_sim
@@ -283,9 +299,11 @@ PASS: native_sim harness exported <N> bytes
 ```
 
 This harness validates:
-- ZephyrDB init/deinit lifecycle
-- FlatBuffers size-query/export helper (`zdb_ts_sample_i64_export_flatbuffer`)
-- Stage 2 dependency wiring with flatcc-zephyr (`flatccrt` linkage)
+- ZephyrDB init/deinit lifecycle (Core)
+- Single-stream and optional multi-stream management (TS)
+- FlatBuffers size-query/export helper (`zdb_ts_sample_i64_export_flatbuffer`) [Stage 2]
+- Stage 2.5 multi-stream APIs when `CONFIG_ZDB_TS_MULTISTREAM=y`
+- Build integration across all modules
 
 ## Build System
 
@@ -296,20 +314,58 @@ Integrates with Zephyr's build system via:
 
 ## Limitations (First-Pass)
 
-- **Single active stream**: Only one TS stream open at a time (no stream multiplexing yet)
 - **In-memory aggregation**: Aggregates limited by `CONFIG_ZDB_TS_MAX_AGG_POINTS`
 - **Append-log only**: No seeking or in-place updates (intentional for durability)
 - **No compression**: Records stored as-is (future enhancement)
 - **FlatBuffers deferred**: Stage 2 work (Document model, variable-length schemas)
 
-## Future Work (Stage 2+)
+## Stage 2.5: Multi-Stream Support (optional)
 
-- Multi-stream support (multiple active TS streams)
-- FlatBuffers for flexible schema evolution
-- Document model (semi-structured data)
-- Stream compaction (downsampling, aggregation)
-- Encryption at rest
-- Replication/sync protocols
+When enabled with `CONFIG_ZDB_TS_MULTISTREAM=y`, allows managing multiple independent
+time-series streams simultaneously:
+
+```c
+/* Initialize manager with multiple streams */
+const char *stream_names[] = { "temperature", "humidity", "pressure" };
+zdb_ts_multistream_t manager;
+zdb_ts_multistream_init(&db, stream_names, 3, &manager);
+
+/* Append to individual streams */
+zdb_ts_t *temp_stream = zdb_ts_multistream_find_stream(&manager, "temperature");
+zdb_ts_append_i64(temp_stream, &sample);
+
+/* Flush all streams at once */
+zdb_ts_multistream_flush_sync(&manager, K_SECONDS(5));
+
+/* Global aggregate across all streams */
+zdb_ts_agg_result_t global_avg;
+zdb_ts_window_t window = { .from_ts_ms = 1000, .to_ts_ms = 5000 };
+zdb_ts_multistream_query_aggregate(&manager, window, ZDB_TS_AGG_AVG, &global_avg);
+
+/* Enumerate all streams on disk */
+bool enum_callback(const zdb_ts_stream_info_t *info, void *ctx) {
+    printf("Stream: %s, records: %u\n", info->stream_name, info->record_count);
+    return true; /* continue */
+}
+zdb_ts_enum_streams(&db, enum_callback, NULL);
+
+/* Cleanup */
+zdb_ts_multistream_deinit(&manager);
+```
+
+Key features:
+- **Concurrent streams**: Open up to `CONFIG_ZDB_TS_MAX_CONCURRENT_STREAMS` streams
+- **Unified operations**: Flush and aggregate across all open streams through a single multistream API
+- **Stream discovery**: Enumerate all `.zts` files and get metadata (size, record count, timestamp bounds)
+- **Backward compatible**: Single-stream API remains unchanged; multistream is opt-in
+
+## Future Work (Stage 3+)
+
+- **Stage 3**: FlatBuffers for flexible schema evolution + document model (semi-structured data)
+- **Compression**: Stream compaction (downsampling, aggregation of historical data)
+- **Security**: Encryption at rest, per-stream access control
+- **Replication**: Sync protocols for distributed edge deployments
+- **Performance**: Hardware accelerators for aggregation, parallel scan threading
 
 ## License
 

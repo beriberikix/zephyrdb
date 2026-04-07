@@ -1,6 +1,7 @@
 #include "zephyrdb.h"
 
 #include <errno.h>
+#include <float.h>
 #include <stdio.h>
 #include <string.h>
 
