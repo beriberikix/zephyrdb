@@ -1,8 +1,7 @@
 /*
  * ZephyrDB public API (first pass)
  *
- * Scope: Core + KV + TS modules.
- * Document and FlatBuffers APIs are intentionally deferred.
+ * Scope: Core + KV + TS modules + Stage 2 FlatBuffers bootstrap helpers.
  */
 
 #ifndef ZEPHYRDB_H_
@@ -254,6 +253,16 @@ zdb_status_t zdb_ts_close(zdb_ts_t *ts);
 zdb_status_t zdb_ts_append_i64(zdb_ts_t *ts, const zdb_ts_sample_i64_t *sample);
 zdb_status_t zdb_ts_append_batch_i64(zdb_ts_t *ts, const zdb_ts_sample_i64_t *samples,
 			      size_t sample_count);
+
+/*
+ * Export a TS sample as a minimal FlatBuffer (root struct: { ts_ms, value }).
+ * - If out_buf is NULL and out_capacity is 0, out_len receives required size.
+ * - Requires CONFIG_ZDB_FLATBUFFERS=y and CONFIG_FLATCC=y.
+ */
+zdb_status_t zdb_ts_sample_i64_export_flatbuffer(const zdb_ts_sample_i64_t *sample,
+						  uint8_t *out_buf,
+						  size_t out_capacity,
+						  size_t *out_len);
 
 /*
  * Schedules background flush through Zephyr workqueue.
