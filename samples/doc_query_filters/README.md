@@ -14,3 +14,7 @@ Build example:
 west build -p always -s samples/doc_query_filters -b <board_with_filesystem>
 west build -t run
 ```
+
+Notes:
+- Requires filesystem setup at `CONFIG_ZDB_LFS_MOUNT_POINT`.
+- Requires `flatcc-zephyr` module as a sibling workspace repo.

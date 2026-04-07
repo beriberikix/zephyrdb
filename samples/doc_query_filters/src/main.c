@@ -52,8 +52,15 @@ int main(void)
     if (rc == ZDB_OK) {
         (void)zdb_doc_field_set_string(&doc, "name", "Ada");
         (void)zdb_doc_field_set_bool(&doc, "active", true);
-        (void)zdb_doc_save(&doc);
+        rc = zdb_doc_save(&doc);
         (void)zdb_doc_close(&doc);
+        if (rc != ZDB_OK) {
+            printk("DOC query helper: save failed rc=%d\n", (int)rc);
+            printk("DOC query helper: ensure the filesystem is mounted/configured at %s\n",
+                   CONFIG_ZDB_LFS_MOUNT_POINT);
+            (void)zdb_deinit(&g_db);
+            return 1;
+        }
     }
 
     filters[0].field_name = "name";
@@ -74,8 +81,12 @@ int main(void)
 
     rc = zdb_doc_query(&g_db, &query, results, &result_count);
     if (rc == ZDB_OK) {
-        printk("DOC query helper PASS: matched=%u\n", (unsigned)result_count);
-        zdb_doc_metadata_free(results, result_count);
+        if (result_count > 0U) {
+            printk("DOC query helper PASS: matched=%u\n", (unsigned)result_count);
+            zdb_doc_metadata_free(results, result_count);
+        } else {
+            printk("DOC query helper: query returned 0 matches; document storage may be empty or unavailable\n");
+        }
     } else {
         printk("DOC query helper: query rc=%d\n", (int)rc);
     }
