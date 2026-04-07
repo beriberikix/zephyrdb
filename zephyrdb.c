@@ -1,6 +1,7 @@
 #include "zephyrdb.h"
 
 #include <errno.h>
+#include <float.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -106,24 +107,24 @@ static bool zdb_key_valid(const char *key)
 
 static zdb_status_t zdb_lock_read(zdb_t *db)
 {
-	int rc = k_mutex_lock(&db->rwlock, K_FOREVER);
+	int rc = k_mutex_lock(&db->lock, K_FOREVER);
 	return (rc == 0) ? ZDB_OK : ZDB_ERR_BUSY;
 }
 
 static zdb_status_t zdb_lock_write(zdb_t *db)
 {
-	int rc = k_mutex_lock(&db->rwlock, K_FOREVER);
+	int rc = k_mutex_lock(&db->lock, K_FOREVER);
 	return (rc == 0) ? ZDB_OK : ZDB_ERR_BUSY;
 }
 
 static void zdb_unlock_read(zdb_t *db)
 {
-	k_mutex_unlock(&db->rwlock);
+	k_mutex_unlock(&db->lock);
 }
 
 static void zdb_unlock_write(zdb_t *db)
 {
-	k_mutex_unlock(&db->rwlock);
+	k_mutex_unlock(&db->lock);
 }
 
 #if defined(CONFIG_ZDB_TS) && (CONFIG_ZDB_TS)
@@ -606,7 +607,7 @@ zdb_status_t zdb_init(zdb_t *db, const zdb_cfg_t *cfg)
 		return ZDB_ERR_INVAL;
 	}
 
-	k_mutex_init(&db->rwlock);
+	k_mutex_init(&db->lock);
 	db->cfg = cfg;
 	db->core_ctx = NULL;
 	db->kv_ctx = NULL;
@@ -1697,4 +1698,418 @@ zdb_status_t zdb_ts_recover_stream(zdb_ts_t *ts, size_t *out_truncated_bytes)
 	(void)fs_close(&file);
 	return ZDB_OK;
 }
+
+/*
+ * Stage 2.5: Multi-stream implementation
+ */
+#if defined(CONFIG_ZDB_TS_MULTISTREAM) && (CONFIG_ZDB_TS_MULTISTREAM)
+
+zdb_status_t zdb_ts_multistream_init(zdb_t *db, const char *const *stream_names,
+				      size_t stream_count,
+				      zdb_ts_multistream_t *out_manager)
+{
+	zdb_ts_t *streams;
+	size_t i;
+	zdb_status_t rc;
+	struct zdb_ts_core_ctx *ctx;
+
+	if ((db == NULL) || (stream_names == NULL) || (out_manager == NULL)) {
+		return ZDB_ERR_INVAL;
+	}
+
+	if ((stream_count == 0) || (stream_count > (size_t)CONFIG_ZDB_TS_MAX_CONCURRENT_STREAMS)) {
+		return ZDB_ERR_INVAL;
+	}
+
+	ctx = zdb_ts_ctx_get_or_alloc(db);
+	if (ctx == NULL) {
+		return ZDB_ERR_NOMEM;
+	}
+
+	/* Ensure no active single-stream is open */
+	if (ctx->active_stream != NULL) {
+		return ZDB_ERR_BUSY;
+	}
+
+	/* Allocate stream array */
+	streams = k_malloc(stream_count * sizeof(zdb_ts_t));
+	if (streams == NULL) {
+		return ZDB_ERR_NOMEM;
+	}
+
+	/* Open each stream */
+	for (i = 0; i < stream_count; i++) {
+		rc = zdb_ts_open(db, stream_names[i], &streams[i]);
+		if (rc != ZDB_OK) {
+			/* Cleanup already-opened streams */
+			for (size_t j = 0; j < i; j++) {
+				(void)zdb_ts_close(&streams[j]);
+			}
+			k_free(streams);
+			return rc;
+		}
+	}
+
+	out_manager->db = db;
+	out_manager->streams = streams;
+	out_manager->stream_count = stream_count;
+	out_manager->max_streams = stream_count;
+
+	return ZDB_OK;
+}
+
+zdb_status_t zdb_ts_multistream_deinit(zdb_ts_multistream_t *manager)
+{
+	size_t i;
+
+	if (manager == NULL) {
+		return ZDB_ERR_INVAL;
+	}
+
+	if (manager->streams != NULL) {
+		for (i = 0; i < manager->stream_count; i++) {
+			(void)zdb_ts_close(&manager->streams[i]);
+		}
+		k_free(manager->streams);
+	}
+
+	manager->db = NULL;
+	manager->streams = NULL;
+	manager->stream_count = 0;
+	manager->max_streams = 0;
+
+	return ZDB_OK;
+}
+
+size_t zdb_ts_multistream_count(const zdb_ts_multistream_t *manager)
+{
+	if (manager == NULL) {
+		return 0;
+	}
+	return manager->stream_count;
+}
+
+zdb_ts_t *zdb_ts_multistream_get_stream(zdb_ts_multistream_t *manager, size_t index)
+{
+	if ((manager == NULL) || (index >= manager->stream_count)) {
+		return NULL;
+	}
+	return &manager->streams[index];
+}
+
+zdb_ts_t *zdb_ts_multistream_find_stream(zdb_ts_multistream_t *manager,
+					  const char *stream_name)
+{
+	size_t i;
+
+	if ((manager == NULL) || (stream_name == NULL)) {
+		return NULL;
+	}
+
+	for (i = 0; i < manager->stream_count; i++) {
+		if (strcmp(manager->streams[i].stream_name, stream_name) == 0) {
+			return &manager->streams[i];
+		}
+	}
+
+	return NULL;
+}
+
+zdb_status_t zdb_ts_multistream_flush_sync(zdb_ts_multistream_t *manager,
+					    k_timeout_t timeout)
+{
+	size_t i;
+	zdb_status_t rc;
+	int64_t deadline;
+	int64_t remaining_ms;
+
+	if (manager == NULL) {
+		return ZDB_ERR_INVAL;
+	}
+
+	if (K_TIMEOUT_EQ(timeout, K_NO_WAIT)) {
+		/* Check all streams without waiting */
+		for (i = 0; i < manager->stream_count; i++) {
+			rc = zdb_ts_flush_sync(&manager->streams[i], K_NO_WAIT);
+			if (rc != ZDB_OK) {
+				return rc;
+			}
+		}
+		return ZDB_OK;
+	}
+
+	if (K_TIMEOUT_EQ(timeout, K_FOREVER)) {
+		/* Flush all with no deadline */
+		for (i = 0; i < manager->stream_count; i++) {
+			rc = zdb_ts_flush_sync(&manager->streams[i], K_FOREVER);
+			if (rc != ZDB_OK) {
+				return rc;
+			}
+		}
+		return ZDB_OK;
+	}
+
+	/* Flush all with remaining timeout */
+	deadline = k_uptime_get() + k_ticks_to_ms_floor64(timeout.ticks);
+	for (i = 0; i < manager->stream_count; i++) {
+		remaining_ms = deadline - k_uptime_get();
+		if (remaining_ms <= 0) {
+			return ZDB_ERR_TIMEOUT;
+		}
+
+		rc = zdb_ts_flush_sync(&manager->streams[i],
+				       K_MSEC((uint32_t)remaining_ms));
+		if (rc != ZDB_OK) {
+			return rc;
+		}
+	}
+
+	return ZDB_OK;
+}
+
+zdb_status_t zdb_ts_multistream_query_aggregate(zdb_ts_multistream_t *manager,
+						 zdb_ts_window_t window,
+						 zdb_ts_agg_t agg,
+						 zdb_ts_agg_result_t *out_result)
+{
+	size_t i;
+	zdb_status_t rc;
+	zdb_ts_agg_result_t stream_result;
+	uint32_t total_points = 0U;
+	double acc = 0.0;
+	double min_val = DBL_MAX;
+	double max_val = -DBL_MAX;
+
+	if ((manager == NULL) || (out_result == NULL)) {
+		return ZDB_ERR_INVAL;
+	}
+
+	if (manager->stream_count == 0) {
+		out_result->agg = agg;
+		out_result->value = 0.0;
+		out_result->points = 0U;
+		return ZDB_OK;
+	}
+
+	/* Query each stream and aggregate results */
+	for (i = 0; i < manager->stream_count; i++) {
+		rc = zdb_ts_query_aggregate(&manager->streams[i], window, agg,
+					    &stream_result);
+		if (rc != ZDB_OK) {
+			return rc;
+		}
+
+		total_points += stream_result.points;
+
+		switch (agg) {
+		case ZDB_TS_AGG_SUM:
+			acc += stream_result.value;
+			break;
+		case ZDB_TS_AGG_AVG:
+			acc += stream_result.value * stream_result.points;
+			break;
+		case ZDB_TS_AGG_COUNT:
+			acc += stream_result.value;
+			break;
+		case ZDB_TS_AGG_MIN:
+			if (stream_result.value < min_val) {
+				min_val = stream_result.value;
+			}
+			break;
+		case ZDB_TS_AGG_MAX:
+			if (stream_result.value > max_val) {
+				max_val = stream_result.value;
+			}
+			break;
+		default:
+			return ZDB_ERR_INVAL;
+		}
+	}
+
+	out_result->agg = agg;
+	out_result->points = total_points;
+
+	switch (agg) {
+	case ZDB_TS_AGG_SUM:
+	case ZDB_TS_AGG_COUNT:
+		out_result->value = acc;
+		break;
+	case ZDB_TS_AGG_AVG:
+		out_result->value = (total_points > 0) ? (acc / total_points) : 0.0;
+		break;
+	case ZDB_TS_AGG_MIN:
+		out_result->value = (min_val == DBL_MAX) ? 0.0 : min_val;
+		break;
+	case ZDB_TS_AGG_MAX:
+		out_result->value = (max_val == -DBL_MAX) ? 0.0 : max_val;
+		break;
+	default:
+		return ZDB_ERR_INVAL;
+	}
+
+	return ZDB_OK;
+}
+
+/*
+ * Stream discovery helpers
+ */
+static zdb_status_t zdb_ts_get_stream_info(zdb_t *db, const char *stream_name,
+					    zdb_ts_stream_info_t *out_info)
+{
+	struct fs_file_t file;
+	struct fs_dirent dirent;
+	char path[ZDB_TS_PATH_MAX];
+	struct zdb_ts_stream_header hdr;
+	struct zdb_ts_record_i64 rec;
+	ssize_t rd;
+	int rc;
+	uint32_t rec_count = 0U;
+	uint64_t min_ts = UINT64_MAX;
+	uint64_t max_ts = 0U;
+
+	if ((db == NULL) || (stream_name == NULL) || (out_info == NULL)) {
+		return ZDB_ERR_INVAL;
+	}
+
+	rc = zdb_ts_build_path(db->cfg, stream_name, path, sizeof(path));
+	if (rc < 0) {
+		return zdb_status_from_errno(rc);
+	}
+
+	fs_file_t_init(&file);
+	rc = fs_stat(path, &dirent);
+	if (rc < 0) {
+		return zdb_status_from_errno(rc);
+	}
+
+	/* Copy to output */
+	strncpy(out_info->stream_name, stream_name, CONFIG_ZDB_TS_STREAM_NAME_MAX_LEN);
+	out_info->stream_name[CONFIG_ZDB_TS_STREAM_NAME_MAX_LEN] = '\0';
+	out_info->file_size = dirent.size;
+
+	/* Read header and scan for bounds */
+	rc = fs_open(&file, path, FS_O_READ);
+	if (rc < 0) {
+		return zdb_status_from_errno(rc);
+	}
+
+	rd = fs_read(&file, &hdr, sizeof(hdr));
+	if (rd != (ssize_t)sizeof(hdr)) {
+		(void)fs_close(&file);
+		return zdb_status_from_errno(EIO);
+	}
+
+	rc = zdb_ts_stream_header_decode(&hdr);
+	if (rc < 0) {
+		(void)fs_close(&file);
+		return zdb_status_from_errno(EIO);
+	}
+
+	/* Scan records (limited) */
+	while (rec_count < 1000000U) {
+		rd = fs_read(&file, &rec, sizeof(rec));
+		if (rd != (ssize_t)sizeof(rec)) {
+			break;
+		}
+
+		uint64_t ts_ms = sys_le64_to_cpu(rec.ts_ms_le);
+		if (ts_ms < min_ts) {
+			min_ts = ts_ms;
+		}
+		if (ts_ms > max_ts) {
+			max_ts = ts_ms;
+		}
+		rec_count++;
+	}
+
+	(void)fs_close(&file);
+
+	out_info->record_count = rec_count;
+	out_info->min_ts_ms = (min_ts == UINT64_MAX) ? 0U : min_ts;
+	out_info->max_ts_ms = max_ts;
+
+	return ZDB_OK;
+}
+
+zdb_status_t zdb_ts_enum_streams(zdb_t *db, zdb_ts_enum_stream_fn callback,
+				  void *callback_ctx)
+{
+	struct fs_dir_t dir;
+	struct fs_dirent dirent;
+	zdb_ts_stream_info_t info;
+	zdb_status_t rc;
+	int fs_rc;
+	uint32_t stream_count = 0U;
+	const char *mount_point;
+	const char *filename;
+	size_t name_len;
+
+	if ((db == NULL) || (db->cfg == NULL) || (callback == NULL)) {
+		return ZDB_ERR_INVAL;
+	}
+
+	mount_point = db->cfg->lfs_mount_point;
+	if (mount_point == NULL) {
+		return ZDB_ERR_INVAL;
+	}
+
+	fs_dir_t_init(&dir);
+	fs_rc = fs_opendir(&dir, mount_point);
+	if (fs_rc < 0) {
+		return zdb_status_from_errno(fs_rc);
+	}
+
+	while (stream_count < (uint32_t)CONFIG_ZDB_TS_MAX_DISCOVERABLE_STREAMS) {
+		fs_rc = fs_readdir(&dir, &dirent);
+		if (fs_rc < 0) {
+			(void)fs_closedir(&dir);
+			return zdb_status_from_errno(fs_rc);
+		}
+
+		if (dirent.name[0] == '\0') {
+			/* End of directory */
+			break;
+		}
+
+		if (dirent.type != FS_DIR_ENTRY_FILE) {
+			continue;
+		}
+
+		/* Check if filename ends with .zts */
+		filename = dirent.name;
+		name_len = strlen(filename);
+		if ((name_len > 4) && (strcmp(&filename[name_len - 4], ".zts") == 0)) {
+			/* Extract stream name (without .zts suffix) */
+			char stream_name[CONFIG_ZDB_TS_STREAM_NAME_MAX_LEN + 1];
+			size_t sn_len = name_len - 4;
+			if (sn_len > CONFIG_ZDB_TS_STREAM_NAME_MAX_LEN) {
+				sn_len = CONFIG_ZDB_TS_STREAM_NAME_MAX_LEN;
+			}
+			strncpy(stream_name, filename, sn_len);
+			stream_name[sn_len] = '\0';
+
+			/* Get stream info */
+			rc = zdb_ts_get_stream_info(db, stream_name, &info);
+			if (rc == ZDB_OK) {
+				if (!callback(&info, callback_ctx)) {
+					/* Caller requested early exit */
+					break;
+				}
+				stream_count++;
+			}
+		}
+	}
+
+	(void)fs_closedir(&dir);
+	return ZDB_OK;
+}
+
+zdb_status_t zdb_ts_stream_info(zdb_t *db, const char *stream_name,
+				 zdb_ts_stream_info_t *out_info)
+{
+	return zdb_ts_get_stream_info(db, stream_name, out_info);
+}
+
+#endif /* CONFIG_ZDB_TS_MULTISTREAM */
+
 #endif /* CONFIG_ZDB_TS */

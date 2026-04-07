@@ -283,6 +283,105 @@ zdb_status_t zdb_ts_cursor_open(zdb_ts_t *ts, zdb_ts_window_t window,
 			zdb_predicate_fn predicate, void *predicate_ctx,
 			zdb_cursor_t *out_cursor);
 zdb_status_t zdb_cursor_next(zdb_cursor_t *cursor, zdb_bytes_t *out_record);
+
+/*
+ * Stage 2.5: Multi-stream support
+ *
+ * Enables concurrent management of multiple independent time-series streams
+ * with unified operations (batch flush, cross-stream aggregation, discovery).
+ */
+#if defined(CONFIG_ZDB_TS_MULTISTREAM) && (CONFIG_ZDB_TS_MULTISTREAM)
+
+typedef struct {
+	char stream_name[CONFIG_ZDB_TS_STREAM_NAME_MAX_LEN + 1];
+	size_t file_size;
+	uint32_t record_count;
+	uint64_t min_ts_ms;
+	uint64_t max_ts_ms;
+} zdb_ts_stream_info_t;
+
+typedef struct zdb_ts_multistream {
+	zdb_t *db;
+	zdb_ts_t *streams;
+	size_t stream_count;
+	size_t max_streams;
+} zdb_ts_multistream_t;
+
+/*
+ * Callback for stream enumeration (discovery).
+ * Return true to continue iteration, false to stop.
+ */
+typedef bool (*zdb_ts_enum_stream_fn)(const zdb_ts_stream_info_t *info, void *user_ctx);
+
+/*
+ * Initialize a multi-stream manager with an array of stream names.
+ * All streams are opened and cached in the manager.
+ * Returns ZDB_ERR_BUSY if any stream name overlaps with an active single-stream handle.
+ */
+zdb_status_t zdb_ts_multistream_init(zdb_t *db, const char *const *stream_names,
+				      size_t stream_count,
+				      zdb_ts_multistream_t *out_manager);
+
+/*
+ * Close all streams managed by this multistream handle and free resources.
+ */
+zdb_status_t zdb_ts_multistream_deinit(zdb_ts_multistream_t *manager);
+
+/*
+ * Get the number of active streams in this manager.
+ */
+size_t zdb_ts_multistream_count(const zdb_ts_multistream_t *manager);
+
+/*
+ * Get stream by index (0 to count-1).
+ * Returns NULL if index is out of bounds.
+ */
+zdb_ts_t *zdb_ts_multistream_get_stream(zdb_ts_multistream_t *manager, size_t index);
+
+/*
+ * Find and return a stream by name.
+ * Returns NULL if not found in this manager.
+ */
+zdb_ts_t *zdb_ts_multistream_find_stream(zdb_ts_multistream_t *manager,
+					  const char *stream_name);
+
+/*
+ * Flush all managed streams synchronously.
+ * Returns ZDB_OK only if all streams flushed successfully.
+ * If an error occurs, any streams flushed before the error remain flushed;
+ * partial flushing is not rolled back automatically.
+ */
+zdb_status_t zdb_ts_multistream_flush_sync(zdb_ts_multistream_t *manager,
+					    k_timeout_t timeout);
+
+/*
+ * Query aggregation across all streams in the manager.
+ * Results sum/count across individual stream results.
+ * For MIN/MAX, returns the global min/max across all streams.
+ * Requires all streams to have time windows overlapping [window.from_ts_ms, window.to_ts_ms].
+ */
+zdb_status_t zdb_ts_multistream_query_aggregate(zdb_ts_multistream_t *manager,
+						 zdb_ts_window_t window,
+						 zdb_ts_agg_t agg,
+						 zdb_ts_agg_result_t *out_result);
+
+/*
+ * Enumerate all discovered streams on disk (LittleFS mount).
+ * Calls callback for each stream file found, up to CONFIG_ZDB_TS_MAX_DISCOVERABLE_STREAMS.
+ * Stream discovery is not limited to currently open streams.
+ */
+zdb_status_t zdb_ts_enum_streams(zdb_t *db, zdb_ts_enum_stream_fn callback,
+				  void *callback_ctx);
+
+/*
+ * Query metadata for a single stream (file size, record count, timestamp range).
+ * Returns ZDB_ERR_NOT_FOUND if the stream file doesn't exist.
+ */
+zdb_status_t zdb_ts_stream_info(zdb_t *db, const char *stream_name,
+				 zdb_ts_stream_info_t *out_info);
+
+#endif /* CONFIG_ZDB_TS_MULTISTREAM */
+
 #endif /* CONFIG_ZDB_TS */
 
 #ifdef __cplusplus
