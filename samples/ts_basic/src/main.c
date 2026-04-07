@@ -56,8 +56,21 @@ int main(void)
         return 0;
     }
 
-    (void)zdb_ts_append_i64(&stream, &sample);
-    (void)zdb_ts_flush_sync(&stream, K_SECONDS(2));
+    rc = zdb_ts_append_i64(&stream, &sample);
+    if (rc != ZDB_OK) {
+        printk("TS sample: append failed rc=%d\n", (int)rc);
+        (void)zdb_ts_close(&stream);
+        (void)zdb_deinit(&g_db);
+        return 1;
+    }
+
+    rc = zdb_ts_flush_sync(&stream, K_SECONDS(2));
+    if (rc != ZDB_OK) {
+        printk("TS sample: flush failed rc=%d\n", (int)rc);
+        (void)zdb_ts_close(&stream);
+        (void)zdb_deinit(&g_db);
+        return 1;
+    }
 
     rc = zdb_ts_query_aggregate(&stream, window, ZDB_TS_AGG_AVG, &agg);
     if (rc == ZDB_OK) {

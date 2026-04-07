@@ -4,15 +4,16 @@ cmake_minimum_required(VERSION 3.20.0)
 # module wrapper that points at the repository root Kconfig/CMake.
 set(ZEPHYRDB_LOCAL_MODULE_DIR ${CMAKE_CURRENT_LIST_DIR}/modules/zephyrdb-local)
 set(ZEPHYRDB_REPO_MODULE_DIR ${CMAKE_CURRENT_LIST_DIR}/../..)
-if(EXISTS ${ZEPHYRDB_LOCAL_MODULE_DIR}/zephyr/module.yml)
+if(EXISTS ${ZEPHYRDB_LOCAL_MODULE_DIR}/zephyr/module.yml OR
+   EXISTS ${ZEPHYRDB_LOCAL_MODULE_DIR}/module.yml)
   list(APPEND EXTRA_ZEPHYR_MODULES ${ZEPHYRDB_LOCAL_MODULE_DIR})
-elseif(EXISTS ${ZEPHYRDB_REPO_MODULE_DIR}/zephyr/module.yml)
+elseif(EXISTS ${ZEPHYRDB_REPO_MODULE_DIR}/zephyr/module.yml OR
+       EXISTS ${ZEPHYRDB_REPO_MODULE_DIR}/module.yml)
   list(APPEND EXTRA_ZEPHYR_MODULES ${ZEPHYRDB_REPO_MODULE_DIR})
 else()
   message(FATAL_ERROR
-    "native_sim_harness: zephyrdb module not found. Expected one of: "
-    "${ZEPHYRDB_LOCAL_MODULE_DIR}/zephyr/module.yml or "
-    "${ZEPHYRDB_REPO_MODULE_DIR}/zephyr/module.yml")
+    "native_sim_harness: zephyrdb module not found. Expected module.yml (or zephyr/module.yml) in one of: "
+    "${ZEPHYRDB_LOCAL_MODULE_DIR} or ${ZEPHYRDB_REPO_MODULE_DIR}")
 endif()
 
 # Stage 2 path needs flatcc-zephyr overlay module.

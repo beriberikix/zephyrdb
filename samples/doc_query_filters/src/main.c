@@ -61,6 +61,10 @@ int main(void)
             (void)zdb_deinit(&g_db);
             return 1;
         }
+    } else {
+        printk("DOC query helper: seed create failed rc=%d\n", (int)rc);
+        (void)zdb_deinit(&g_db);
+        return 1;
     }
 
     filters[0].field_name = "name";
