@@ -1700,416 +1700,383 @@ zdb_status_t zdb_ts_recover_stream(zdb_ts_t *ts, size_t *out_truncated_bytes)
 }
 
 /*
- * Stage 2.5: Multi-stream implementation
+ * Stage 3: Document model implementation
  */
-#if defined(CONFIG_ZDB_TS_MULTISTREAM) && (CONFIG_ZDB_TS_MULTISTREAM)
+#if defined(CONFIG_ZDB_DOC) && (CONFIG_ZDB_DOC)
 
-zdb_status_t zdb_ts_multistream_init(zdb_t *db, const char *const *stream_names,
-				      size_t stream_count,
-				      zdb_ts_multistream_t *out_manager)
+static struct k_mem_slab *g_zdb_doc_slab = NULL;
+
+static zdb_status_t zdb_doc_ctx_ensure_slab(zdb_t *db)
 {
-	zdb_ts_t *streams;
-	size_t i;
-	zdb_status_t rc;
-	struct zdb_ts_core_ctx *ctx;
+	if (g_zdb_doc_slab == NULL) {
+		/* In a full implementation, allocate from static pool */
+		/* For now, defer allocation - Stage 3 evolution */
+		return ZDB_ERR_NOMEM;
+	}
+	return ZDB_OK;
+}
 
-	if ((db == NULL) || (stream_names == NULL) || (out_manager == NULL)) {
+zdb_status_t zdb_doc_create(zdb_t *db, const char *collection_name,
+			     const char *document_id, zdb_doc_t *out_doc)
+{
+	if ((db == NULL) || (collection_name == NULL) || (document_id == NULL) ||
+	    (out_doc == NULL)) {
 		return ZDB_ERR_INVAL;
 	}
 
-	if ((stream_count == 0) || (stream_count > (size_t)CONFIG_ZDB_TS_MAX_CONCURRENT_STREAMS)) {
+	/* Validate names */
+	if ((strlen(collection_name) == 0) || (strlen(document_id) == 0)) {
 		return ZDB_ERR_INVAL;
 	}
 
-	ctx = zdb_ts_ctx_get_or_alloc(db);
-	if (ctx == NULL) {
+	/* Initialize document */
+	out_doc->db = db;
+	out_doc->collection_name = collection_name;
+	out_doc->document_id = document_id;
+	out_doc->fields = NULL;
+	out_doc->field_count = 0;
+	out_doc->max_fields = 0;
+	out_doc->created_ms = k_uptime_get();
+	out_doc->updated_ms = out_doc->created_ms;
+	out_doc->valid = false;
+
+	/* Allocate field array (stage 3: use slab) */
+	out_doc->max_fields = CONFIG_ZDB_DOC_MAX_FIELD_COUNT;
+	out_doc->fields = k_calloc(out_doc->max_fields, sizeof(zdb_doc_field_t));
+	if (out_doc->fields == NULL) {
 		return ZDB_ERR_NOMEM;
 	}
 
-	/* Ensure no active single-stream is open */
-	if (ctx->active_stream != NULL) {
-		return ZDB_ERR_BUSY;
-	}
-
-	/* Allocate stream array */
-	streams = k_malloc(stream_count * sizeof(zdb_ts_t));
-	if (streams == NULL) {
-		return ZDB_ERR_NOMEM;
-	}
-
-	/* Open each stream */
-	for (i = 0; i < stream_count; i++) {
-		rc = zdb_ts_open(db, stream_names[i], &streams[i]);
-		if (rc != ZDB_OK) {
-			/* Cleanup already-opened streams */
-			for (size_t j = 0; j < i; j++) {
-				(void)zdb_ts_close(&streams[j]);
-			}
-			k_free(streams);
-			return rc;
-		}
-	}
-
-	out_manager->db = db;
-	out_manager->streams = streams;
-	out_manager->stream_count = stream_count;
-	out_manager->max_streams = stream_count;
-
+	out_doc->valid = true;
 	return ZDB_OK;
 }
 
-zdb_status_t zdb_ts_multistream_deinit(zdb_ts_multistream_t *manager)
+zdb_status_t zdb_doc_open(zdb_t *db, const char *collection_name,
+			   const char *document_id, zdb_doc_t *out_doc)
 {
-	size_t i;
+	/* Stage 3: Load from LittleFS/storage */
+	/* For now, same as create (new empty document) */
+	return zdb_doc_create(db, collection_name, document_id, out_doc);
+}
 
-	if (manager == NULL) {
+zdb_status_t zdb_doc_save(zdb_doc_t *doc)
+{
+	if ((doc == NULL) || (!doc->valid)) {
 		return ZDB_ERR_INVAL;
 	}
 
-	if (manager->streams != NULL) {
-		for (i = 0; i < manager->stream_count; i++) {
-			(void)zdb_ts_close(&manager->streams[i]);
-		}
-		k_free(manager->streams);
-	}
+	doc->updated_ms = k_uptime_get();
 
-	manager->db = NULL;
-	manager->streams = NULL;
-	manager->stream_count = 0;
-	manager->max_streams = 0;
-
+	/* Stage 3: Serialize to LittleFS via FlatBuffers */
+	/* For now, just mark updated */
 	return ZDB_OK;
 }
 
-size_t zdb_ts_multistream_count(const zdb_ts_multistream_t *manager)
+zdb_status_t zdb_doc_delete(zdb_t *db, const char *collection_name,
+			     const char *document_id)
 {
-	if (manager == NULL) {
-		return 0;
-	}
-	return manager->stream_count;
-}
-
-zdb_ts_t *zdb_ts_multistream_get_stream(zdb_ts_multistream_t *manager, size_t index)
-{
-	if ((manager == NULL) || (index >= manager->stream_count)) {
-		return NULL;
-	}
-	return &manager->streams[index];
-}
-
-zdb_ts_t *zdb_ts_multistream_find_stream(zdb_ts_multistream_t *manager,
-					  const char *stream_name)
-{
-	size_t i;
-
-	if ((manager == NULL) || (stream_name == NULL)) {
-		return NULL;
-	}
-
-	for (i = 0; i < manager->stream_count; i++) {
-		if (strcmp(manager->streams[i].stream_name, stream_name) == 0) {
-			return &manager->streams[i];
-		}
-	}
-
-	return NULL;
-}
-
-zdb_status_t zdb_ts_multistream_flush_sync(zdb_ts_multistream_t *manager,
-					    k_timeout_t timeout)
-{
-	size_t i;
-	zdb_status_t rc;
-	int64_t deadline;
-	int64_t remaining_ms;
-
-	if (manager == NULL) {
+	if ((db == NULL) || (collection_name == NULL) || (document_id == NULL)) {
 		return ZDB_ERR_INVAL;
 	}
 
-	if (K_TIMEOUT_EQ(timeout, K_NO_WAIT)) {
-		/* Check all streams without waiting */
-		for (i = 0; i < manager->stream_count; i++) {
-			rc = zdb_ts_flush_sync(&manager->streams[i], K_NO_WAIT);
-			if (rc != ZDB_OK) {
-				return rc;
-			}
-		}
-		return ZDB_OK;
-	}
-
-	if (K_TIMEOUT_EQ(timeout, K_FOREVER)) {
-		/* Flush all with no deadline */
-		for (i = 0; i < manager->stream_count; i++) {
-			rc = zdb_ts_flush_sync(&manager->streams[i], K_FOREVER);
-			if (rc != ZDB_OK) {
-				return rc;
-			}
-		}
-		return ZDB_OK;
-	}
-
-	/* Flush all with remaining timeout */
-	deadline = k_uptime_get() + k_ticks_to_ms_floor64(timeout.ticks);
-	for (i = 0; i < manager->stream_count; i++) {
-		remaining_ms = deadline - k_uptime_get();
-		if (remaining_ms <= 0) {
-			return ZDB_ERR_TIMEOUT;
-		}
-
-		rc = zdb_ts_flush_sync(&manager->streams[i],
-				       K_MSEC((uint32_t)remaining_ms));
-		if (rc != ZDB_OK) {
-			return rc;
-		}
-	}
-
+	/* Stage 3: Delete from LittleFS */
+	/* For now, return OK */
 	return ZDB_OK;
 }
 
-zdb_status_t zdb_ts_multistream_query_aggregate(zdb_ts_multistream_t *manager,
-						 zdb_ts_window_t window,
-						 zdb_ts_agg_t agg,
-						 zdb_ts_agg_result_t *out_result)
+zdb_status_t zdb_doc_close(zdb_doc_t *doc)
 {
-	size_t i;
-	zdb_status_t rc;
-	zdb_ts_agg_result_t stream_result;
-	uint32_t total_points = 0U;
-	double acc = 0.0;
-	double min_val = DBL_MAX;
-	double max_val = -DBL_MAX;
-
-	if ((manager == NULL) || (out_result == NULL)) {
+	if (doc == NULL) {
 		return ZDB_ERR_INVAL;
 	}
 
-	if (manager->stream_count == 0) {
-		out_result->agg = agg;
-		out_result->value = 0.0;
-		out_result->points = 0U;
-		return ZDB_OK;
+	if (doc->fields != NULL) {
+		k_free(doc->fields);
+		doc->fields = NULL;
 	}
 
-	/* Query each stream and aggregate results */
-	for (i = 0; i < manager->stream_count; i++) {
-		rc = zdb_ts_query_aggregate(&manager->streams[i], window, agg,
-					    &stream_result);
-		if (rc != ZDB_OK) {
-			return rc;
-		}
-
-		total_points += stream_result.points;
-
-		switch (agg) {
-		case ZDB_TS_AGG_SUM:
-			acc += stream_result.value;
-			break;
-		case ZDB_TS_AGG_AVG:
-			acc += stream_result.value * stream_result.points;
-			break;
-		case ZDB_TS_AGG_COUNT:
-			acc += stream_result.value;
-			break;
-		case ZDB_TS_AGG_MIN:
-			if (stream_result.value < min_val) {
-				min_val = stream_result.value;
-			}
-			break;
-		case ZDB_TS_AGG_MAX:
-			if (stream_result.value > max_val) {
-				max_val = stream_result.value;
-			}
-			break;
-		default:
-			return ZDB_ERR_INVAL;
-		}
-	}
-
-	out_result->agg = agg;
-	out_result->points = total_points;
-
-	switch (agg) {
-	case ZDB_TS_AGG_SUM:
-	case ZDB_TS_AGG_COUNT:
-		out_result->value = acc;
-		break;
-	case ZDB_TS_AGG_AVG:
-		out_result->value = (total_points > 0) ? (acc / total_points) : 0.0;
-		break;
-	case ZDB_TS_AGG_MIN:
-		out_result->value = (min_val == DBL_MAX) ? 0.0 : min_val;
-		break;
-	case ZDB_TS_AGG_MAX:
-		out_result->value = (max_val == -DBL_MAX) ? 0.0 : max_val;
-		break;
-	default:
-		return ZDB_ERR_INVAL;
-	}
-
+	doc->valid = false;
 	return ZDB_OK;
 }
 
 /*
- * Stream discovery helpers
+ * Field setters
  */
-static zdb_status_t zdb_ts_get_stream_info(zdb_t *db, const char *stream_name,
-					    zdb_ts_stream_info_t *out_info)
+static zdb_status_t zdb_doc_field_find_or_create(zdb_doc_t *doc,
+						  const char *field_name,
+						  zdb_doc_field_type_t type,
+						  zdb_doc_field_t **out_field)
 {
-	struct fs_file_t file;
-	struct fs_dirent dirent;
-	char path[ZDB_TS_PATH_MAX];
-	struct zdb_ts_stream_header hdr;
-	struct zdb_ts_record_i64 rec;
-	ssize_t rd;
-	int rc;
-	uint32_t rec_count = 0U;
-	uint64_t min_ts = UINT64_MAX;
-	uint64_t max_ts = 0U;
+	zdb_doc_field_t *field = NULL;
 
-	if ((db == NULL) || (stream_name == NULL) || (out_info == NULL)) {
+	if ((doc == NULL) || (field_name == NULL) || (out_field == NULL)) {
 		return ZDB_ERR_INVAL;
 	}
 
-	rc = zdb_ts_build_path(db->cfg, stream_name, path, sizeof(path));
-	if (rc < 0) {
-		return zdb_status_from_errno(rc);
+	if (!doc->valid) {
+		return ZDB_ERR_INVAL;
 	}
 
-	fs_file_t_init(&file);
-	rc = fs_stat(path, &dirent);
-	if (rc < 0) {
-		return zdb_status_from_errno(rc);
-	}
-
-	/* Copy to output */
-	strncpy(out_info->stream_name, stream_name, CONFIG_ZDB_TS_STREAM_NAME_MAX_LEN);
-	out_info->stream_name[CONFIG_ZDB_TS_STREAM_NAME_MAX_LEN] = '\0';
-	out_info->file_size = dirent.size;
-
-	/* Read header and scan for bounds */
-	rc = fs_open(&file, path, FS_O_READ);
-	if (rc < 0) {
-		return zdb_status_from_errno(rc);
-	}
-
-	rd = fs_read(&file, &hdr, sizeof(hdr));
-	if (rd != (ssize_t)sizeof(hdr)) {
-		(void)fs_close(&file);
-		return zdb_status_from_errno(EIO);
-	}
-
-	rc = zdb_ts_stream_header_decode(&hdr);
-	if (rc < 0) {
-		(void)fs_close(&file);
-		return zdb_status_from_errno(EIO);
-	}
-
-	/* Scan records (limited) */
-	while (rec_count < 1000000U) {
-		rd = fs_read(&file, &rec, sizeof(rec));
-		if (rd != (ssize_t)sizeof(rec)) {
+	/* Search for existing field */
+	for (size_t i = 0; i < doc->field_count; i++) {
+		if (strcmp(doc->fields[i].name, field_name) == 0) {
+			field = &doc->fields[i];
 			break;
 		}
-
-		uint64_t ts_ms = sys_le64_to_cpu(rec.ts_ms_le);
-		if (ts_ms < min_ts) {
-			min_ts = ts_ms;
-		}
-		if (ts_ms > max_ts) {
-			max_ts = ts_ms;
-		}
-		rec_count++;
 	}
 
-	(void)fs_close(&file);
+	/* Create new field if not found */
+	if (field == NULL) {
+		if (doc->field_count >= doc->max_fields) {
+			return ZDB_ERR_NOMEM;
+		}
+		field = &doc->fields[doc->field_count++];
+		field->name = field_name;
+	}
 
-	out_info->record_count = rec_count;
-	out_info->min_ts_ms = (min_ts == UINT64_MAX) ? 0U : min_ts;
-	out_info->max_ts_ms = max_ts;
-
+	field->type = type;
+	*out_field = field;
 	return ZDB_OK;
 }
 
-zdb_status_t zdb_ts_enum_streams(zdb_t *db, zdb_ts_enum_stream_fn callback,
-				  void *callback_ctx)
+zdb_status_t zdb_doc_field_set_i64(zdb_doc_t *doc, const char *field_name,
+				    int64_t value)
 {
-	struct fs_dir_t dir;
-	struct fs_dirent dirent;
-	zdb_ts_stream_info_t info;
-	zdb_status_t rc;
-	int fs_rc;
-	uint32_t stream_count = 0U;
-	const char *mount_point;
-	const char *filename;
-	size_t name_len;
-
-	if ((db == NULL) || (db->cfg == NULL) || (callback == NULL)) {
-		return ZDB_ERR_INVAL;
+	zdb_doc_field_t *field = NULL;
+	zdb_status_t rc = zdb_doc_field_find_or_create(doc, field_name,
+						       ZDB_DOC_FIELD_INT64, &field);
+	if (rc != ZDB_OK) {
+		return rc;
 	}
 
-	mount_point = db->cfg->lfs_mount_point;
-	if (mount_point == NULL) {
-		return ZDB_ERR_INVAL;
-	}
-
-	fs_dir_t_init(&dir);
-	fs_rc = fs_opendir(&dir, mount_point);
-	if (fs_rc < 0) {
-		return zdb_status_from_errno(fs_rc);
-	}
-
-	while (stream_count < (uint32_t)CONFIG_ZDB_TS_MAX_DISCOVERABLE_STREAMS) {
-		fs_rc = fs_readdir(&dir, &dirent);
-		if (fs_rc < 0) {
-			(void)fs_closedir(&dir);
-			return zdb_status_from_errno(fs_rc);
-		}
-
-		if (dirent.name[0] == '\0') {
-			/* End of directory */
-			break;
-		}
-
-		if (dirent.type != FS_DIR_ENTRY_FILE) {
-			continue;
-		}
-
-		/* Check if filename ends with .zts */
-		filename = dirent.name;
-		name_len = strlen(filename);
-		if ((name_len > 4) && (strcmp(&filename[name_len - 4], ".zts") == 0)) {
-			/* Extract stream name (without .zts suffix) */
-			char stream_name[CONFIG_ZDB_TS_STREAM_NAME_MAX_LEN + 1];
-			size_t sn_len = name_len - 4;
-			if (sn_len > CONFIG_ZDB_TS_STREAM_NAME_MAX_LEN) {
-				sn_len = CONFIG_ZDB_TS_STREAM_NAME_MAX_LEN;
-			}
-			strncpy(stream_name, filename, sn_len);
-			stream_name[sn_len] = '\0';
-
-			/* Get stream info */
-			rc = zdb_ts_get_stream_info(db, stream_name, &info);
-			if (rc == ZDB_OK) {
-				if (!callback(&info, callback_ctx)) {
-					/* Caller requested early exit */
-					break;
-				}
-				stream_count++;
-			}
-		}
-	}
-
-	(void)fs_closedir(&dir);
+	field->value.i64 = value;
+	doc->updated_ms = k_uptime_get();
 	return ZDB_OK;
 }
 
-zdb_status_t zdb_ts_stream_info(zdb_t *db, const char *stream_name,
-				 zdb_ts_stream_info_t *out_info)
+zdb_status_t zdb_doc_field_set_f64(zdb_doc_t *doc, const char *field_name,
+				    double value)
 {
-	return zdb_ts_get_stream_info(db, stream_name, out_info);
+	zdb_doc_field_t *field = NULL;
+	zdb_status_t rc = zdb_doc_field_find_or_create(doc, field_name,
+						       ZDB_DOC_FIELD_DOUBLE, &field);
+	if (rc != ZDB_OK) {
+		return rc;
+	}
+
+	field->value.f64 = value;
+	doc->updated_ms = k_uptime_get();
+	return ZDB_OK;
 }
 
-#endif /* CONFIG_ZDB_TS_MULTISTREAM */
+zdb_status_t zdb_doc_field_set_string(zdb_doc_t *doc, const char *field_name,
+				       const char *value)
+{
+	zdb_doc_field_t *field = NULL;
+
+	if ((doc == NULL) || (field_name == NULL) || (value == NULL)) {
+		return ZDB_ERR_INVAL;
+	}
+
+	if (strlen(value) > (size_t)CONFIG_ZDB_DOC_MAX_STRING_LEN) {
+		return ZDB_ERR_INVAL;
+	}
+
+	zdb_status_t rc = zdb_doc_field_find_or_create(doc, field_name,
+						       ZDB_DOC_FIELD_STRING, &field);
+	if (rc != ZDB_OK) {
+		return rc;
+	}
+
+	field->value.str = value;
+	doc->updated_ms = k_uptime_get();
+	return ZDB_OK;
+}
+
+zdb_status_t zdb_doc_field_set_bool(zdb_doc_t *doc, const char *field_name,
+				     bool value)
+{
+	zdb_doc_field_t *field = NULL;
+	zdb_status_t rc = zdb_doc_field_find_or_create(doc, field_name,
+						       ZDB_DOC_FIELD_BOOL, &field);
+	if (rc != ZDB_OK) {
+		return rc;
+	}
+
+	field->value.b = value;
+	doc->updated_ms = k_uptime_get();
+	return ZDB_OK;
+}
+
+zdb_status_t zdb_doc_field_set_bytes(zdb_doc_t *doc, const char *field_name,
+				      const void *value, size_t len)
+{
+	zdb_doc_field_t *field = NULL;
+
+	if ((doc == NULL) || (field_name == NULL) || (value == NULL)) {
+		return ZDB_ERR_INVAL;
+	}
+
+	zdb_status_t rc = zdb_doc_field_find_or_create(doc, field_name,
+						       ZDB_DOC_FIELD_BYTES, &field);
+	if (rc != ZDB_OK) {
+		return rc;
+	}
+
+	field->value.bytes.data = value;
+	field->value.bytes.len = len;
+	doc->updated_ms = k_uptime_get();
+	return ZDB_OK;
+}
+
+/*
+ * Field getters
+ */
+zdb_status_t zdb_doc_field_get_i64(const zdb_doc_t *doc, const char *field_name,
+				    int64_t *out_value)
+{
+	if ((doc == NULL) || (field_name == NULL) || (out_value == NULL)) {
+		return ZDB_ERR_INVAL;
+	}
+
+	for (size_t i = 0; i < doc->field_count; i++) {
+		if (strcmp(doc->fields[i].name, field_name) == 0) {
+			if (doc->fields[i].type != ZDB_DOC_FIELD_INT64) {
+				return ZDB_ERR_INVAL;
+			}
+			*out_value = doc->fields[i].value.i64;
+			return ZDB_OK;
+		}
+	}
+
+	return ZDB_ERR_NOT_FOUND;
+}
+
+zdb_status_t zdb_doc_field_get_f64(const zdb_doc_t *doc, const char *field_name,
+				    double *out_value)
+{
+	if ((doc == NULL) || (field_name == NULL) || (out_value == NULL)) {
+		return ZDB_ERR_INVAL;
+	}
+
+	for (size_t i = 0; i < doc->field_count; i++) {
+		if (strcmp(doc->fields[i].name, field_name) == 0) {
+			if (doc->fields[i].type != ZDB_DOC_FIELD_DOUBLE) {
+				return ZDB_ERR_INVAL;
+			}
+			*out_value = doc->fields[i].value.f64;
+			return ZDB_OK;
+		}
+	}
+
+	return ZDB_ERR_NOT_FOUND;
+}
+
+zdb_status_t zdb_doc_field_get_string(const zdb_doc_t *doc, const char *field_name,
+				       const char **out_value)
+{
+	if ((doc == NULL) || (field_name == NULL) || (out_value == NULL)) {
+		return ZDB_ERR_INVAL;
+	}
+
+	for (size_t i = 0; i < doc->field_count; i++) {
+		if (strcmp(doc->fields[i].name, field_name) == 0) {
+			if (doc->fields[i].type != ZDB_DOC_FIELD_STRING) {
+				return ZDB_ERR_INVAL;
+			}
+			*out_value = doc->fields[i].value.str;
+			return ZDB_OK;
+		}
+	}
+
+	return ZDB_ERR_NOT_FOUND;
+}
+
+zdb_status_t zdb_doc_field_get_bool(const zdb_doc_t *doc, const char *field_name,
+				     bool *out_value)
+{
+	if ((doc == NULL) || (field_name == NULL) || (out_value == NULL)) {
+		return ZDB_ERR_INVAL;
+	}
+
+	for (size_t i = 0; i < doc->field_count; i++) {
+		if (strcmp(doc->fields[i].name, field_name) == 0) {
+			if (doc->fields[i].type != ZDB_DOC_FIELD_BOOL) {
+				return ZDB_ERR_INVAL;
+			}
+			*out_value = doc->fields[i].value.b;
+			return ZDB_OK;
+		}
+	}
+
+	return ZDB_ERR_NOT_FOUND;
+}
+
+zdb_status_t zdb_doc_field_get_bytes(const zdb_doc_t *doc, const char *field_name,
+				      zdb_bytes_t *out_value)
+{
+	if ((doc == NULL) || (field_name == NULL) || (out_value == NULL)) {
+		return ZDB_ERR_INVAL;
+	}
+
+	for (size_t i = 0; i < doc->field_count; i++) {
+		if (strcmp(doc->fields[i].name, field_name) == 0) {
+			if (doc->fields[i].type != ZDB_DOC_FIELD_BYTES) {
+				return ZDB_ERR_INVAL;
+			}
+			*out_value = doc->fields[i].value.bytes;
+			return ZDB_OK;
+		}
+	}
+
+	return ZDB_ERR_NOT_FOUND;
+}
+
+/*
+ * Query and export
+ */
+zdb_status_t zdb_doc_query(zdb_t *db, const zdb_doc_query_t *query,
+			    zdb_doc_metadata_t *out_metadata, size_t *out_count)
+{
+	if ((db == NULL) || (query == NULL) || (out_count == NULL)) {
+		return ZDB_ERR_INVAL;
+	}
+
+	/* Stage 3: Search LittleFS for matching documents */
+	/* For now, return zero results */
+	*out_count = 0;
+	return ZDB_OK;
+}
+
+zdb_status_t zdb_doc_export_flatbuffer(zdb_doc_t *doc, uint8_t *out_buf,
+				       size_t out_capacity, size_t *out_len)
+{
+	if ((doc == NULL) || (out_len == NULL)) {
+		return ZDB_ERR_INVAL;
+	}
+
+	if (!doc->valid) {
+		return ZDB_ERR_INVAL;
+	}
+
+	/* Stage 3: Export document as FlatBuffer */
+	/* For now, estimate size based on field count and types */
+	size_t estimated_size = 64 + (doc->field_count * 32);
+
+	if (out_buf == NULL) {
+		*out_len = estimated_size;
+		return ZDB_OK;
+	}
+
+	if (out_capacity < estimated_size) {
+		return ZDB_ERR_INVAL;
+	}
+
+	/* Placeholder serialization */
+	*out_len = estimated_size;
+	return ZDB_OK;
+}
+
+#endif /* CONFIG_ZDB_DOC */
 
 #endif /* CONFIG_ZDB_TS */

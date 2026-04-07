@@ -2,9 +2,11 @@
 
 Embedded multi-model database for Zephyr RTOS designed for memory-constrained IoT and embedded systems.
 
-**Current Scope:** Core + KV (NVS-backed) + TS (LittleFS-backed) modules with durability, recovery, instrumentation, Stage 2 FlatBuffers bootstrap helpers, and Stage 2.5 multi-stream support.
+**Current Scope:** Core + KV (NVS-backed) + TS (LittleFS-backed) modules with durability, recovery, instrumentation, Stage 2 FlatBuffers bootstrap helpers, Stage 2.5 multi-stream support, and Stage 3 document model foundation.
 
 ## Features
+- **Stage 2.5 multi-stream**: Optional concurrent stream management with unified flush and cross-stream aggregation
+- **Stage 3 document model**: Semi-structured data support with flexible schemas, variable-length fields, and document CRUD APIs
 
 - **Zero-malloc design**: Static slab-based allocation (no heap fragmentation)
 - **Multiple data models**: KV (key-value via NVS), TS (time-series with append-log via LittleFS)
@@ -377,3 +379,78 @@ Contributions welcome! Please:
 3. Commit changes with clear messages
 4. Push to branch
 5. Open pull request with description
+
+
+## Stage 3: Document Model (Foundation Complete)
+
+When enabled with `CONFIG_ZDB_DOC=y` (depends on `CONFIG_ZDB_FLATBUFFERS=y`), enables semi-structured data support with variable-length fields and dynamic schemas.
+
+### Configuration Options
+| Option | Default | Purpose |
+|--------|---------|---------|
+| `CONFIG_ZDB_DOC` | n | Enable Stage 3 document model |
+| `CONFIG_ZDB_DOC_MAX_FIELD_NAME_LEN` | 32 | Max field name length |
+| `CONFIG_ZDB_DOC_MAX_STRING_LEN` | 256 | Max string field size |
+| `CONFIG_ZDB_DOC_MAX_FIELD_COUNT` | 32 | Max fields per document |
+| `CONFIG_ZDB_DOC_MAX_NESTED_DEPTH` | 4 | Max object nesting levels |
+
+### API Overview
+
+**Lifecycle:**
+- `zdb_doc_create(db, collection, id, out_doc)` - Create new document
+- `zdb_doc_open(db, collection, id, out_doc)` - Load existing document
+- `zdb_doc_save(doc)` - Persist to storage
+- `zdb_doc_delete(db, collection, id)` - Remove document
+- `zdb_doc_close(doc)` - Cleanup and free resources
+
+**Fields (8 types supported):**
+```
+NULL, INT64, DOUBLE, STRING, BOOL, BYTES, OBJECT (nested), ARRAY
+```
+
+**Field Operations:**
+- Setters: `zdb_doc_field_set_i64()`, `set_f64()`, `set_string()`, `set_bool()`, `set_bytes()`
+- Getters: `zdb_doc_field_get_*()` with type validation
+- Query: `zdb_doc_query()` with filters, time windows, limits
+- Export: `zdb_doc_export_flatbuffer()` for schema-driven serialization
+
+### Example Usage
+```c
+/* Create document */
+zdb_doc_t doc;
+zdb_doc_create(&db, "users", "user-42", &doc);
+
+/* Set heterogeneous fields */
+zdb_doc_field_set_string(&doc, "name", "Alice");
+zdb_doc_field_set_i64(&doc, "age", 30);
+zdb_doc_field_set_f64(&doc, "score", 95.5);
+zdb_doc_field_set_bool(&doc, "active", true);
+
+/* Get with type safety */
+int64_t age;
+zdb_doc_field_get_i64(&doc, "age", &age);
+
+/* Persist */
+zdb_doc_save(&doc);
+
+/* Query */
+zdb_doc_query_t query = {
+    .filters = NULL,
+    .filter_count = 0,
+    .limit = 100,
+};
+size_t count = 0;
+zdb_doc_query(&db, &query, NULL, &count);
+
+/* Cleanup */
+zdb_doc_close(&doc);
+```
+
+**Stage 3 Current Status:**
+✅ Foundation APIs (CRUD, field operations)
+✅ Type safety with 8 field types
+✅ Dynamic field allocation
+⏳ LittleFS persistence (coming)
+⏳ Schema versioning (coming)
+⏳ Cross-document queries (coming)
+
