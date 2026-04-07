@@ -145,8 +145,8 @@ zdb_ts_sample_i64_t sample = {
 size_t fb_size = 0;
 zdb_status_t rc = zdb_ts_sample_i64_export_flatbuffer(&sample, NULL, 0, &fb_size);
 
-if (rc == ZDB_OK && fb_size > 0) {
-    uint8_t out[64];
+uint8_t out[64];
+if (rc == ZDB_OK && fb_size > 0 && fb_size <= sizeof(out)) {
     size_t out_len = 0;
     rc = zdb_ts_sample_i64_export_flatbuffer(&sample, out, sizeof(out), &out_len);
     if (rc == ZDB_OK) {

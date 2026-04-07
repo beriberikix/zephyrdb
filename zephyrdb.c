@@ -1160,15 +1160,20 @@ zdb_status_t zdb_ts_sample_i64_export_flatbuffer(const zdb_ts_sample_i64_t *samp
 		return ZDB_ERR_IO;
 	}
 
-	if (out_len != NULL) {
-		*out_len = direct_size;
-	}
-
 	if (out_buf == NULL) {
+		if (out_len == NULL) {
+			flatcc_builder_clear(&builder);
+			return ZDB_ERR_INVAL;
+		}
+
+		*out_len = direct_size;
 		flatcc_builder_clear(&builder);
 		return ZDB_OK;
 	}
 
+	if (out_len != NULL) {
+		*out_len = direct_size;
+	}
 	if (out_capacity < direct_size) {
 		flatcc_builder_clear(&builder);
 		return ZDB_ERR_NOMEM;
