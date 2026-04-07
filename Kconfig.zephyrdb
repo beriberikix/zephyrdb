@@ -247,6 +247,13 @@ config ZDB_DOC_MAX_STRING_LEN
 	help
 	  Maximum size of string-type fields within documents.
 
+config ZDB_DOC_MAX_BYTES_LEN
+	int "Max document bytes field length"
+	range 16 1048576
+	default 4096
+	help
+	  Maximum size of bytes-type fields within documents.
+
 config ZDB_DOC_MAX_FIELD_COUNT
 	int "Max fields per document"
 	range 1 256
