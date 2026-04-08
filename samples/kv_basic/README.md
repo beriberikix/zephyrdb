@@ -11,4 +11,4 @@ west build -t run
 
 Notes:
 - Requires board/storage setup that supports NVS.
-- `partition_ref` is intentionally left `NULL` for portability; wire your board's NVS partition in production apps.
+- `kv_backend_fs` is intentionally left `NULL` for portability; wire your board's NVS partition in production apps.

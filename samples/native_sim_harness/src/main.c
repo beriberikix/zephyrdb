@@ -3,22 +3,13 @@
 
 #include "zephyrdb.h"
 
-ZDB_DEFINE_CORE_SLAB(g_core_slab);
-ZDB_DEFINE_CURSOR_SLAB(g_cursor_slab);
-#if defined(CONFIG_ZDB_KV) && (CONFIG_ZDB_KV)
-ZDB_DEFINE_KV_IO_SLAB(g_kv_io_slab);
-#endif
-ZDB_DEFINE_TS_INGEST_SLAB(g_ts_ingest_slab);
-
-static zdb_t g_db;
-
 static const zdb_cfg_t g_cfg = {
-	.partition_ref = NULL,
+	.kv_backend_fs = NULL,
 	.lfs_mount_point = CONFIG_ZDB_LFS_MOUNT_POINT,
-	.kv_namespace = "native_sim",
 	.work_q = &k_sys_work_q,
-	.scan_yield_every_n = CONFIG_ZDB_SCAN_YIELD_EVERY_N,
 };
+
+ZDB_DEFINE_STATIC(g_db, g_cfg);
 
 int main(void)
 {
@@ -29,16 +20,7 @@ int main(void)
 	};
 	size_t fb_len = 0U;
 	uint8_t fb_buf[64];
-	zdb_stats_t stats;
-
-	g_db.core_slab = &g_core_slab;
-	g_db.cursor_slab = &g_cursor_slab;
-#if defined(CONFIG_ZDB_KV) && (CONFIG_ZDB_KV)
-	g_db.kv_io_slab = &g_kv_io_slab;
-#else
-	g_db.kv_io_slab = NULL;
-#endif
-	g_db.ts_ingest_slab = &g_ts_ingest_slab;
+	zdb_ts_stats_t ts_stats;
 
 	rc = zdb_init(&g_db, &g_cfg);
 	if (rc != ZDB_OK) {
@@ -61,9 +43,9 @@ int main(void)
 		return 1;
 	}
 
-	zdb_stats_get(&g_db, &stats);
+	zdb_ts_stats_get(&g_db, &ts_stats);
 	printk("PASS: native_sim harness exported %u bytes\n", (unsigned)fb_len);
-	ARG_UNUSED(stats);
+	ARG_UNUSED(ts_stats);
 
 	(void)zdb_deinit(&g_db);
 	return 0;

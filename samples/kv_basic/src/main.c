@@ -3,21 +3,13 @@
 
 #include "zephyrdb.h"
 
-ZDB_DEFINE_CORE_SLAB(g_core_slab);
-ZDB_DEFINE_CURSOR_SLAB(g_cursor_slab);
-#if defined(CONFIG_ZDB_KV) && (CONFIG_ZDB_KV)
-ZDB_DEFINE_KV_IO_SLAB(g_kv_io_slab);
-#endif
-
-static zdb_t g_db;
-
 static const zdb_cfg_t g_cfg = {
-	.partition_ref = NULL,
+	.kv_backend_fs = NULL,
 	.lfs_mount_point = CONFIG_ZDB_LFS_MOUNT_POINT,
-	.kv_namespace = "kv_basic",
 	.work_q = &k_sys_work_q,
-	.scan_yield_every_n = CONFIG_ZDB_SCAN_YIELD_EVERY_N,
 };
+
+ZDB_DEFINE_STATIC(g_db, g_cfg);
 
 int main(void)
 {
@@ -32,11 +24,6 @@ int main(void)
 	size_t out_len = 0U;
 	zdb_status_t delete_rc;
 
-	g_db.core_slab = &g_core_slab;
-	g_db.cursor_slab = &g_cursor_slab;
-	g_db.kv_io_slab = &g_kv_io_slab;
-	g_db.ts_ingest_slab = NULL;
-
 	rc = zdb_init(&g_db, &g_cfg);
 	if (rc != ZDB_OK) {
 		printk("KV sample: zdb_init failed rc=%d\n", (int)rc);
@@ -45,7 +32,7 @@ int main(void)
 
 	rc = zdb_kv_open(&g_db, "app", &kv);
 	if (rc != ZDB_OK) {
-		printk("KV sample: zdb_kv_open failed rc=%d (configure mounted NVS/ZMS partition_ref in cfg)\n",
+		printk("KV sample: zdb_kv_open failed rc=%d (configure mounted NVS/ZMS kv_backend_fs in cfg)\n",
 		       (int)rc);
 		(void)zdb_deinit(&g_db);
 		return 0;

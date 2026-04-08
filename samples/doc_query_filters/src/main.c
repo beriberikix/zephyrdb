@@ -3,21 +3,13 @@
 
 #include "zephyrdb.h"
 
-ZDB_DEFINE_CORE_SLAB(g_core_slab);
-ZDB_DEFINE_CURSOR_SLAB(g_cursor_slab);
-#if defined(CONFIG_ZDB_TS) && (CONFIG_ZDB_TS)
-ZDB_DEFINE_TS_INGEST_SLAB(g_ts_ingest_slab);
-#endif
-
-static zdb_t g_db;
-
 static const zdb_cfg_t g_cfg = {
-    .partition_ref = NULL,
+    .kv_backend_fs = NULL,
     .lfs_mount_point = CONFIG_ZDB_LFS_MOUNT_POINT,
-    .kv_namespace = "doc_query_filters",
     .work_q = &k_sys_work_q,
-    .scan_yield_every_n = CONFIG_ZDB_SCAN_YIELD_EVERY_N,
 };
+
+ZDB_DEFINE_STATIC(g_db, g_cfg);
 
 int main(void)
 {
@@ -31,15 +23,6 @@ int main(void)
     zdb_doc_query_t query;
     zdb_doc_metadata_t results[8];
     size_t result_count = ARRAY_SIZE(results);
-
-    g_db.core_slab = &g_core_slab;
-    g_db.cursor_slab = &g_cursor_slab;
-    g_db.kv_io_slab = NULL;
-#if defined(CONFIG_ZDB_TS) && (CONFIG_ZDB_TS)
-    g_db.ts_ingest_slab = &g_ts_ingest_slab;
-#else
-    g_db.ts_ingest_slab = NULL;
-#endif
 
     rc = zdb_init(&g_db, &g_cfg);
     if (rc != ZDB_OK) {
@@ -74,7 +57,7 @@ int main(void)
 
     filters[1].field_name = "active";
     filters[1].type = ZDB_DOC_FIELD_BOOL;
-    filters[1].numeric_value = 1.0;
+    filters[1].bool_value = true;
     filters[1].string_value = NULL;
 
     query.filters = filters;

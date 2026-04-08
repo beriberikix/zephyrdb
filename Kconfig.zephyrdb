@@ -123,16 +123,6 @@ endmenu
 menu "KV Boundaries"
 	depends on ZDB_KV
 
-config ZDB_KV_NAMESPACE_MAX_LEN
-	int "KV namespace max length"
-	range 8 64
-	default 24
-
-config ZDB_KV_CACHE_ENTRIES
-	int "KV metadata cache entries"
-	range 1 512
-	default 16
-
 config ZDB_KV_IO_SLAB_BLOCK_SIZE
 	int "KV IO slab block size (bytes)"
 	range 16 1024

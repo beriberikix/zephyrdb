@@ -89,14 +89,14 @@
 #define ZDB_STAT_INC(db, field)                                                                \
 	do {                                                                                         \
 		if (ZDB_STATS_ENABLED && ((db) != NULL)) {                                                \
-			(db)->stats.field++;                                                                    \
+			(db)->ts_stats.field++;                                                                  \
 		}                                                                                        \
 	} while (0)
 
 #define ZDB_STAT_ADD(db, field, value)                                                         \
 	do {                                                                                         \
 		if (ZDB_STATS_ENABLED && ((db) != NULL)) {                                                \
-			(db)->stats.field += (value);                                                           \
+			(db)->ts_stats.field += (value);                                                         \
 		}                                                                                        \
 	} while (0)
 
@@ -433,12 +433,12 @@ static zdb_status_t zdb_ts_stream_header_decode(zdb_t *db,
 	}
 
 	if (sys_le32_to_cpu(hdr->magic_le) != ZDB_TS_STREAM_MAGIC) {
-		ZDB_STAT_INC(db, ts_corrupt_records);
+		ZDB_STAT_INC(db, corrupt_records);
 		return ZDB_ERR_CORRUPT;
 	}
 
 	if (sys_le16_to_cpu(hdr->version_le) != ZDB_TS_STREAM_VERSION) {
-		ZDB_STAT_INC(db, ts_unsupported_versions);
+		ZDB_STAT_INC(db, unsupported_versions);
 		return ZDB_ERR_UNSUPPORTED;
 	}
 
@@ -446,14 +446,14 @@ static zdb_status_t zdb_ts_stream_header_decode(zdb_t *db,
 			       offsetof(struct zdb_ts_stream_header, crc_le));
 	got_crc = sys_le32_to_cpu(hdr->crc_le);
 	if (got_crc != expect_crc) {
-		ZDB_STAT_INC(db, ts_crc_failures);
-		ZDB_STAT_INC(db, ts_corrupt_records);
+		ZDB_STAT_INC(db, crc_failures);
+		ZDB_STAT_INC(db, corrupt_records);
 		return ZDB_ERR_CORRUPT;
 	}
 
 	stream_id = sys_le32_to_cpu(hdr->stream_id_le);
 	if (stream_id != zdb_fnv1a32(stream_name)) {
-		ZDB_STAT_INC(db, ts_corrupt_records);
+		ZDB_STAT_INC(db, corrupt_records);
 		return ZDB_ERR_CORRUPT;
 	}
 
@@ -486,20 +486,20 @@ static zdb_status_t zdb_ts_record_decode(zdb_t *db,
 	}
 
 	if (sys_le32_to_cpu(rec->magic_le) != ZDB_TS_REC_MAGIC) {
-		ZDB_STAT_INC(db, ts_corrupt_records);
+		ZDB_STAT_INC(db, corrupt_records);
 		return ZDB_ERR_CORRUPT;
 	}
 
 	if (sys_le16_to_cpu(rec->version_le) != ZDB_TS_REC_VERSION) {
-		ZDB_STAT_INC(db, ts_unsupported_versions);
+		ZDB_STAT_INC(db, unsupported_versions);
 		return ZDB_ERR_UNSUPPORTED;
 	}
 
 	expect_crc = crc32_ieee((const uint8_t *)rec, offsetof(struct zdb_ts_record_i64, crc_le));
 	got_crc = sys_le32_to_cpu(rec->crc_le);
 	if (got_crc != expect_crc) {
-		ZDB_STAT_INC(db, ts_crc_failures);
-		ZDB_STAT_INC(db, ts_corrupt_records);
+		ZDB_STAT_INC(db, crc_failures);
+		ZDB_STAT_INC(db, corrupt_records);
 		return ZDB_ERR_CORRUPT;
 	}
 
@@ -815,18 +815,9 @@ static struct zdb_ts_core_ctx *zdb_ts_ctx_get_or_alloc(zdb_t *db)
 }
 #endif /* CONFIG_ZDB_TS */
 
-static bool zdb_valid_scan_yield(uint16_t n)
-{
-	return (n > 0U);
-}
-
 zdb_status_t zdb_init(zdb_t *db, const zdb_cfg_t *cfg)
 {
 	if ((db == NULL) || (cfg == NULL)) {
-		return ZDB_ERR_INVAL;
-	}
-
-	if (!zdb_valid_scan_yield(cfg->scan_yield_every_n)) {
 		return ZDB_ERR_INVAL;
 	}
 
@@ -839,7 +830,7 @@ zdb_status_t zdb_init(zdb_t *db, const zdb_cfg_t *cfg)
 	db->core_ctx = NULL;
 	db->kv_ctx = NULL;
 	db->ts_ctx = NULL;
-	(void)memset(&db->stats, 0, sizeof(db->stats));
+	(void)memset(&db->ts_stats, 0, sizeof(db->ts_stats));
 
 	return ZDB_OK;
 }
@@ -878,36 +869,13 @@ zdb_health_t zdb_health(const zdb_t *db)
 	return ZDB_HEALTH_OK;
 }
 
-void zdb_stats_get(const zdb_t *db, zdb_stats_t *out_stats)
-{
-	if ((db == NULL) || (out_stats == NULL)) {
-		return;
-	}
-
-	*out_stats = db->stats;
-}
-
-void zdb_stats_reset(zdb_t *db)
-{
-	if (db == NULL) {
-		return;
-	}
-
-	(void)memset(&db->stats, 0, sizeof(db->stats));
-}
-
 void zdb_ts_stats_get(const zdb_t *db, zdb_ts_stats_t *out_stats)
 {
 	if ((db == NULL) || (out_stats == NULL)) {
 		return;
 	}
 
-	out_stats->recover_runs = db->stats.ts_recover_runs;
-	out_stats->recover_failures = db->stats.ts_recover_failures;
-	out_stats->recover_truncated_bytes = db->stats.ts_recover_truncated_bytes;
-	out_stats->crc_failures = db->stats.ts_crc_failures;
-	out_stats->corrupt_records = db->stats.ts_corrupt_records;
-	out_stats->unsupported_versions = db->stats.ts_unsupported_versions;
+	*out_stats = db->ts_stats;
 }
 
 void zdb_ts_stats_reset(zdb_t *db)
@@ -916,12 +884,7 @@ void zdb_ts_stats_reset(zdb_t *db)
 		return;
 	}
 
-	db->stats.ts_recover_runs = 0U;
-	db->stats.ts_recover_failures = 0U;
-	db->stats.ts_recover_truncated_bytes = 0U;
-	db->stats.ts_crc_failures = 0U;
-	db->stats.ts_corrupt_records = 0U;
-	db->stats.ts_unsupported_versions = 0U;
+	(void)memset(&db->ts_stats, 0, sizeof(db->ts_stats));
 }
 
 zdb_status_t zdb_ts_stats_export(const zdb_t *db, zdb_ts_stats_export_t *out_export)
@@ -934,12 +897,12 @@ zdb_status_t zdb_ts_stats_export(const zdb_t *db, zdb_ts_stats_export_t *out_exp
 
 	out_export->version = 1U;
 	out_export->reserved = 0U;
-	out_export->recover_runs = db->stats.ts_recover_runs;
-	out_export->recover_failures = db->stats.ts_recover_failures;
-	out_export->recover_truncated_bytes = db->stats.ts_recover_truncated_bytes;
-	out_export->crc_failures = db->stats.ts_crc_failures;
-	out_export->corrupt_records = db->stats.ts_corrupt_records;
-	out_export->unsupported_versions = db->stats.ts_unsupported_versions;
+	out_export->recover_runs = db->ts_stats.recover_runs;
+	out_export->recover_failures = db->ts_stats.recover_failures;
+	out_export->recover_truncated_bytes = db->ts_stats.recover_truncated_bytes;
+	out_export->crc_failures = db->ts_stats.crc_failures;
+	out_export->corrupt_records = db->ts_stats.corrupt_records;
+	out_export->unsupported_versions = db->ts_stats.unsupported_versions;
 
 	/* Compute CRC over all fields except the crc field itself */
 	crc = crc32_ieee((const uint8_t *)out_export,
@@ -1018,13 +981,15 @@ static void *zdb_kv_backend_fs_from_db(zdb_t *db)
 	}
 
 	/*
-	 * cfg->partition_ref points at an initialized backend fs mounted by
+	 * cfg->kv_backend_fs points at an initialized backend fs mounted by
 	 * board/application startup:
 	 * - struct nvs_fs when CONFIG_ZDB_KV_BACKEND_NVS=y
 	 * - struct zms_fs when CONFIG_ZDB_KV_BACKEND_ZMS=y
 	 */
-	return (void *)db->cfg->partition_ref;
+	return (void *)db->cfg->kv_backend_fs;
 }
+
+static uint32_t zdb_kv_key_to_id(const char *key);
 
 static uint16_t __unused zdb_fnv1a16(const char *s)
 {
@@ -1258,7 +1223,7 @@ zdb_status_t zdb_kv_delete(zdb_kv_t *kv, const char *key)
 	return ZDB_OK;
 }
 
-uint32_t zdb_kv_key_to_id(const char *key)
+static uint32_t zdb_kv_key_to_id(const char *key)
 {
 	uint32_t id;
 
@@ -1339,12 +1304,12 @@ zdb_status_t zdb_ts_open(zdb_t *db, const char *stream_name, zdb_ts_t *ts)
 #if defined(CONFIG_ZDB_TS_AUTO_RECOVER_ON_OPEN) && (CONFIG_ZDB_TS_AUTO_RECOVER_ON_OPEN)
 	rc = zdb_ts_recover_stream(ts, &truncated);
 	if (rc != ZDB_OK) {
-		ZDB_STAT_INC(db, ts_recover_failures);
+		ZDB_STAT_INC(db, recover_failures);
 		return rc;
 	}
 	if ((CONFIG_ZDB_TS_MAX_RECOVERY_TRUNCATE_BYTES > 0) &&
 	    (truncated > (size_t)CONFIG_ZDB_TS_MAX_RECOVERY_TRUNCATE_BYTES)) {
-		ZDB_STAT_INC(db, ts_recover_failures);
+		ZDB_STAT_INC(db, recover_failures);
 		return ZDB_ERR_CORRUPT;
 	}
 #endif
@@ -2047,7 +2012,7 @@ zdb_status_t zdb_ts_recover_stream(zdb_ts_t *ts, size_t *out_truncated_bytes)
 		return ZDB_ERR_INVAL;
 	}
 
-	ZDB_STAT_INC(ts->db, ts_recover_runs);
+	ZDB_STAT_INC(ts->db, recover_runs);
 
 	if (out_truncated_bytes != NULL) {
 		*out_truncated_bytes = 0U;
@@ -2055,14 +2020,14 @@ zdb_status_t zdb_ts_recover_stream(zdb_ts_t *ts, size_t *out_truncated_bytes)
 
 	rc = zdb_ts_build_path(ts->db->cfg, ts->stream_name, path, sizeof(path));
 	if (rc < 0) {
-		ZDB_STAT_INC(ts->db, ts_recover_failures);
+		ZDB_STAT_INC(ts->db, recover_failures);
 		return zdb_status_from_errno(rc);
 	}
 
 	fs_file_t_init(&file);
 	rc = fs_open(&file, path, FS_O_CREATE | FS_O_RDWR);
 	if (rc < 0) {
-		ZDB_STAT_INC(ts->db, ts_recover_failures);
+		ZDB_STAT_INC(ts->db, recover_failures);
 		return zdb_status_from_errno(rc);
 	}
 
@@ -2072,13 +2037,13 @@ zdb_status_t zdb_ts_recover_stream(zdb_ts_t *ts, size_t *out_truncated_bytes)
 		rc = fs_seek(&file, 0, FS_SEEK_SET);
 		if (rc < 0) {
 			(void)fs_close(&file);
-			ZDB_STAT_INC(ts->db, ts_recover_failures);
+			ZDB_STAT_INC(ts->db, recover_failures);
 			return zdb_status_from_errno(rc);
 		}
 		rd = fs_write(&file, &hdr, sizeof(hdr));
 		(void)fs_close(&file);
 		if ((rd < 0) || ((size_t)rd != sizeof(hdr))) {
-			ZDB_STAT_INC(ts->db, ts_recover_failures);
+			ZDB_STAT_INC(ts->db, recover_failures);
 			return (rd < 0) ? zdb_status_from_errno((int)rd) : ZDB_ERR_IO;
 		}
 		return ZDB_OK;
@@ -2086,7 +2051,7 @@ zdb_status_t zdb_ts_recover_stream(zdb_ts_t *ts, size_t *out_truncated_bytes)
 
 	if ((rd < 0) || ((size_t)rd != sizeof(hdr))) {
 		(void)fs_close(&file);
-		ZDB_STAT_INC(ts->db, ts_recover_failures);
+		ZDB_STAT_INC(ts->db, recover_failures);
 		return (rd < 0) ? zdb_status_from_errno((int)rd) : ZDB_ERR_CORRUPT;
 	}
 
@@ -2094,7 +2059,7 @@ zdb_status_t zdb_ts_recover_stream(zdb_ts_t *ts, size_t *out_truncated_bytes)
 		zdb_status_t dec = zdb_ts_stream_header_decode(ts->db, &hdr, ts->stream_name);
 		if (dec != ZDB_OK) {
 			(void)fs_close(&file);
-			ZDB_STAT_INC(ts->db, ts_recover_failures);
+			ZDB_STAT_INC(ts->db, recover_failures);
 			return dec;
 		}
 	}
@@ -2111,7 +2076,7 @@ zdb_status_t zdb_ts_recover_stream(zdb_ts_t *ts, size_t *out_truncated_bytes)
 		}
 		if (rd < 0) {
 			(void)fs_close(&file);
-			ZDB_STAT_INC(ts->db, ts_recover_failures);
+			ZDB_STAT_INC(ts->db, recover_failures);
 			return zdb_status_from_errno((int)rd);
 		}
 		if ((size_t)rd != sizeof(rec)) {
@@ -2130,7 +2095,7 @@ zdb_status_t zdb_ts_recover_stream(zdb_ts_t *ts, size_t *out_truncated_bytes)
 		off_t end_pos = fs_tell(&file);
 		if (end_pos < 0) {
 			(void)fs_close(&file);
-			ZDB_STAT_INC(ts->db, ts_recover_failures);
+			ZDB_STAT_INC(ts->db, recover_failures);
 			return zdb_status_from_errno((int)end_pos);
 		}
 
@@ -2138,14 +2103,14 @@ zdb_status_t zdb_ts_recover_stream(zdb_ts_t *ts, size_t *out_truncated_bytes)
 			rc = fs_truncate(&file, (off_t)good_end);
 			if (rc < 0) {
 				(void)fs_close(&file);
-				ZDB_STAT_INC(ts->db, ts_recover_failures);
+				ZDB_STAT_INC(ts->db, recover_failures);
 				return zdb_status_from_errno(rc);
 			}
 
 			if (out_truncated_bytes != NULL) {
 				*out_truncated_bytes = (size_t)end_pos - good_end;
 			}
-			ZDB_STAT_ADD(ts->db, ts_recover_truncated_bytes, (uint64_t)((size_t)end_pos - good_end));
+			ZDB_STAT_ADD(ts->db, recover_truncated_bytes, (uint64_t)((size_t)end_pos - good_end));
 		}
 	}
 
@@ -2651,7 +2616,7 @@ static bool zdb_doc_field_filter_match(const zdb_doc_field_t *field,
 	case ZDB_DOC_FIELD_DOUBLE:
 		return field->value.f64 == filter->numeric_value;
 	case ZDB_DOC_FIELD_BOOL:
-		return ((field->value.b ? 1.0 : 0.0) == filter->numeric_value);
+		return (field->value.b == filter->bool_value);
 	case ZDB_DOC_FIELD_STRING:
 		return (field->value.str != NULL) && (filter->string_value != NULL) &&
 		       (strcmp(field->value.str, filter->string_value) == 0);
