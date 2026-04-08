@@ -107,11 +107,18 @@ west build -b nrf52840dk samples/ts_basic -- -DOVERLAY_CONFIG=prj_nrf52840dk.con
 ✅ Required - LittleFS can't mount real storage on native_sim
 ```
 
+For FCB backend on flash:
+
+```bash
+west build -b nrf52840dk samples/ts_basic -- -DOVERLAY_CONFIG=prj_fcb.conf
+✅ Required - FCB uses flash map and should be validated on a flash-capable board
+```
+
 ### Scenario 4: I'm testing SD card support
 
 ```bash
 # Use nrf52840dk (with SD overlay) or physical hardware
-west build -b nrf52840dk samples/ts_basic -- -DOVERLAY_CONFIG=prj_nrf52840dk_sdcard.conf
+west build -b nrf52840dk/nrf52840 samples/ts_basic -- -DOVERLAY_CONFIG=prj_nrf52840dk_sdcard.conf
 ✅ Required - SD card not available on native_sim
 ```
 
@@ -202,6 +209,12 @@ west build -b nrf52840dk samples/kv_basic -- -DOVERLAY_CONFIG=prj_zms.conf
 
 # nrf52840dk with time-series streams
 west build -b nrf52840dk samples/ts_basic -- -DOVERLAY_CONFIG=prj_nrf52840dk.conf
+
+# nrf52840dk with FCB TS backend
+west build -b nrf52840dk samples/ts_basic -- -DOVERLAY_CONFIG=prj_fcb.conf
+
+# nrf52840dk with LittleFS BLK (SD card)
+west build -b nrf52840dk/nrf52840 samples/ts_basic -- -DOVERLAY_CONFIG=prj_nrf52840dk_sdcard.conf
 ```
 
 ## Partition Isolation Testing

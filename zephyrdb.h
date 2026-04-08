@@ -77,6 +77,7 @@ typedef enum {
 	ZDB_BACKEND_NVS,
 	ZDB_BACKEND_ZMS,
 	ZDB_BACKEND_LFS,
+	ZDB_BACKEND_FCB,
 } zdb_backend_t;
 
 typedef enum {
@@ -131,7 +132,7 @@ typedef struct {
 	 * - KV path expects partition_ref to point to an initialized backend fs:
 	 *   struct nvs_fs when CONFIG_ZDB_KV_BACKEND_NVS=y,
 	 *   struct zms_fs when CONFIG_ZDB_KV_BACKEND_ZMS=y.
-	 * - TS path reserves this pointer for future storage object binding.
+	 * - TS path currently manages backend storage objects internally.
 	 */
 	const void *partition_ref;
 	const char *lfs_mount_point;
@@ -218,7 +219,7 @@ uint32_t zdb_kv_key_to_id(const char *key);
 #endif /* CONFIG_ZDB_KV */
 
 /*
- * Time-series module (LittleFS append-log)
+ * Time-series module (LittleFS append-log or FCB)
  */
 #if defined(CONFIG_ZDB_TS) && (CONFIG_ZDB_TS)
 typedef struct {

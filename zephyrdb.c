@@ -17,7 +17,12 @@
 #endif
 
 #if defined(CONFIG_ZDB_TS) && (CONFIG_ZDB_TS)
+#if defined(CONFIG_ZDB_TS_BACKEND_LITTLEFS) && (CONFIG_ZDB_TS_BACKEND_LITTLEFS)
 #include <zephyr/fs/fs.h>
+#endif
+#if defined(CONFIG_ZDB_TS_BACKEND_FCB) && (CONFIG_ZDB_TS_BACKEND_FCB)
+#include <zephyr/fs/fcb.h>
+#endif
 #include <zephyr/sys/byteorder.h>
 
 #if defined(CONFIG_ZDB_FLATBUFFERS) && (CONFIG_ZDB_FLATBUFFERS)
@@ -60,6 +65,20 @@
 #define ZDB_TS_REC_VERSION 1u
 #define ZDB_TS_STREAM_MAGIC 0x5A445453u
 #define ZDB_TS_STREAM_VERSION 1u
+#define ZDB_TS_FCB_MAGIC 0x5A444246u
+#define ZDB_TS_FCB_VERSION 1u
+
+#if defined(CONFIG_ZDB_TS_BACKEND_LITTLEFS) && (CONFIG_ZDB_TS_BACKEND_LITTLEFS)
+#define ZDB_TS_USE_LITTLEFS 1
+#else
+#define ZDB_TS_USE_LITTLEFS 0
+#endif
+
+#if defined(CONFIG_ZDB_TS_BACKEND_FCB) && (CONFIG_ZDB_TS_BACKEND_FCB)
+#define ZDB_TS_USE_FCB 1
+#else
+#define ZDB_TS_USE_FCB 0
+#endif
 
 #if defined(CONFIG_ZDB_STATS) && (CONFIG_ZDB_STATS)
 #define ZDB_STATS_ENABLED 1
@@ -188,6 +207,10 @@ struct zdb_ts_cursor_ctx {
 	size_t file_offset;
 	size_t ram_offset;
 	bool file_done;
+#if ZDB_TS_USE_FCB
+	struct fcb_entry fcb_loc;
+	bool fcb_started;
+#endif
 };
 
 struct zdb_ts_core_ctx {
@@ -200,6 +223,11 @@ struct zdb_ts_core_ctx {
 	const char *active_stream;
 	bool flush_pending;
 	bool ts_dir_ready;
+#if ZDB_TS_USE_FCB
+	struct fcb ts_fcb;
+	struct flash_sector ts_fcb_sectors[CONFIG_ZDB_TS_FCB_SECTOR_COUNT];
+	bool fcb_initialized;
+#endif
 };
 
 zdb_status_t zdb_ts_recover_stream(zdb_ts_t *ts, size_t *out_truncated_bytes);
@@ -231,6 +259,123 @@ static bool zdb_ts_stream_name_valid(const char *stream_name)
 	return true;
 }
 
+#if ZDB_TS_USE_FCB
+static int zdb_ts_fcb_ensure_init(struct zdb_ts_core_ctx *ctx)
+{
+	uint32_t sector_count;
+	int rc;
+
+	if (ctx == NULL) {
+		return -EINVAL;
+	}
+
+	if (ctx->fcb_initialized) {
+		return 0;
+	}
+
+	(void)memset(&ctx->ts_fcb, 0, sizeof(ctx->ts_fcb));
+	ctx->ts_fcb.f_magic = ZDB_TS_FCB_MAGIC;
+	ctx->ts_fcb.f_version = ZDB_TS_FCB_VERSION;
+	ctx->ts_fcb.f_scratch_cnt = 1U;
+	ctx->ts_fcb.f_sectors = ctx->ts_fcb_sectors;
+
+	sector_count = ARRAY_SIZE(ctx->ts_fcb_sectors);
+	rc = flash_area_get_sectors(CONFIG_ZDB_TS_FCB_FLASH_AREA_ID, &sector_count,
+				    ctx->ts_fcb_sectors);
+	if (rc < 0) {
+		return rc;
+	}
+
+	if (sector_count < 2U) {
+		return -EINVAL;
+	}
+
+	ctx->ts_fcb.f_sector_cnt = (uint16_t)sector_count;
+	rc = fcb_init(CONFIG_ZDB_TS_FCB_FLASH_AREA_ID, &ctx->ts_fcb);
+	if (rc < 0) {
+		return rc;
+	}
+
+	ctx->fcb_initialized = true;
+	return 0;
+}
+
+static int zdb_ts_fcb_append_record(struct zdb_ts_core_ctx *ctx,
+				    const struct zdb_ts_record_i64 *rec)
+{
+	struct fcb_entry loc;
+	int rc;
+
+	if ((ctx == NULL) || (rec == NULL)) {
+		return -EINVAL;
+	}
+
+	rc = zdb_ts_fcb_ensure_init(ctx);
+	if (rc < 0) {
+		return rc;
+	}
+
+	rc = fcb_append(&ctx->ts_fcb, (uint16_t)sizeof(*rec), &loc);
+	if (rc == -ENOSPC) {
+		rc = fcb_rotate(&ctx->ts_fcb);
+		if (rc < 0) {
+			return rc;
+		}
+		rc = fcb_append(&ctx->ts_fcb, (uint16_t)sizeof(*rec), &loc);
+	}
+	if (rc < 0) {
+		return rc;
+	}
+
+	rc = flash_area_write(ctx->ts_fcb.fap, FCB_ENTRY_FA_DATA_OFF(loc), rec, sizeof(*rec));
+	if (rc < 0) {
+		return rc;
+	}
+
+	return fcb_append_finish(&ctx->ts_fcb, &loc);
+}
+
+static zdb_status_t zdb_ts_fcb_cursor_read_record(struct zdb_ts_core_ctx *ctx,
+					   struct zdb_ts_cursor_ctx *cctx,
+					   zdb_bytes_t *out_record)
+{
+	int rc;
+
+	if ((ctx == NULL) || (cctx == NULL) || (out_record == NULL)) {
+		return ZDB_ERR_INVAL;
+	}
+
+	if (!cctx->fcb_started) {
+		(void)memset(&cctx->fcb_loc, 0, sizeof(cctx->fcb_loc));
+		cctx->fcb_loc.fe_sector = NULL;
+		cctx->fcb_started = true;
+	}
+
+	rc = fcb_getnext(&ctx->ts_fcb, &cctx->fcb_loc);
+	if (rc < 0) {
+		if (rc == -ENOENT) {
+			return ZDB_ERR_NOT_FOUND;
+		}
+		return zdb_status_from_errno(rc);
+	}
+
+	if (cctx->fcb_loc.fe_data_len != sizeof(cctx->cache)) {
+		return ZDB_ERR_CORRUPT;
+	}
+
+	rc = flash_area_read(ctx->ts_fcb.fap, FCB_ENTRY_FA_DATA_OFF(cctx->fcb_loc),
+			    &cctx->cache, sizeof(cctx->cache));
+	if (rc < 0) {
+		return zdb_status_from_errno(rc);
+	}
+
+	out_record->data = (const uint8_t *)&cctx->cache;
+	out_record->len = sizeof(cctx->cache);
+	return ZDB_OK;
+}
+#endif
+
+#if ZDB_TS_USE_LITTLEFS
 static int zdb_ts_ensure_stream_dir(const zdb_cfg_t *cfg, struct zdb_ts_core_ctx *ctx)
 {
 	char ts_dir[ZDB_TS_PATH_MAX];
@@ -258,7 +403,9 @@ static int zdb_ts_ensure_stream_dir(const zdb_cfg_t *cfg, struct zdb_ts_core_ctx
 	ctx->ts_dir_ready = true;
 	return 0;
 }
+#endif
 
+ #if ZDB_TS_USE_LITTLEFS
 static void zdb_ts_stream_header_encode(const char *stream_name,
 					struct zdb_ts_stream_header *out)
 {
@@ -312,6 +459,7 @@ static zdb_status_t zdb_ts_stream_header_decode(zdb_t *db,
 
 	return ZDB_OK;
 }
+#endif
 
 static void zdb_ts_record_encode(const zdb_ts_sample_i64_t *sample, struct zdb_ts_record_i64 *out)
 {
@@ -360,6 +508,7 @@ static zdb_status_t zdb_ts_record_decode(zdb_t *db,
 	return ZDB_OK;
 }
 
+#if ZDB_TS_USE_LITTLEFS
 static int zdb_ts_build_path(const zdb_cfg_t *cfg, const char *stream_name,
 			     char *path, size_t path_len)
 {
@@ -427,6 +576,7 @@ static int zdb_ts_flush_buffer_locked(struct zdb_ts_core_ctx *ctx)
 	ctx->ingest_used = 0U;
 	return 0;
 }
+#endif
 
 static bool zdb_ts_agg_update(zdb_ts_agg_t agg, double sample, uint32_t *points, double *acc)
 {
@@ -461,6 +611,7 @@ static bool zdb_ts_agg_update(zdb_ts_agg_t agg, double sample, uint32_t *points,
 	return true;
 }
 
+#if ZDB_TS_USE_LITTLEFS
 static zdb_status_t zdb_ts_cursor_read_file_record(struct zdb_ts_cursor_ctx *cctx,
 						    zdb_bytes_t *out_record)
 {
@@ -570,6 +721,7 @@ static zdb_status_t zdb_ts_ensure_stream_header(zdb_t *db, const char *stream_na
 	(void)fs_close(&file);
 	return zdb_ts_stream_header_decode(db, &hdr, stream_name);
 }
+#endif
 
 static bool zdb_ts_window_match(zdb_ts_window_t window, uint64_t ts_ms)
 {
@@ -611,10 +763,14 @@ static void zdb_ts_flush_work_handler(struct k_work *work)
 		return;
 	}
 
+#if ZDB_TS_USE_LITTLEFS
 	rc = zdb_ts_flush_buffer_locked(ctx);
 	if (rc < 0) {
 		/* Keep data in buffer for retry by not mutating ingest_used on error. */
 	}
+#else
+	ARG_UNUSED(rc);
+#endif
 	ctx->flush_pending = false;
 	zdb_unlock_write(ctx->db);
 }
@@ -638,6 +794,8 @@ static struct zdb_ts_core_ctx *zdb_ts_ctx_get_or_alloc(zdb_t *db)
 	(void)memset(ctx, 0, sizeof(*ctx));
 	ctx->work_q = db->cfg->work_q;
 	ctx->db = db;
+
+#if ZDB_TS_USE_LITTLEFS
 	ctx->ingest_capacity = MIN((size_t)CONFIG_ZDB_TS_INGEST_BUFFER_BYTES,
 				   (size_t)CONFIG_ZDB_TS_INGEST_SLAB_BLOCK_SIZE);
 	if ((db->ts_ingest_slab == NULL) ||
@@ -645,6 +803,10 @@ static struct zdb_ts_core_ctx *zdb_ts_ctx_get_or_alloc(zdb_t *db)
 		k_mem_slab_free(db->core_slab, ctx);
 		return NULL;
 	}
+#else
+	ctx->ingest_capacity = 0U;
+	ctx->ingest_buf = NULL;
+#endif
 
 	k_work_init(&ctx->flush_work, zdb_ts_flush_work_handler);
 	db->ts_ctx = ctx;
@@ -1122,6 +1284,7 @@ uint32_t zdb_kv_key_to_id(const char *key)
 zdb_status_t zdb_ts_open(zdb_t *db, const char *stream_name, zdb_ts_t *ts)
 {
 	struct zdb_ts_core_ctx *ctx;
+	int fcb_rc;
 	zdb_status_t rc;
 	size_t truncated = 0U;
 
@@ -1142,6 +1305,13 @@ zdb_status_t zdb_ts_open(zdb_t *db, const char *stream_name, zdb_ts_t *ts)
 		return ZDB_ERR_NOMEM;
 	}
 
+#if ZDB_TS_USE_FCB
+	fcb_rc = zdb_ts_fcb_ensure_init(ctx);
+	if (fcb_rc < 0) {
+		return zdb_status_from_errno(fcb_rc);
+	}
+#else
+	ARG_UNUSED(fcb_rc);
 	{
 		int ensure_rc = zdb_ts_ensure_stream_dir(db->cfg, ctx);
 
@@ -1154,6 +1324,7 @@ zdb_status_t zdb_ts_open(zdb_t *db, const char *stream_name, zdb_ts_t *ts)
 	if (rc != ZDB_OK) {
 		return rc;
 	}
+#endif
 
 	if ((ctx->active_stream != NULL) && (strcmp(ctx->active_stream, stream_name) != 0)) {
 		return ZDB_ERR_BUSY;
@@ -1216,6 +1387,17 @@ zdb_status_t zdb_ts_append_i64(zdb_ts_t *ts, const zdb_ts_sample_i64_t *sample)
 		return lock_rc;
 	}
 
+#if ZDB_TS_USE_FCB
+	zdb_ts_record_encode(sample, &rec);
+	rc = zdb_ts_fcb_append_record(ctx, &rec);
+	zdb_unlock_write(ts->db);
+
+	if (rc < 0) {
+		return zdb_status_from_errno(rc);
+	}
+
+	return ZDB_OK;
+#else
 	if ((ctx->ingest_capacity < sizeof(rec)) || (ctx->ingest_buf == NULL)) {
 		zdb_unlock_write(ts->db);
 		return ZDB_ERR_NOMEM;
@@ -1240,6 +1422,7 @@ zdb_status_t zdb_ts_append_i64(zdb_ts_t *ts, const zdb_ts_sample_i64_t *sample)
 	}
 
 	return ZDB_OK;
+#endif
 }
 
 zdb_status_t zdb_ts_append_batch_i64(zdb_ts_t *ts, const zdb_ts_sample_i64_t *samples,
@@ -1362,6 +1545,13 @@ zdb_status_t zdb_ts_flush_async(zdb_ts_t *ts)
 		return ZDB_ERR_INVAL;
 	}
 
+#if ZDB_TS_USE_FCB
+	ARG_UNUSED(ctx);
+	ARG_UNUSED(lock_rc);
+	ARG_UNUSED(rc);
+	return ZDB_OK;
+#endif
+
 	ctx = zdb_ts_ctx_get_or_alloc(ts->db);
 	if ((ctx == NULL) || (ctx->work_q == NULL)) {
 		return ZDB_ERR_UNSUPPORTED;
@@ -1391,6 +1581,13 @@ zdb_status_t zdb_ts_flush_async(zdb_ts_t *ts)
 
 zdb_status_t zdb_ts_flush_sync(zdb_ts_t *ts, k_timeout_t timeout)
 {
+#if ZDB_TS_USE_FCB
+	ARG_UNUSED(timeout);
+	if ((ts == NULL) || (ts->db == NULL)) {
+		return ZDB_ERR_INVAL;
+	}
+	return ZDB_OK;
+#else
 	int64_t deadline;
 	zdb_status_t rc;
 	struct zdb_ts_core_ctx *ctx;
@@ -1429,11 +1626,21 @@ zdb_status_t zdb_ts_flush_sync(zdb_ts_t *ts, k_timeout_t timeout)
 	}
 
 	return ZDB_OK;
+#endif
 }
 
 zdb_status_t zdb_ts_query_aggregate(zdb_ts_t *ts, zdb_ts_window_t window,
 			    zdb_ts_agg_t agg, zdb_ts_agg_result_t *out_result)
 {
+#if ZDB_TS_USE_FCB
+	ARG_UNUSED(window);
+	ARG_UNUSED(agg);
+	ARG_UNUSED(out_result);
+	if ((ts == NULL) || (ts->db == NULL)) {
+		return ZDB_ERR_INVAL;
+	}
+	return ZDB_ERR_UNSUPPORTED;
+#else
 	struct zdb_ts_core_ctx *ctx;
 	struct fs_file_t file;
 	struct zdb_ts_stream_header hdr;
@@ -1580,6 +1787,7 @@ zdb_status_t zdb_ts_query_aggregate(zdb_ts_t *ts, zdb_ts_window_t window,
 	}
 
 	return ZDB_OK;
+#endif
 }
 
 zdb_status_t zdb_ts_cursor_open(zdb_ts_t *ts, zdb_ts_window_t window,
@@ -1593,10 +1801,14 @@ zdb_status_t zdb_ts_cursor_open(zdb_ts_t *ts, zdb_ts_window_t window,
 		return ZDB_ERR_INVAL;
 	}
 
+#if ZDB_TS_USE_LITTLEFS
 	rc = zdb_ts_ensure_stream_header(ts->db, ts->stream_name);
 	if (rc != ZDB_OK) {
 		return rc;
 	}
+#else
+	rc = ZDB_OK;
+#endif
 
 	if (k_mem_slab_alloc(ts->db->cursor_slab, (void **)&ctx, K_NO_WAIT) != 0) {
 		return ZDB_ERR_NOMEM;
@@ -1608,9 +1820,20 @@ zdb_status_t zdb_ts_cursor_open(zdb_ts_t *ts, zdb_ts_window_t window,
 	ctx->file_offset = sizeof(struct zdb_ts_stream_header);
 	ctx->ram_offset = 0U;
 	ctx->file_done = false;
+#if ZDB_TS_USE_FCB
+	ctx->fcb_started = false;
+	(void)memset(&ctx->fcb_loc, 0, sizeof(ctx->fcb_loc));
+	ctx->file_offset = 0U;
+	ctx->file_done = true;
+#endif
 
 	out_cursor->model = ZDB_MODEL_TS;
+
+#if ZDB_TS_USE_FCB
+	out_cursor->backend = ZDB_BACKEND_FCB;
+#else
 	out_cursor->backend = ZDB_BACKEND_LFS;
+#endif
 	out_cursor->predicate = predicate;
 	out_cursor->predicate_ctx = predicate_ctx;
 	out_cursor->impl = ctx;
@@ -1635,6 +1858,60 @@ zdb_status_t zdb_cursor_next(zdb_cursor_t *cursor, zdb_bytes_t *out_record)
 
 	cctx = (struct zdb_ts_cursor_ctx *)cursor->impl;
 
+#if ZDB_TS_USE_FCB
+	if (cursor->backend == ZDB_BACKEND_FCB) {
+		tctx = zdb_ts_ctx_get_or_alloc(cctx->db);
+		if (tctx == NULL) {
+			return ZDB_ERR_INVAL;
+		}
+
+		while (true) {
+			uint64_t ts_ms;
+			int64_t val;
+			zdb_status_t dec_rc;
+			zdb_status_t rc_fcb = zdb_ts_fcb_cursor_read_record(tctx, cctx, &candidate);
+
+			if (rc_fcb == ZDB_ERR_NOT_FOUND) {
+				out_record->data = NULL;
+				out_record->len = 0U;
+				return ZDB_ERR_NOT_FOUND;
+			}
+			if (rc_fcb != ZDB_OK) {
+				return rc_fcb;
+			}
+
+			(void)memcpy(&rec, candidate.data, sizeof(rec));
+			dec_rc = zdb_ts_record_decode(cctx->db, &rec, &ts_ms, &val);
+			if (dec_rc == ZDB_ERR_UNSUPPORTED) {
+				continue;
+			}
+			if (dec_rc != ZDB_OK) {
+				return dec_rc;
+			}
+			ARG_UNUSED(val);
+			cursor->iter_count++;
+
+			if ((CONFIG_ZDB_SCAN_YIELD_EVERY_N > 0) &&
+			    ((cursor->iter_count % CONFIG_ZDB_SCAN_YIELD_EVERY_N) == 0U)) {
+				k_yield();
+			}
+
+			if (!zdb_ts_window_match(cctx->window, ts_ms)) {
+				continue;
+			}
+
+			if (!zdb_ts_predicate_match(cursor, &candidate)) {
+				continue;
+			}
+
+			*out_record = candidate;
+			cursor->current = candidate;
+			return ZDB_OK;
+		}
+	}
+#endif
+
+#if ZDB_TS_USE_LITTLEFS
 	while (!cctx->file_done) {
 		uint64_t ts_ms;
 		int64_t val;
@@ -1736,10 +2013,22 @@ zdb_status_t zdb_cursor_next(zdb_cursor_t *cursor, zdb_bytes_t *out_record)
 	out_record->data = NULL;
 	out_record->len = 0U;
 	return ZDB_ERR_NOT_FOUND;
+#else
+	out_record->data = NULL;
+	out_record->len = 0U;
+	return ZDB_ERR_UNSUPPORTED;
+#endif
 }
 
 zdb_status_t zdb_ts_recover_stream(zdb_ts_t *ts, size_t *out_truncated_bytes)
 {
+#if ZDB_TS_USE_FCB
+	ARG_UNUSED(out_truncated_bytes);
+	if ((ts == NULL) || (ts->db == NULL) || (ts->stream_name == NULL)) {
+		return ZDB_ERR_INVAL;
+	}
+	return ZDB_OK;
+#else
 	struct fs_file_t file;
 	struct zdb_ts_stream_header hdr;
 	struct zdb_ts_record_i64 rec;
@@ -1856,6 +2145,7 @@ zdb_status_t zdb_ts_recover_stream(zdb_ts_t *ts, size_t *out_truncated_bytes)
 
 	(void)fs_close(&file);
 	return ZDB_OK;
+#endif
 }
 
 /*

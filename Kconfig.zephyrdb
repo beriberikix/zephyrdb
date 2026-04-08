@@ -49,9 +49,30 @@ endchoice
 config ZDB_TS
 	bool "Enable ZephyrDB Time-Series module"
 	default y
-	depends on ZDB_CORE && FILE_SYSTEM
+	depends on ZDB_CORE && (FILE_SYSTEM || FCB)
 	help
-	  Enables LittleFS-backed append-log time-series APIs.
+	  Enables time-series APIs.
+
+choice ZDB_TS_BACKEND
+	prompt "TS backend"
+	default ZDB_TS_BACKEND_LITTLEFS
+	depends on ZDB_TS
+	help
+	  Selects the storage backend used by ZephyrDB TS APIs.
+
+config ZDB_TS_BACKEND_LITTLEFS
+	bool "LittleFS"
+	depends on FILE_SYSTEM
+	help
+	  Use LittleFS append-log files for time-series storage.
+
+config ZDB_TS_BACKEND_FCB
+	bool "FCB"
+	depends on FCB
+	help
+	  Use Flash Circular Buffer (FCB) for time-series storage.
+
+endchoice
 
 menu "Core Boundaries"
 	depends on ZDB_CORE
@@ -136,6 +157,7 @@ config ZDB_TS_INGEST_BUFFER_BYTES
 	int "TS ingest buffer bytes"
 	range 64 16384
 	default 1024
+	depends on ZDB_TS_BACKEND_LITTLEFS
 	help
 	  Upper bound for RAM staging prior to sequential flush.
 
@@ -143,11 +165,13 @@ config ZDB_TS_FLUSH_QUEUE_DEPTH
 	int "TS flush queue depth"
 	range 1 128
 	default 8
+	depends on ZDB_TS_BACKEND_LITTLEFS
 
 config ZDB_TS_MAX_AGG_POINTS
 	int "TS aggregation max points"
 	range 1 1048576
 	default 4096
+	depends on ZDB_TS_BACKEND_LITTLEFS
 
 config ZDB_TS_INGEST_SLAB_BLOCK_SIZE
 	int "TS ingest slab block size (bytes)"
@@ -162,6 +186,7 @@ config ZDB_TS_INGEST_SLAB_BLOCK_COUNT
 config ZDB_TS_AUTO_RECOVER_ON_OPEN
 	bool "Auto recover TS stream on open"
 	default y
+	depends on ZDB_TS_BACKEND_LITTLEFS
 	help
 	  If enabled, zdb_ts_open() scans and truncates trailing corrupt or
 	  partial records automatically.
@@ -170,9 +195,26 @@ config ZDB_TS_MAX_RECOVERY_TRUNCATE_BYTES
 	int "Maximum bytes recover may truncate"
 	range 0 1048576
 	default 4096
+	depends on ZDB_TS_BACKEND_LITTLEFS
 	help
 	  Safety cap for automatic recovery truncation. Set to 0 to disable
 	  truncation cap checks.
+
+config ZDB_TS_FCB_FLASH_AREA_ID
+	int "TS FCB flash area ID"
+	range 0 255
+	default 0
+	depends on ZDB_TS_BACKEND_FCB
+	help
+	  Flash area ID passed to fcb_init() for TS backend when using FCB.
+
+config ZDB_TS_FCB_SECTOR_COUNT
+	int "TS FCB sector count"
+	range 2 64
+	default 4
+	depends on ZDB_TS_BACKEND_FCB
+	help
+	  Number of sectors provided to the FCB instance.
 
 config ZDB_TS_MULTISTREAM
 	bool "Enable multi-stream time-series support (Stage 2.5)"
@@ -220,7 +262,7 @@ config ZDB_LFS_MOUNT_POINT
 config ZDB_TS_DIRNAME
 	string "TS stream directory name"
 	default "zdb"
-	depends on ZDB_TS
+	depends on ZDB_TS && ZDB_TS_BACKEND_LITTLEFS
 	help
 	  Directory under ZDB_LFS_MOUNT_POINT used for time-series stream
 	  files. This namespaces ZephyrDB TS files away from other files that

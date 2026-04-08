@@ -2,14 +2,14 @@
 
 Embedded multi-model database for Zephyr RTOS designed for memory-constrained IoT and embedded systems.
 
-**Current Scope:** Core + KV (NVS/ZMS-backed) + TS (LittleFS-backed) modules with durability, recovery, instrumentation, Stage 2 FlatBuffers bootstrap helpers, Stage 2.5 multi-stream support, and Stage 3 document model foundation.
+**Current Scope:** Core + KV (NVS/ZMS-backed) + TS (LittleFS/FCB-backed) modules with durability, recovery, instrumentation, Stage 2 FlatBuffers bootstrap helpers, Stage 2.5 multi-stream support, and Stage 3 document model foundation.
 
 ## Features
 - **Stage 2.5 multi-stream**: Optional concurrent stream management with unified flush and cross-stream aggregation
 - **Stage 3 document model**: Semi-structured data support with flexible schemas, variable-length fields, and document CRUD APIs
 
 - **Zero-malloc design**: Static slab-based allocation (no heap fragmentation)
-- **Multiple data models**: KV (key-value via NVS or ZMS), TS (time-series with append-log via LittleFS)
+- **Multiple data models**: KV (key-value via NVS or ZMS), TS (time-series with append-log via LittleFS or FCB)
 - **Durability & recovery**: Versioned records with CRC32 validation; automatic corruption detection and recovery
 - **Concurrency**: Reader-writer locks for safe multi-threaded access
 - **Observability**: Full stats instrumentation (6 TS-specific counters) with compact telemetry export format
@@ -45,6 +45,9 @@ CONFIG_ZDB_KV_BACKEND_NVS=y
 
 # TS module (optional)
 CONFIG_ZDB_TS=y
+CONFIG_ZDB_TS_BACKEND_LITTLEFS=y
+# or:
+# CONFIG_ZDB_TS_BACKEND_FCB=y
 
 # Diagnostics (optional)
 CONFIG_ZDB_STATS=y
@@ -208,11 +211,12 @@ Recovery scans to first decode failure and truncates trailing corrupt records.
 - Compatibility note: `zdb_kv_key_to_id()` now returns `uint32_t` (was `uint16_t`) to support ZMS IDs.
 
 #### TS (Time-Series)
-- Backend: LittleFS (file-based append-log)
+- Backend: LittleFS (file-based append-log) or FCB (flash circular buffer)
 - Stream files: `<mount>/<CONFIG_ZDB_TS_DIRNAME>/<stream>.zts` (default directory `zdb`)
 - Staging: RAM buffer (configurable size)
 - Use case: Sensor telemetry, event logs, metrics
 - API: `zdb_ts_append_i64()`, `zdb_ts_query_aggregate()`, cursor iteration via `zdb_cursor_next()`
+- FCB backend limitation: `zdb_ts_query_aggregate()` returns `ZDB_ERR_UNSUPPORTED`.
 
 ## Configuration
 
@@ -223,6 +227,8 @@ See `Kconfig.zephyrdb` for all 30+ options:
 | `CONFIG_ZEPHYRDB` | n | Enable core module |
 | `CONFIG_ZDB_KV` | y | Enable KV sub-module |
 | `CONFIG_ZDB_TS` | y | Enable TS sub-module |
+| `CONFIG_ZDB_TS_BACKEND_LITTLEFS` | y | Use LittleFS TS backend |
+| `CONFIG_ZDB_TS_BACKEND_FCB` | n | Use FCB TS backend |
 | `CONFIG_ZDB_STATS` | n | Enable instrumentation counters |
 | `CONFIG_ZDB_TS_AUTO_RECOVER_ON_OPEN` | y | Auto-recover on stream open |
 | `CONFIG_ZDB_TS_MAX_RECOVERY_TRUNCATE_BYTES` | 4096 | Max safe truncation per recovery |
@@ -252,7 +258,7 @@ See `Kconfig.zephyrdb` for all 30+ options:
 - `zdb_ts_append_batch_i64(ts, samples, count)` - Append batch
 - `zdb_ts_flush_async(ts)` - Schedule background flush
 - `zdb_ts_flush_sync(ts, timeout)` - Wait for flush completion
-- `zdb_ts_query_aggregate(ts, window, agg, out)` - Query min/max/avg/sum/count
+- `zdb_ts_query_aggregate(ts, window, agg, out)` - Query min/max/avg/sum/count (LittleFS backend)
 - `zdb_ts_recover_stream(ts, out_bytes)` - Manual recovery (auto-run on open if enabled)
 - `zdb_ts_stats_get(db, out)` - Get TS-specific stats
 - `zdb_ts_stats_reset(db)` - Reset TS counters
@@ -321,8 +327,8 @@ See `Kconfig.zephyrdb` for all 30+ options:
 Dedicated samples are now provided for each model plus helper scenarios:
 
 - `samples/kv_basic` - KV open/set/get/delete flow (accepts `prj_nrf52840dk.conf` and `prj_zms.conf` overlays)
-- `samples/ts_basic` - TS open/append/flush/aggregate flow (accepts `prj_nrf52840dk.conf` overlay)
-- `samples/doc_basic` - Document create/set/save/export flow (accepts `prj_nrf52840dk.conf` overlay)
+- `samples/ts_basic` - TS open/append/flush/aggregate flow (accepts `prj_nrf52840dk.conf`, `prj_fcb.conf`, `prj_sdcard.conf`, and `prj_nrf52840dk_sdcard.conf` overlays)
+- `samples/doc_basic` - Document create/set/save/export flow (accepts `prj_nrf52840dk.conf` and `prj_sdcard.conf` overlays)
 - `samples/core_health_stats` - Core health + stats snapshot/reset helper
 - `samples/doc_query_filters` - Document query filter construction helper
 
