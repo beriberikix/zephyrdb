@@ -257,8 +257,9 @@ To verify that Settings (Zephyr system subsystem) and ZephyrDB can coexist on th
    struct fs_mount_t zdb_fs_mount;
    
    zdb_cfg_t cfg = {
-       .partition_ref = (void *)&zdb_nvs,  // Points to ZDB partition
-       .lfs_mount_point = "/zdb_fs"        // Points to ZDB FS partition
+       .kv_backend_fs = &zdb_nvs,          // Points to ZDB partition
+       .lfs_mount_point = "/zdb_fs",       // Points to ZDB FS partition
+       .work_q = &k_sys_work_q,
    };
    ```
 

@@ -51,6 +51,39 @@ extern "C" {
 			    CONFIG_ZDB_TS_INGEST_SLAB_BLOCK_COUNT, 4)
 
 /*
+ * All-in-one static instance declaration.
+ * Declares slabs for all enabled modules and a zdb_t with pre-wired pointers.
+ * Use with zdb_init(&name, &cfg) — no manual slab wiring needed.
+ */
+#if defined(CONFIG_ZDB_KV) && (CONFIG_ZDB_KV)
+#define _ZDB_KV_IO_SLAB_DECL(name) ZDB_DEFINE_KV_IO_SLAB(name##_kv_io_slab);
+#define _ZDB_KV_IO_SLAB_REF(name)  &name##_kv_io_slab
+#else
+#define _ZDB_KV_IO_SLAB_DECL(name)
+#define _ZDB_KV_IO_SLAB_REF(name)  NULL
+#endif
+
+#if defined(CONFIG_ZDB_TS) && (CONFIG_ZDB_TS)
+#define _ZDB_TS_INGEST_SLAB_DECL(name) ZDB_DEFINE_TS_INGEST_SLAB(name##_ts_ingest_slab);
+#define _ZDB_TS_INGEST_SLAB_REF(name)  &name##_ts_ingest_slab
+#else
+#define _ZDB_TS_INGEST_SLAB_DECL(name)
+#define _ZDB_TS_INGEST_SLAB_REF(name)  NULL
+#endif
+
+#define ZDB_DEFINE_STATIC(name, cfg)                                                            \
+	ZDB_DEFINE_CORE_SLAB(name##_core_slab);                                                      \
+	ZDB_DEFINE_CURSOR_SLAB(name##_cursor_slab);                                                  \
+	_ZDB_KV_IO_SLAB_DECL(name)                                                                   \
+	_ZDB_TS_INGEST_SLAB_DECL(name)                                                               \
+	static zdb_t name = {                                                                         \
+		.core_slab = &name##_core_slab,                                                            \
+		.cursor_slab = &name##_cursor_slab,                                                        \
+		.kv_io_slab = _ZDB_KV_IO_SLAB_REF(name),                                                  \
+		.ts_ingest_slab = _ZDB_TS_INGEST_SLAB_REF(name),                                          \
+	}
+
+/*
  * Core types
  */
 typedef enum {
@@ -93,15 +126,6 @@ typedef struct {
 } zdb_bytes_t;
 
 typedef struct {
-	uint32_t ts_recover_runs;
-	uint32_t ts_recover_failures;
-	uint64_t ts_recover_truncated_bytes;
-	uint32_t ts_crc_failures;
-	uint32_t ts_corrupt_records;
-	uint32_t ts_unsupported_versions;
-} zdb_stats_t;
-
-typedef struct {
 	uint32_t recover_runs;
 	uint32_t recover_failures;
 	uint64_t recover_truncated_bytes;
@@ -128,17 +152,14 @@ typedef struct __packed {
 
 typedef struct {
 	/*
-	 * First-pass contract:
-	 * - KV path expects partition_ref to point to an initialized backend fs:
-	 *   struct nvs_fs when CONFIG_ZDB_KV_BACKEND_NVS=y,
-	 *   struct zms_fs when CONFIG_ZDB_KV_BACKEND_ZMS=y.
-	 * - TS path currently manages backend storage objects internally.
+	 * KV backend filesystem handle:
+	 * - struct nvs_fs * when CONFIG_ZDB_KV_BACKEND_NVS=y
+	 * - struct zms_fs * when CONFIG_ZDB_KV_BACKEND_ZMS=y
+	 * - NULL if KV module is not used.
 	 */
-	const void *partition_ref;
+	const void *kv_backend_fs;
 	const char *lfs_mount_point;
-	const char *kv_namespace;
 	struct k_work_q *work_q;
-	uint16_t scan_yield_every_n;
 } zdb_cfg_t;
 
 typedef struct {
@@ -151,14 +172,14 @@ typedef struct {
 	void *kv_ctx;
 	void *ts_ctx;
 	const zdb_cfg_t *cfg;
-	zdb_stats_t stats;
+	zdb_ts_stats_t ts_stats;
 } zdb_t;
 
 typedef bool (*zdb_predicate_fn)(zdb_model_t model, const zdb_bytes_t *record, void *user_ctx);
 
 /*
  * Cursor framework for cooperative scans.
- * Implementations should call k_yield according to scan_yield_every_n.
+ * Implementations call k_yield according to CONFIG_ZDB_SCAN_YIELD_EVERY_N.
  */
 typedef struct zdb_cursor {
 	zdb_model_t model;
@@ -175,8 +196,6 @@ typedef struct zdb_cursor {
 zdb_status_t zdb_init(zdb_t *db, const zdb_cfg_t *cfg);
 zdb_status_t zdb_deinit(zdb_t *db);
 zdb_health_t zdb_health(const zdb_t *db);
-void zdb_stats_get(const zdb_t *db, zdb_stats_t *out_stats);
-void zdb_stats_reset(zdb_t *db);
 void zdb_ts_stats_get(const zdb_t *db, zdb_ts_stats_t *out_stats);
 void zdb_ts_stats_reset(zdb_t *db);
 
@@ -210,12 +229,6 @@ zdb_status_t zdb_kv_set(zdb_kv_t *kv, const char *key, const void *value, size_t
 zdb_status_t zdb_kv_get(zdb_kv_t *kv, const char *key, void *out_value,
 			size_t out_capacity, size_t *out_len);
 zdb_status_t zdb_kv_delete(zdb_kv_t *kv, const char *key);
-
-/*
- * Exposes key->numeric-id mapping required by KV backends.
- * Hash algorithm is implementation-defined but stable within a release line.
- */
-uint32_t zdb_kv_key_to_id(const char *key);
 #endif /* CONFIG_ZDB_KV */
 
 /*
@@ -244,6 +257,8 @@ typedef struct {
 	uint64_t from_ts_ms;
 	uint64_t to_ts_ms;
 } zdb_ts_window_t;
+
+#define ZDB_TS_WINDOW_ALL ((zdb_ts_window_t){0, 0})
 
 typedef struct {
 	zdb_ts_agg_t agg;
@@ -287,6 +302,7 @@ zdb_status_t zdb_ts_cursor_open(zdb_ts_t *ts, zdb_ts_window_t window,
 			zdb_predicate_fn predicate, void *predicate_ctx,
 			zdb_cursor_t *out_cursor);
 zdb_status_t zdb_cursor_next(zdb_cursor_t *cursor, zdb_bytes_t *out_record);
+#endif /* CONFIG_ZDB_TS */
 
 /*
  * Stage 3: Document Model (semi-structured data via FlatBuffers)
@@ -342,6 +358,8 @@ typedef struct {
 	double numeric_value;
 	/* for string comparisons */
 	const char *string_value;
+	/* for bool comparisons (preferred over encoding as numeric_value) */
+	bool bool_value;
 } zdb_doc_query_filter_t;
 
 typedef struct {
@@ -416,8 +434,6 @@ zdb_status_t zdb_doc_export_flatbuffer(zdb_doc_t *doc, uint8_t *out_buf,
 				       size_t out_capacity, size_t *out_len);
 
 #endif /* CONFIG_ZDB_DOC */
-
-#endif /* CONFIG_ZDB_TS */
 
 #ifdef __cplusplus
 }

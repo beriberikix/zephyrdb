@@ -3,21 +3,13 @@
 
 #include "zephyrdb.h"
 
-ZDB_DEFINE_CORE_SLAB(g_core_slab);
-ZDB_DEFINE_CURSOR_SLAB(g_cursor_slab);
-#if defined(CONFIG_ZDB_TS) && (CONFIG_ZDB_TS)
-ZDB_DEFINE_TS_INGEST_SLAB(g_ts_ingest_slab);
-#endif
-
-static zdb_t g_db;
-
 static const zdb_cfg_t g_cfg = {
-    .partition_ref = NULL,
+    .kv_backend_fs = NULL,
     .lfs_mount_point = CONFIG_ZDB_LFS_MOUNT_POINT,
-    .kv_namespace = "ts_basic",
     .work_q = &k_sys_work_q,
-    .scan_yield_every_n = CONFIG_ZDB_SCAN_YIELD_EVERY_N,
 };
+
+ZDB_DEFINE_STATIC(g_db, g_cfg);
 
 int main(void)
 {
@@ -32,15 +24,7 @@ int main(void)
         .value = 100,
     };
     zdb_ts_agg_result_t agg;
-    zdb_ts_window_t window = {
-        .from_ts_ms = 0U,
-        .to_ts_ms = UINT64_MAX,
-    };
-
-    g_db.core_slab = &g_core_slab;
-    g_db.cursor_slab = &g_cursor_slab;
-    g_db.kv_io_slab = NULL;
-    g_db.ts_ingest_slab = &g_ts_ingest_slab;
+    zdb_ts_window_t window = ZDB_TS_WINDOW_ALL;
 
     rc = zdb_init(&g_db, &g_cfg);
     if (rc != ZDB_OK) {

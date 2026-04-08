@@ -5,7 +5,7 @@ This helper sample is intended for app bring-up and diagnostics.
 It demonstrates:
 - core initialization/deinitialization
 - health checks (`zdb_health`)
-- stats snapshot/reset (`zdb_stats_get`, `zdb_stats_reset`)
+- TS stats snapshot/reset (`zdb_ts_stats_get`, `zdb_ts_stats_reset`)
 
 Build example:
 

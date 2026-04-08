@@ -63,28 +63,16 @@ CONFIG_ZDB_FLATBUFFERS=y
 ```c
 #include <zephyrdb.h>
 
-/* Define static slabs (zero-malloc policy) */
-ZDB_DEFINE_CORE_SLAB(g_zdb_core_slab);
-ZDB_DEFINE_CURSOR_SLAB(g_zdb_cursor_slab);
-ZDB_DEFINE_KV_IO_SLAB(g_zdb_kv_io_slab);
-ZDB_DEFINE_TS_INGEST_SLAB(g_zdb_ts_ingest_slab);
-
-/* Create DB instance */
-static zdb_t db;
-
 static const zdb_cfg_t cfg = {
-    .partition_ref = NULL,  /* Set to mounted struct nvs_fs* or struct zms_fs* for KV */
+    .kv_backend_fs = NULL,  /* Set to mounted struct nvs_fs* or struct zms_fs* for KV */
     .lfs_mount_point = CONFIG_ZDB_LFS_MOUNT_POINT,
-    .kv_namespace = "app",
     .work_q = &k_sys_work_q,
-    .scan_yield_every_n = CONFIG_ZDB_SCAN_YIELD_EVERY_N,
 };
 
+/* Declares slabs + db instance with pre-wired pointers (zero-malloc) */
+ZDB_DEFINE_STATIC(db, cfg);
+
 /* Initialize DB */
-db.core_slab = &g_zdb_core_slab;
-db.cursor_slab = &g_zdb_cursor_slab;
-db.kv_io_slab = &g_zdb_kv_io_slab;
-db.ts_ingest_slab = &g_zdb_ts_ingest_slab;
 zdb_init(&db, &cfg);
 ```
 
@@ -170,7 +158,7 @@ Notes:
 
 ## Storage Isolation
 
-- KV backends (NVS/ZMS): use a dedicated partition for ZephyrDB KV and do not share with the app's Settings backend partition.
+- KV backends (NVS/ZMS): use a dedicated partition for ZephyrDB KV and do not share with the app's Settings backend partition. Set `cfg.kv_backend_fs` to the mounted `struct nvs_fs *` or `struct zms_fs *`.
 - TS stream files are namespaced under `<mount>/<CONFIG_ZDB_TS_DIRNAME>/` (default `<mount>/zdb/`).
 - Document files are namespaced under `<mount>/zdb_docs/`.
 - Sharing a LittleFS mount point is supported, but storage space and wear are shared with user files in that partition.
@@ -208,7 +196,6 @@ Recovery scans to first decode failure and truncates trailing corrupt records.
 - Backend: Zephyr NVS or Zephyr ZMS
 - Use case: Configuration, calibration, firmware metadata
 - API: `zdb_kv_set()`, `zdb_kv_get()`, `zdb_kv_delete()`
-- Compatibility note: `zdb_kv_key_to_id()` now returns `uint32_t` (was `uint16_t`) to support ZMS IDs.
 
 #### TS (Time-Series)
 - Backend: LittleFS (file-based append-log) or FCB (flash circular buffer)
@@ -234,7 +221,7 @@ See `Kconfig.zephyrdb` for all 30+ options:
 | `CONFIG_ZDB_TS_MAX_RECOVERY_TRUNCATE_BYTES` | 4096 | Max safe truncation per recovery |
 | `CONFIG_ZDB_TS_INGEST_BUFFER_BYTES` | 1024 | RAM staging buffer size |
 | `CONFIG_ZDB_LFS_MOUNT_POINT` | "/lfs" | Filesystem mount for TS |
-| `CONFIG_ZDB_SCAN_YIELD_EVERY_N` | 100 | Yield during scans every N records |
+| `CONFIG_ZDB_SCAN_YIELD_EVERY_N` | 64 | Yield during scans every N records |
 | `CONFIG_ZDB_FLATBUFFERS` | n | Enable Stage 2 FlatBuffers helper APIs |
 | `CONFIG_ZDB_TS_MULTISTREAM` | n | Enable Stage 2.5 multi-stream support |
 | `CONFIG_ZDB_TS_MAX_CONCURRENT_STREAMS` | 8 | Max simultaneous open streams (multistream mode) |
@@ -247,8 +234,6 @@ See `Kconfig.zephyrdb` for all 30+ options:
 - `zdb_init(db, cfg)` - Initialize database
 - `zdb_deinit(db)` - Shutdown, free slabs
 - `zdb_health(db)` - Get health status
-- `zdb_stats_get(db, out)` - Get full instrumentation snapshot
-- `zdb_stats_reset(db)` - Clear all counters
 
 ### Time-Series
 
@@ -266,17 +251,15 @@ See `Kconfig.zephyrdb` for all 30+ options:
 - `zdb_ts_stats_export_validate(export)` - Validate exported stats integrity
 - `zdb_ts_sample_i64_export_flatbuffer(sample, out, cap, out_len)` - Export TS sample as FlatBuffer bytes
 
-### Multi-Stream Management (Stage 2.5, optional)
+### Multi-Stream Management (Stage 2.5, roadmap)
+
+Not yet implemented. Planned APIs:
 
 - `zdb_ts_multistream_init(db, names, count, manager)` - Initialize multi-stream manager
 - `zdb_ts_multistream_deinit(manager)` - Shutdown multi-stream manager
-- `zdb_ts_multistream_count(manager)` - Get active stream count
-- `zdb_ts_multistream_get_stream(manager, idx)` - Get stream by index
-- `zdb_ts_multistream_find_stream(manager, name)` - Find stream by name
 - `zdb_ts_multistream_flush_sync(manager, timeout)` - Coordinate flush across all streams
 - `zdb_ts_multistream_query_aggregate(manager, window, agg, out)` - Aggregate query across all streams
 - `zdb_ts_enum_streams(db, callback, ctx)` - Enumerate discovered streams on disk
-- `zdb_ts_stream_info(db, name, out_info)` - Get stream metadata (size, record count, bounds)
 
 ### Cursor/Query
 
