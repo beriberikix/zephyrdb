@@ -5,6 +5,7 @@
 #include <math.h>
 #include <stdio.h>
 #include <string.h>
+#include <sys/types.h>
 
 #if defined(CONFIG_ZDB_KV) && (CONFIG_ZDB_KV)
 #if defined(CONFIG_ZDB_KV_BACKEND_NVS) && (CONFIG_ZDB_KV_BACKEND_NVS)
@@ -198,12 +199,14 @@ struct zdb_ts_core_ctx {
 	size_t ingest_used;
 	const char *active_stream;
 	bool flush_pending;
+	bool ts_dir_ready;
 };
 
 zdb_status_t zdb_ts_recover_stream(zdb_ts_t *ts, size_t *out_truncated_bytes);
 
 static bool zdb_ts_stream_name_valid(const char *stream_name)
 {
+	const char *p;
 	size_t n;
 
 	if ((stream_name == NULL) || ((*stream_name) == '\0')) {
@@ -211,7 +214,49 @@ static bool zdb_ts_stream_name_valid(const char *stream_name)
 	}
 
 	n = strlen(stream_name);
-	return (n <= (size_t)CONFIG_ZDB_TS_STREAM_NAME_MAX_LEN);
+	if (n > (size_t)CONFIG_ZDB_TS_STREAM_NAME_MAX_LEN) {
+		return false;
+	}
+
+	if ((strcmp(stream_name, ".") == 0) || (strcmp(stream_name, "..") == 0)) {
+		return false;
+	}
+
+	for (p = stream_name; (*p) != '\0'; p++) {
+		if (((*p) == '/') || ((*p) == '\\')) {
+			return false;
+		}
+	}
+
+	return true;
+}
+
+static int zdb_ts_ensure_stream_dir(const zdb_cfg_t *cfg, struct zdb_ts_core_ctx *ctx)
+{
+	char ts_dir[ZDB_TS_PATH_MAX];
+	int n;
+	int rc;
+
+	if ((cfg == NULL) || (cfg->lfs_mount_point == NULL) || (ctx == NULL)) {
+		return -EINVAL;
+	}
+
+	if (ctx->ts_dir_ready) {
+		return 0;
+	}
+
+	n = snprintf(ts_dir, sizeof(ts_dir), "%s/%s", cfg->lfs_mount_point, CONFIG_ZDB_TS_DIRNAME);
+	if ((n < 0) || ((size_t)n >= sizeof(ts_dir))) {
+		return -ENAMETOOLONG;
+	}
+
+	rc = fs_mkdir(ts_dir);
+	if ((rc < 0) && (rc != -EEXIST)) {
+		return rc;
+	}
+
+	ctx->ts_dir_ready = true;
+	return 0;
 }
 
 static void zdb_ts_stream_header_encode(const char *stream_name,
@@ -318,23 +363,15 @@ static zdb_status_t zdb_ts_record_decode(zdb_t *db,
 static int zdb_ts_build_path(const zdb_cfg_t *cfg, const char *stream_name,
 			     char *path, size_t path_len)
 {
-	char ts_dir[ZDB_TS_PATH_MAX];
 	int n;
-	int rc;
 
 	if ((cfg == NULL) || (cfg->lfs_mount_point == NULL) || (stream_name == NULL) ||
 	    (path == NULL) || (path_len == 0U)) {
 		return -EINVAL;
 	}
 
-	n = snprintf(ts_dir, sizeof(ts_dir), "%s/%s", cfg->lfs_mount_point, CONFIG_ZDB_TS_DIRNAME);
-	if ((n < 0) || ((size_t)n >= sizeof(ts_dir))) {
-		return -ENAMETOOLONG;
-	}
-
-	rc = fs_mkdir(ts_dir);
-	if ((rc < 0) && (rc != -EEXIST)) {
-		return rc;
+	if (!zdb_ts_stream_name_valid(stream_name)) {
+		return -EINVAL;
 	}
 
 	n = snprintf(path, path_len, "%s/%s/%s.zts", cfg->lfs_mount_point,
@@ -845,7 +882,7 @@ static uint16_t __unused zdb_fnv1a16(const char *s)
 
 	return (uint16_t)hash;
 }
-static int zdb_kv_backend_write(zdb_t *db, uint32_t id, const void *value, size_t value_len)
+static ssize_t zdb_kv_backend_write(zdb_t *db, uint32_t id, const void *value, size_t value_len)
 {
 #if defined(CONFIG_ZDB_KV_BACKEND_NVS) && (CONFIG_ZDB_KV_BACKEND_NVS)
 	struct nvs_fs *nvs = (struct nvs_fs *)zdb_kv_backend_fs_from_db(db);
@@ -872,7 +909,7 @@ static int zdb_kv_backend_write(zdb_t *db, uint32_t id, const void *value, size_
 #endif
 }
 
-static int zdb_kv_backend_read(zdb_t *db, uint32_t id, void *out_value, size_t out_capacity)
+static ssize_t zdb_kv_backend_read(zdb_t *db, uint32_t id, void *out_value, size_t out_capacity)
 {
 #if defined(CONFIG_ZDB_KV_BACKEND_NVS) && (CONFIG_ZDB_KV_BACKEND_NVS)
 	struct nvs_fs *nvs = (struct nvs_fs *)zdb_kv_backend_fs_from_db(db);
@@ -960,7 +997,7 @@ zdb_status_t zdb_kv_close(zdb_kv_t *kv)
 zdb_status_t zdb_kv_set(zdb_kv_t *kv, const char *key, const void *value, size_t value_len)
 {
 	uint32_t id;
-	int wr;
+	ssize_t wr;
 	zdb_status_t lock_rc;
 
 	if ((kv == NULL) || (kv->db == NULL) || (value == NULL) || (value_len == 0U) ||
@@ -996,7 +1033,7 @@ zdb_status_t zdb_kv_get(zdb_kv_t *kv, const char *key, void *out_value,
 			size_t out_capacity, size_t *out_len)
 {
 	uint32_t id;
-	int rd;
+	ssize_t rd;
 	zdb_status_t lock_rc;
 
 	if ((kv == NULL) || (kv->db == NULL) || (out_len == NULL) || !zdb_key_valid(key)) {
@@ -1103,6 +1140,14 @@ zdb_status_t zdb_ts_open(zdb_t *db, const char *stream_name, zdb_ts_t *ts)
 	ctx = zdb_ts_ctx_get_or_alloc(db);
 	if (ctx == NULL) {
 		return ZDB_ERR_NOMEM;
+	}
+
+	{
+		int ensure_rc = zdb_ts_ensure_stream_dir(db->cfg, ctx);
+
+		if (ensure_rc < 0) {
+			return zdb_status_from_errno(ensure_rc);
+		}
 	}
 
 	rc = zdb_ts_ensure_stream_header(db, stream_name);

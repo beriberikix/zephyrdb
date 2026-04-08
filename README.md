@@ -205,6 +205,7 @@ Recovery scans to first decode failure and truncates trailing corrupt records.
 - Backend: Zephyr NVS or Zephyr ZMS
 - Use case: Configuration, calibration, firmware metadata
 - API: `zdb_kv_set()`, `zdb_kv_get()`, `zdb_kv_delete()`
+- Compatibility note: `zdb_kv_key_to_id()` now returns `uint32_t` (was `uint16_t`) to support ZMS IDs.
 
 #### TS (Time-Series)
 - Backend: LittleFS (file-based append-log)
