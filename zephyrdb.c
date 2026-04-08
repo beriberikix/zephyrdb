@@ -23,11 +23,16 @@
 #if defined(CONFIG_ZDB_TS_BACKEND_FCB) && (CONFIG_ZDB_TS_BACKEND_FCB)
 #include <zephyr/fs/fcb.h>
 #endif
-#include <zephyr/sys/byteorder.h>
 
 #if defined(CONFIG_ZDB_FLATBUFFERS) && (CONFIG_ZDB_FLATBUFFERS)
 #include <flatcc/flatcc_builder.h>
 #endif
+#endif
+
+/* Headers needed by both TS and DOC modules */
+#if (defined(CONFIG_ZDB_TS) && CONFIG_ZDB_TS) || (defined(CONFIG_ZDB_DOC) && CONFIG_ZDB_DOC)
+#include <zephyr/fs/fs.h>
+#include <zephyr/sys/byteorder.h>
 #endif
 
 #include <zephyr/sys/crc.h>
