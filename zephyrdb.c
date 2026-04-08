@@ -1285,8 +1285,10 @@ zdb_status_t zdb_ts_open(zdb_t *db, const char *stream_name, zdb_ts_t *ts)
 {
 	struct zdb_ts_core_ctx *ctx;
 	int fcb_rc;
+#if !ZDB_TS_USE_FCB
 	zdb_status_t rc;
 	size_t truncated = 0U;
+#endif
 
 	if ((db == NULL) || (stream_name == NULL) || (ts == NULL)) {
 		return ZDB_ERR_INVAL;
@@ -1367,7 +1369,9 @@ zdb_status_t zdb_ts_append_i64(zdb_ts_t *ts, const zdb_ts_sample_i64_t *sample)
 	struct zdb_ts_record_i64 rec;
 	zdb_status_t lock_rc;
 	int rc;
+#if !ZDB_TS_USE_FCB
 	bool need_async_flush = false;
+#endif
 
 	if ((ts == NULL) || (ts->db == NULL) || (sample == NULL)) {
 		return ZDB_ERR_INVAL;
@@ -1846,7 +1850,9 @@ zdb_status_t zdb_cursor_next(zdb_cursor_t *cursor, zdb_bytes_t *out_record)
 	struct zdb_ts_core_ctx *tctx;
 	zdb_bytes_t candidate;
 	struct zdb_ts_record_i64 rec;
+#if ZDB_TS_USE_LITTLEFS
 	zdb_status_t lock_rc;
+#endif
 
 	if ((cursor == NULL) || (out_record == NULL)) {
 		return ZDB_ERR_INVAL;

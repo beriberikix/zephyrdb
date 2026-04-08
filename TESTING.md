@@ -205,13 +205,13 @@ For nrf52840dk with actual hardware or when all hardware dependencies are availa
 
 ```bash
 # nrf52840dk with ZMS backend
-west build -b nrf52840dk samples/kv_basic -- -DOVERLAY_CONFIG=prj_zms.conf
+west build -b nrf52840dk/nrf52840 samples/kv_basic -- -DOVERLAY_CONFIG=prj_zms.conf
 
 # nrf52840dk with time-series streams
-west build -b nrf52840dk samples/ts_basic -- -DOVERLAY_CONFIG=prj_nrf52840dk.conf
+west build -b nrf52840dk/nrf52840 samples/ts_basic -- -DOVERLAY_CONFIG=prj_nrf52840dk.conf
 
 # nrf52840dk with FCB TS backend
-west build -b nrf52840dk samples/ts_basic -- -DOVERLAY_CONFIG=prj_fcb.conf
+west build -b nrf52840dk/nrf52840 samples/ts_basic -- -DOVERLAY_CONFIG=prj_fcb.conf
 
 # nrf52840dk with LittleFS BLK (SD card)
 west build -b nrf52840dk/nrf52840 samples/ts_basic -- -DOVERLAY_CONFIG=prj_nrf52840dk_sdcard.conf

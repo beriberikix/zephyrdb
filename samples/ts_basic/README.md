@@ -19,14 +19,15 @@ Backend overlays:
 # Default LittleFS backend
 west build -p always -s samples/ts_basic -b native_sim
 
-# FCB backend (flash map)
-west build -p always -s samples/ts_basic -b native_sim -- -DOVERLAY_CONFIG=prj_fcb.conf
+# FCB backend (flash map) - requires flash-capable board
+west build -p always -s samples/ts_basic -b nrf52840dk/nrf52840 -- -DOVERLAY_CONFIG=prj_fcb.conf
 
 # SD card (LittleFS BLK mode)
 west build -p always -s samples/ts_basic -b nrf52840dk/nrf52840 -- -DOVERLAY_CONFIG=prj_nrf52840dk_sdcard.conf
 ```
 
 Notes:
-- Requires a filesystem mounted at `CONFIG_ZDB_LFS_MOUNT_POINT`.
-- If mount/storage is not configured, sample prints a guided message and exits.
+- LittleFS-based backends require a filesystem mounted at `CONFIG_ZDB_LFS_MOUNT_POINT`.
+- FCB backend uses flash map storage and does not require a filesystem mount point.
+- If the selected backend storage is not configured, the sample prints a guided message and exits.
 - FCB backend limitation: aggregate query returns `ZDB_ERR_UNSUPPORTED`.
