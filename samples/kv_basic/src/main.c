@@ -45,7 +45,7 @@ int main(void)
 
 	rc = zdb_kv_open(&g_db, "app", &kv);
 	if (rc != ZDB_OK) {
-		printk("KV sample: zdb_kv_open failed rc=%d (configure a board/storage partition for NVS)\n",
+		printk("KV sample: zdb_kv_open failed rc=%d (configure mounted NVS/ZMS partition_ref in cfg)\n",
 		       (int)rc);
 		(void)zdb_deinit(&g_db);
 		return 0;

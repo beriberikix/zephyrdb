@@ -21,9 +21,30 @@ config ZDB_CORE
 config ZDB_KV
 	bool "Enable ZephyrDB KV module"
 	default y
-	depends on ZDB_CORE && NVS
+	depends on ZDB_CORE
 	help
-	  Enables NVS-backed key-value APIs.
+	  Enables key-value APIs.
+
+choice ZDB_KV_BACKEND
+	prompt "KV backend"
+	default ZDB_KV_BACKEND_NVS
+	depends on ZDB_KV
+	help
+	  Selects the Zephyr storage backend used by ZephyrDB KV APIs.
+
+config ZDB_KV_BACKEND_NVS
+	bool "NVS"
+	depends on NVS
+	help
+	  Use Non-Volatile Storage (NVS) as the KV backend.
+
+config ZDB_KV_BACKEND_ZMS
+	bool "ZMS"
+	depends on ZMS
+	help
+	  Use Zephyr Memory Storage (ZMS) as the KV backend.
+
+endchoice
 
 config ZDB_TS
 	bool "Enable ZephyrDB Time-Series module"
@@ -195,6 +216,15 @@ config ZDB_LFS_MOUNT_POINT
 	default "/lfs"
 	help
 	  Mount path used by TS module for append-log files.
+
+config ZDB_TS_DIRNAME
+	string "TS stream directory name"
+	default "zdb"
+	depends on ZDB_TS
+	help
+	  Directory under ZDB_LFS_MOUNT_POINT used for time-series stream
+	  files. This namespaces ZephyrDB TS files away from other files that
+	  may share the same filesystem mount point.
 
 endmenu
 

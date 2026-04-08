@@ -75,6 +75,7 @@ typedef enum {
 typedef enum {
 	ZDB_BACKEND_NONE = 0,
 	ZDB_BACKEND_NVS,
+	ZDB_BACKEND_ZMS,
 	ZDB_BACKEND_LFS,
 } zdb_backend_t;
 
@@ -127,7 +128,9 @@ typedef struct __packed {
 typedef struct {
 	/*
 	 * First-pass contract:
-	 * - KV path expects partition_ref to point to an initialized struct nvs_fs.
+	 * - KV path expects partition_ref to point to an initialized backend fs:
+	 *   struct nvs_fs when CONFIG_ZDB_KV_BACKEND_NVS=y,
+	 *   struct zms_fs when CONFIG_ZDB_KV_BACKEND_ZMS=y.
 	 * - TS path reserves this pointer for future storage object binding.
 	 */
 	const void *partition_ref;
@@ -191,7 +194,7 @@ zdb_status_t zdb_cursor_reset(zdb_cursor_t *cursor);
 zdb_status_t zdb_cursor_close(zdb_cursor_t *cursor);
 
 /*
- * KV module (NVS-backed)
+ * KV module (NVS/ZMS-backed)
  */
 #if defined(CONFIG_ZDB_KV) && (CONFIG_ZDB_KV)
 typedef struct {
@@ -208,10 +211,10 @@ zdb_status_t zdb_kv_get(zdb_kv_t *kv, const char *key, void *out_value,
 zdb_status_t zdb_kv_delete(zdb_kv_t *kv, const char *key);
 
 /*
- * Exposes key->numeric-id mapping required by NVS.
+ * Exposes key->numeric-id mapping required by KV backends.
  * Hash algorithm is implementation-defined but stable within a release line.
  */
-uint16_t zdb_kv_key_to_id(const char *key);
+uint32_t zdb_kv_key_to_id(const char *key);
 #endif /* CONFIG_ZDB_KV */
 
 /*

@@ -5,20 +5,27 @@
 #include <math.h>
 #include <stdio.h>
 #include <string.h>
+#include <sys/types.h>
 
 #if defined(CONFIG_ZDB_KV) && (CONFIG_ZDB_KV)
+#if defined(CONFIG_ZDB_KV_BACKEND_NVS) && (CONFIG_ZDB_KV_BACKEND_NVS)
 #include <zephyr/fs/nvs.h>
+#endif
+#if defined(CONFIG_ZDB_KV_BACKEND_ZMS) && (CONFIG_ZDB_KV_BACKEND_ZMS)
+#include <zephyr/kvss/zms.h>
+#endif
 #endif
 
 #if defined(CONFIG_ZDB_TS) && (CONFIG_ZDB_TS)
 #include <zephyr/fs/fs.h>
 #include <zephyr/sys/byteorder.h>
-#include <zephyr/sys/crc.h>
 
 #if defined(CONFIG_ZDB_FLATBUFFERS) && (CONFIG_ZDB_FLATBUFFERS)
 #include <flatcc/flatcc_builder.h>
 #endif
 #endif
+
+#include <zephyr/sys/crc.h>
 
 #ifndef CONFIG_ZDB_MAX_KEY_LEN
 #define CONFIG_ZDB_MAX_KEY_LEN 48
@@ -42,6 +49,10 @@
 
 #ifndef CONFIG_ZDB_TS_MAX_RECOVERY_TRUNCATE_BYTES
 #define CONFIG_ZDB_TS_MAX_RECOVERY_TRUNCATE_BYTES 4096
+#endif
+
+#ifndef CONFIG_ZDB_TS_DIRNAME
+#define CONFIG_ZDB_TS_DIRNAME "zdb"
 #endif
 
 #define ZDB_TS_PATH_MAX 128
@@ -94,6 +105,7 @@ static zdb_status_t zdb_status_from_errno(int err)
 	}
 }
 
+#if defined(CONFIG_ZDB_KV) && (CONFIG_ZDB_KV)
 static bool zdb_key_valid(const char *key)
 {
 	size_t key_len;
@@ -105,6 +117,22 @@ static bool zdb_key_valid(const char *key)
 	key_len = strlen(key);
 	return (key_len <= (size_t)CONFIG_ZDB_MAX_KEY_LEN);
 }
+#endif
+#if (defined(CONFIG_ZDB_TS) && (CONFIG_ZDB_TS)) || \
+	(defined(CONFIG_ZDB_KV_BACKEND_ZMS) && (CONFIG_ZDB_KV_BACKEND_ZMS))
+static uint32_t zdb_fnv1a32(const char *s)
+{
+	uint32_t hash = 0x811C9DC5u;
+
+	while ((*s) != '\0') {
+		hash ^= (uint8_t)(*s);
+		hash *= 0x01000193u;
+		s++;
+	}
+
+	return hash;
+}
+#endif
 
 static zdb_status_t zdb_lock_read(zdb_t *db)
 {
@@ -171,12 +199,14 @@ struct zdb_ts_core_ctx {
 	size_t ingest_used;
 	const char *active_stream;
 	bool flush_pending;
+	bool ts_dir_ready;
 };
 
 zdb_status_t zdb_ts_recover_stream(zdb_ts_t *ts, size_t *out_truncated_bytes);
 
 static bool zdb_ts_stream_name_valid(const char *stream_name)
 {
+	const char *p;
 	size_t n;
 
 	if ((stream_name == NULL) || ((*stream_name) == '\0')) {
@@ -184,20 +214,49 @@ static bool zdb_ts_stream_name_valid(const char *stream_name)
 	}
 
 	n = strlen(stream_name);
-	return (n <= (size_t)CONFIG_ZDB_TS_STREAM_NAME_MAX_LEN);
-}
-
-static uint32_t zdb_fnv1a32(const char *s)
-{
-	uint32_t hash = 0x811C9DC5u;
-
-	while ((*s) != '\0') {
-		hash ^= (uint8_t)(*s);
-		hash *= 0x01000193u;
-		s++;
+	if (n > (size_t)CONFIG_ZDB_TS_STREAM_NAME_MAX_LEN) {
+		return false;
 	}
 
-	return hash;
+	if ((strcmp(stream_name, ".") == 0) || (strcmp(stream_name, "..") == 0)) {
+		return false;
+	}
+
+	for (p = stream_name; (*p) != '\0'; p++) {
+		if (((*p) == '/') || ((*p) == '\\')) {
+			return false;
+		}
+	}
+
+	return true;
+}
+
+static int zdb_ts_ensure_stream_dir(const zdb_cfg_t *cfg, struct zdb_ts_core_ctx *ctx)
+{
+	char ts_dir[ZDB_TS_PATH_MAX];
+	int n;
+	int rc;
+
+	if ((cfg == NULL) || (cfg->lfs_mount_point == NULL) || (ctx == NULL)) {
+		return -EINVAL;
+	}
+
+	if (ctx->ts_dir_ready) {
+		return 0;
+	}
+
+	n = snprintf(ts_dir, sizeof(ts_dir), "%s/%s", cfg->lfs_mount_point, CONFIG_ZDB_TS_DIRNAME);
+	if ((n < 0) || ((size_t)n >= sizeof(ts_dir))) {
+		return -ENAMETOOLONG;
+	}
+
+	rc = fs_mkdir(ts_dir);
+	if ((rc < 0) && (rc != -EEXIST)) {
+		return rc;
+	}
+
+	ctx->ts_dir_ready = true;
+	return 0;
 }
 
 static void zdb_ts_stream_header_encode(const char *stream_name,
@@ -311,7 +370,12 @@ static int zdb_ts_build_path(const zdb_cfg_t *cfg, const char *stream_name,
 		return -EINVAL;
 	}
 
-	n = snprintf(path, path_len, "%s/%s.zts", cfg->lfs_mount_point, stream_name);
+	if (!zdb_ts_stream_name_valid(stream_name)) {
+		return -EINVAL;
+	}
+
+	n = snprintf(path, path_len, "%s/%s/%s.zts", cfg->lfs_mount_point,
+		     CONFIG_ZDB_TS_DIRNAME, stream_name);
 	if ((n < 0) || ((size_t)n >= path_len)) {
 		return -ENAMETOOLONG;
 	}
@@ -785,20 +849,22 @@ zdb_status_t zdb_cursor_close(zdb_cursor_t *cursor)
 }
 
 #if defined(CONFIG_ZDB_KV) && (CONFIG_ZDB_KV)
-static struct nvs_fs *zdb_kv_nvs_from_db(zdb_t *db)
+static void *zdb_kv_backend_fs_from_db(zdb_t *db)
 {
 	if ((db == NULL) || (db->cfg == NULL)) {
 		return NULL;
 	}
 
 	/*
-	 * First-pass contract: cfg->partition_ref points at an initialized
-	 * struct nvs_fs mounted by board/application startup.
+	 * cfg->partition_ref points at an initialized backend fs mounted by
+	 * board/application startup:
+	 * - struct nvs_fs when CONFIG_ZDB_KV_BACKEND_NVS=y
+	 * - struct zms_fs when CONFIG_ZDB_KV_BACKEND_ZMS=y
 	 */
-	return (struct nvs_fs *)db->cfg->partition_ref;
+	return (void *)db->cfg->partition_ref;
 }
 
-static uint16_t zdb_fnv1a16(const char *s)
+static uint16_t __unused zdb_fnv1a16(const char *s)
 {
 	uint32_t hash = 0x811C9DC5u;
 
@@ -816,10 +882,88 @@ static uint16_t zdb_fnv1a16(const char *s)
 
 	return (uint16_t)hash;
 }
+static ssize_t zdb_kv_backend_write(zdb_t *db, uint32_t id, const void *value, size_t value_len)
+{
+#if defined(CONFIG_ZDB_KV_BACKEND_NVS) && (CONFIG_ZDB_KV_BACKEND_NVS)
+	struct nvs_fs *nvs = (struct nvs_fs *)zdb_kv_backend_fs_from_db(db);
+
+	if (nvs == NULL) {
+		return -EINVAL;
+	}
+
+	return nvs_write(nvs, (uint16_t)id, value, value_len);
+#elif defined(CONFIG_ZDB_KV_BACKEND_ZMS) && (CONFIG_ZDB_KV_BACKEND_ZMS)
+	struct zms_fs *zms = (struct zms_fs *)zdb_kv_backend_fs_from_db(db);
+
+	if (zms == NULL) {
+		return -EINVAL;
+	}
+
+	return zms_write(zms, (zms_id_t)id, value, value_len);
+#else
+	ARG_UNUSED(db);
+	ARG_UNUSED(id);
+	ARG_UNUSED(value);
+	ARG_UNUSED(value_len);
+	return -ENOTSUP;
+#endif
+}
+
+static ssize_t zdb_kv_backend_read(zdb_t *db, uint32_t id, void *out_value, size_t out_capacity)
+{
+#if defined(CONFIG_ZDB_KV_BACKEND_NVS) && (CONFIG_ZDB_KV_BACKEND_NVS)
+	struct nvs_fs *nvs = (struct nvs_fs *)zdb_kv_backend_fs_from_db(db);
+
+	if (nvs == NULL) {
+		return -EINVAL;
+	}
+
+	return nvs_read(nvs, (uint16_t)id, out_value, out_capacity);
+#elif defined(CONFIG_ZDB_KV_BACKEND_ZMS) && (CONFIG_ZDB_KV_BACKEND_ZMS)
+	struct zms_fs *zms = (struct zms_fs *)zdb_kv_backend_fs_from_db(db);
+
+	if (zms == NULL) {
+		return -EINVAL;
+	}
+
+	return zms_read(zms, (zms_id_t)id, out_value, out_capacity);
+#else
+	ARG_UNUSED(db);
+	ARG_UNUSED(id);
+	ARG_UNUSED(out_value);
+	ARG_UNUSED(out_capacity);
+	return -ENOTSUP;
+#endif
+}
+
+static int zdb_kv_backend_delete(zdb_t *db, uint32_t id)
+{
+#if defined(CONFIG_ZDB_KV_BACKEND_NVS) && (CONFIG_ZDB_KV_BACKEND_NVS)
+	struct nvs_fs *nvs = (struct nvs_fs *)zdb_kv_backend_fs_from_db(db);
+
+	if (nvs == NULL) {
+		return -EINVAL;
+	}
+
+	return nvs_delete(nvs, (uint16_t)id);
+#elif defined(CONFIG_ZDB_KV_BACKEND_ZMS) && (CONFIG_ZDB_KV_BACKEND_ZMS)
+	struct zms_fs *zms = (struct zms_fs *)zdb_kv_backend_fs_from_db(db);
+
+	if (zms == NULL) {
+		return -EINVAL;
+	}
+
+	return zms_delete(zms, (zms_id_t)id);
+#else
+	ARG_UNUSED(db);
+	ARG_UNUSED(id);
+	return -ENOTSUP;
+#endif
+}
 
 zdb_status_t zdb_kv_open(zdb_t *db, const char *namespace_name, zdb_kv_t *kv)
 {
-	struct nvs_fs *nvs;
+	void *backend_fs;
 
 	if ((db == NULL) || (namespace_name == NULL) || (kv == NULL)) {
 		return ZDB_ERR_INVAL;
@@ -829,8 +973,8 @@ zdb_status_t zdb_kv_open(zdb_t *db, const char *namespace_name, zdb_kv_t *kv)
 		return ZDB_ERR_INVAL;
 	}
 
-	nvs = zdb_kv_nvs_from_db(db);
-	if (nvs == NULL) {
+	backend_fs = zdb_kv_backend_fs_from_db(db);
+	if (backend_fs == NULL) {
 		return ZDB_ERR_INVAL;
 	}
 
@@ -852,8 +996,7 @@ zdb_status_t zdb_kv_close(zdb_kv_t *kv)
 
 zdb_status_t zdb_kv_set(zdb_kv_t *kv, const char *key, const void *value, size_t value_len)
 {
-	struct nvs_fs *nvs;
-	uint16_t id;
+	uint32_t id;
 	ssize_t wr;
 	zdb_status_t lock_rc;
 
@@ -862,8 +1005,7 @@ zdb_status_t zdb_kv_set(zdb_kv_t *kv, const char *key, const void *value, size_t
 		return ZDB_ERR_INVAL;
 	}
 
-	nvs = zdb_kv_nvs_from_db(kv->db);
-	if (nvs == NULL) {
+	if (zdb_kv_backend_fs_from_db(kv->db) == NULL) {
 		return ZDB_ERR_INVAL;
 	}
 
@@ -873,7 +1015,7 @@ zdb_status_t zdb_kv_set(zdb_kv_t *kv, const char *key, const void *value, size_t
 		return lock_rc;
 	}
 
-	wr = nvs_write(nvs, id, value, value_len);
+	wr = zdb_kv_backend_write(kv->db, id, value, value_len);
 	zdb_unlock_write(kv->db);
 
 	if (wr < 0) {
@@ -890,8 +1032,7 @@ zdb_status_t zdb_kv_set(zdb_kv_t *kv, const char *key, const void *value, size_t
 zdb_status_t zdb_kv_get(zdb_kv_t *kv, const char *key, void *out_value,
 			size_t out_capacity, size_t *out_len)
 {
-	struct nvs_fs *nvs;
-	uint16_t id;
+	uint32_t id;
 	ssize_t rd;
 	zdb_status_t lock_rc;
 
@@ -903,8 +1044,7 @@ zdb_status_t zdb_kv_get(zdb_kv_t *kv, const char *key, void *out_value,
 		return ZDB_ERR_INVAL;
 	}
 
-	nvs = zdb_kv_nvs_from_db(kv->db);
-	if (nvs == NULL) {
+	if (zdb_kv_backend_fs_from_db(kv->db) == NULL) {
 		return ZDB_ERR_INVAL;
 	}
 
@@ -914,7 +1054,7 @@ zdb_status_t zdb_kv_get(zdb_kv_t *kv, const char *key, void *out_value,
 		return lock_rc;
 	}
 
-	rd = nvs_read(nvs, id, out_value, out_capacity);
+	rd = zdb_kv_backend_read(kv->db, id, out_value, out_capacity);
 	zdb_unlock_read(kv->db);
 
 	if (rd < 0) {
@@ -928,8 +1068,7 @@ zdb_status_t zdb_kv_get(zdb_kv_t *kv, const char *key, void *out_value,
 
 zdb_status_t zdb_kv_delete(zdb_kv_t *kv, const char *key)
 {
-	struct nvs_fs *nvs;
-	uint16_t id;
+	uint32_t id;
 	int rc;
 	zdb_status_t lock_rc;
 
@@ -937,8 +1076,7 @@ zdb_status_t zdb_kv_delete(zdb_kv_t *kv, const char *key)
 		return ZDB_ERR_INVAL;
 	}
 
-	nvs = zdb_kv_nvs_from_db(kv->db);
-	if (nvs == NULL) {
+	if (zdb_kv_backend_fs_from_db(kv->db) == NULL) {
 		return ZDB_ERR_INVAL;
 	}
 
@@ -948,7 +1086,7 @@ zdb_status_t zdb_kv_delete(zdb_kv_t *kv, const char *key)
 		return lock_rc;
 	}
 
-	rc = nvs_delete(nvs, id);
+	rc = zdb_kv_backend_delete(kv->db, id);
 	zdb_unlock_write(kv->db);
 
 	if (rc < 0) {
@@ -958,13 +1096,25 @@ zdb_status_t zdb_kv_delete(zdb_kv_t *kv, const char *key)
 	return ZDB_OK;
 }
 
-uint16_t zdb_kv_key_to_id(const char *key)
+uint32_t zdb_kv_key_to_id(const char *key)
 {
+	uint32_t id;
+
 	if (key == NULL) {
 		return 1U;
 	}
 
-	return zdb_fnv1a16(key);
+#if defined(CONFIG_ZDB_KV_BACKEND_ZMS) && (CONFIG_ZDB_KV_BACKEND_ZMS)
+	id = zdb_fnv1a32(key);
+#else
+	id = (uint32_t)zdb_fnv1a16(key);
+#endif
+
+	if (id == 0U) {
+		id = 1U;
+	}
+
+	return id;
 }
 #endif /* CONFIG_ZDB_KV */
 
@@ -990,6 +1140,14 @@ zdb_status_t zdb_ts_open(zdb_t *db, const char *stream_name, zdb_ts_t *ts)
 	ctx = zdb_ts_ctx_get_or_alloc(db);
 	if (ctx == NULL) {
 		return ZDB_ERR_NOMEM;
+	}
+
+	{
+		int ensure_rc = zdb_ts_ensure_stream_dir(db->cfg, ctx);
+
+		if (ensure_rc < 0) {
+			return zdb_status_from_errno(ensure_rc);
+		}
 	}
 
 	rc = zdb_ts_ensure_stream_header(db, stream_name);
