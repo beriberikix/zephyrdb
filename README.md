@@ -2,14 +2,14 @@
 
 Embedded multi-model database for Zephyr RTOS designed for memory-constrained IoT and embedded systems.
 
-**Current Scope:** Core + KV (NVS-backed) + TS (LittleFS-backed) modules with durability, recovery, instrumentation, Stage 2 FlatBuffers bootstrap helpers, Stage 2.5 multi-stream support, and Stage 3 document model foundation.
+**Current Scope:** Core + KV (NVS/ZMS-backed) + TS (LittleFS-backed) modules with durability, recovery, instrumentation, Stage 2 FlatBuffers bootstrap helpers, Stage 2.5 multi-stream support, and Stage 3 document model foundation.
 
 ## Features
 - **Stage 2.5 multi-stream**: Optional concurrent stream management with unified flush and cross-stream aggregation
 - **Stage 3 document model**: Semi-structured data support with flexible schemas, variable-length fields, and document CRUD APIs
 
 - **Zero-malloc design**: Static slab-based allocation (no heap fragmentation)
-- **Multiple data models**: KV (key-value via NVS), TS (time-series with append-log via LittleFS)
+- **Multiple data models**: KV (key-value via NVS or ZMS), TS (time-series with append-log via LittleFS)
 - **Durability & recovery**: Versioned records with CRC32 validation; automatic corruption detection and recovery
 - **Concurrency**: Reader-writer locks for safe multi-threaded access
 - **Observability**: Full stats instrumentation (6 TS-specific counters) with compact telemetry export format
@@ -39,6 +39,9 @@ CONFIG_ZEPHYRDB=y
 
 # KV module (optional)
 CONFIG_ZDB_KV=y
+CONFIG_ZDB_KV_BACKEND_NVS=y
+# or:
+# CONFIG_ZDB_KV_BACKEND_ZMS=y
 
 # TS module (optional)
 CONFIG_ZDB_TS=y
@@ -67,7 +70,7 @@ ZDB_DEFINE_TS_INGEST_SLAB(g_zdb_ts_ingest_slab);
 static zdb_t db;
 
 static const zdb_cfg_t cfg = {
-    .partition_ref = NULL,  /* Set to struct nvs_fs* for KV */
+    .partition_ref = NULL,  /* Set to mounted struct nvs_fs* or struct zms_fs* for KV */
     .lfs_mount_point = CONFIG_ZDB_LFS_MOUNT_POINT,
     .kv_namespace = "app",
     .work_q = &k_sys_work_q,
@@ -162,6 +165,13 @@ Notes:
 - If FlatBuffers support is not enabled, the API returns `ZDB_ERR_UNSUPPORTED`.
 - The exported FlatBuffer root is a struct with two fields: `ts_ms` and `value`.
 
+## Storage Isolation
+
+- KV backends (NVS/ZMS): use a dedicated partition for ZephyrDB KV and do not share with the app's Settings backend partition.
+- TS stream files are namespaced under `<mount>/<CONFIG_ZDB_TS_DIRNAME>/` (default `<mount>/zdb/`).
+- Document files are namespaced under `<mount>/zdb_docs/`.
+- Sharing a LittleFS mount point is supported, but storage space and wear are shared with user files in that partition.
+
 ## Architecture
 
 ### Memory Model
@@ -192,12 +202,13 @@ Recovery scans to first decode failure and truncates trailing corrupt records.
 ### Data Models
 
 #### KV (Key-Value)
-- Backend: Zephyr NVS (flash-based)
+- Backend: Zephyr NVS or Zephyr ZMS
 - Use case: Configuration, calibration, firmware metadata
 - API: `zdb_kv_set()`, `zdb_kv_get()`, `zdb_kv_delete()`
 
 #### TS (Time-Series)
 - Backend: LittleFS (file-based append-log)
+- Stream files: `<mount>/<CONFIG_ZDB_TS_DIRNAME>/<stream>.zts` (default directory `zdb`)
 - Staging: RAM buffer (configurable size)
 - Use case: Sensor telemetry, event logs, metrics
 - API: `zdb_ts_append_i64()`, `zdb_ts_query_aggregate()`, cursor iteration via `zdb_cursor_next()`
@@ -276,38 +287,62 @@ See `Kconfig.zephyrdb` for all 30+ options:
 
 ## Testing
 
-Use the runnable sample app in `samples/native_sim_harness`:
+### Board Selection
 
-```bash
-west build -p always -s samples/native_sim_harness -b native_sim
-west build -t run
-```
+**Compilation Verification** (use `native_sim`):
+- Goal: Verify code compiles and links
+- **Boards:** `native_sim` (pure software simulation)
+- Limitation: No FLASH storage; backends compile but cannot execute
+- Usage:
+  ```bash
+  west build -b native_sim samples/kv_basic
+  ```
+
+**Backend & Storage Testing** (use `nrf52840dk`):
+- Goal: Test NVS/ZMS/FCB backends with real persistent storage
+- **Boards:** `nrf52840dk` (Cortex-M4 with 1 MB FLASH)
+- Benefit: Real FLASH-backed storage; partition isolation testing; SD card support
+- Usage:
+  ```bash
+  # NVS backend testing
+  west build -b nrf52840dk samples/kv_basic -- -DOVERLAY_CONFIG=prj_nrf52840dk.conf
+  
+  # ZMS backend testing
+  west build -b nrf52840dk samples/kv_basic -- -DOVERLAY_CONFIG=prj_zms.conf
+  ```
+
+**Why native_sim can't test storage backends**: native_sim is a pure software simulator without FLASH hardware. NVS/ZMS backends require persistent storage to function. Tests will compile but data writes are silent no-ops (data not persisted). Use `nrf52840dk` for real storage testing.
+
+**See [TESTING.md](TESTING.md)** for comprehensive board compatibility matrix, CI/CD strategies, and partition isolation setup.
 
 ### Sample Suite (Per Data Model + Helpers)
 
 Dedicated samples are now provided for each model plus helper scenarios:
 
-- `samples/kv_basic` - KV open/set/get/delete flow (NVS-backed setups)
-- `samples/ts_basic` - TS open/append/flush/aggregate flow
-- `samples/doc_basic` - Document create/set/save/export flow
+- `samples/kv_basic` - KV open/set/get/delete flow (accepts `prj_nrf52840dk.conf` and `prj_zms.conf` overlays)
+- `samples/ts_basic` - TS open/append/flush/aggregate flow (accepts `prj_nrf52840dk.conf` overlay)
+- `samples/doc_basic` - Document create/set/save/export flow (accepts `prj_nrf52840dk.conf` overlay)
 - `samples/core_health_stats` - Core health + stats snapshot/reset helper
 - `samples/doc_query_filters` - Document query filter construction helper
 
 Build any sample with:
 
 ```bash
-west build -p always -s samples/<sample_name> -b <board>
-west build -t run
+# Compilation check (native_sim)
+west build -b native_sim samples/<sample_name>
+
+# Storage backend testing (nrf52840dk)
+west build -b nrf52840dk samples/<sample_name> -- -DOVERLAY_CONFIG=prj_nrf52840dk.conf
 ```
 
 See `samples/README.md` and per-sample README files for board/storage notes.
 
 ### native_sim harness (Stages 1-2.5)
 
-Run the harness on native_sim to validate all integrated stages:
+Run the harness on native_sim to validate API/ABI and build integration:
 
 ```bash
-west build -p always -s samples/native_sim_harness -b native_sim
+west build -b native_sim samples/native_sim_harness
 west build -t run
 ```
 
@@ -323,6 +358,8 @@ This harness validates:
 - FlatBuffers size-query/export helper (`zdb_ts_sample_i64_export_flatbuffer`) [Stage 2]
 - Stage 2.5 multi-stream APIs when `CONFIG_ZDB_TS_MULTISTREAM=y`
 - Build integration across all modules
+
+⚠️ **Note:** native_sim harness does **not** test persistent storage (NVS/ZMS/LittleFS). Use `nrf52840dk` samples for backend validation.
 
 ## Build System
 
