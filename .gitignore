@@ -9,6 +9,8 @@ zephyr/
 
 # Build output
 build/
+twister-out/
+twister-out.*/
 
 # Editor/OS noise
 .vscode/

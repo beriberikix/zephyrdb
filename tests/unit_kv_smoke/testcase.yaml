@@ -1,0 +1,10 @@
+tests:
+  zephyrdb.unit_smoke.kv:
+    tags:
+      - zephyrdb
+      - unit
+      - kv
+      - smoke
+    harness: ztest
+    platform_allow:
+      - native_sim
