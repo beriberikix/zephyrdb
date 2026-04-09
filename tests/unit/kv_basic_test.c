@@ -17,6 +17,34 @@
 ZDB_TEST_INSTANCE_DEFINE(g_test_db);
 static struct mock_nvs_fs g_mock_nvs;
 
+#if defined(CONFIG_ZDB_EVENTING) && (CONFIG_ZDB_EVENTING)
+static zdb_kv_event_t g_last_event;
+static uint32_t g_event_count;
+
+static void test_event_listener(const zdb_kv_event_t *event, void *user_ctx)
+{
+	ARG_UNUSED(user_ctx);
+
+	if (event == NULL) {
+		return;
+	}
+
+	g_last_event = *event;
+	g_event_count++;
+}
+
+static const zdb_event_listener_t g_event_listeners[] = {
+	{
+		.notify = NULL,
+		.user_ctx = NULL,
+	},
+	{
+		.notify = test_event_listener,
+		.user_ctx = NULL,
+	},
+};
+#endif
+
 /* ===== Setup and Teardown ===== */
 
 static void kv_test_setup(void)
@@ -30,10 +58,19 @@ static void kv_test_setup(void)
 		.kv_backend_fs = &g_mock_nvs.base,
 		.lfs_mount_point = "/lfs",
 		.work_q = &k_sys_work_q,
+	#if defined(CONFIG_ZDB_EVENTING) && (CONFIG_ZDB_EVENTING)
+		.event_listeners = g_event_listeners,
+		.event_listener_count = ARRAY_SIZE(g_event_listeners),
+	#endif
 	};
 
 	rc = zdb_init(&g_test_db, &cfg);
 	zassert_equal(rc, ZDB_OK, "Failed to init zdb: rc=%d", rc);
+
+#if defined(CONFIG_ZDB_EVENTING) && (CONFIG_ZDB_EVENTING)
+	(void)memset(&g_last_event, 0, sizeof(g_last_event));
+	g_event_count = 0U;
+#endif
 }
 
 static void kv_test_teardown(void)
@@ -295,6 +332,62 @@ static void test_kv_multiple_namespaces(void)
 	zdb_kv_close(&kv2);
 }
 
+#if defined(CONFIG_ZDB_EVENTING) && (CONFIG_ZDB_EVENTING)
+static void test_kv_set_emits_event(void)
+{
+	zdb_kv_t kv;
+	uint32_t value = 42U;
+	zdb_status_t rc = zdb_kv_open(&g_test_db, "test_ns", &kv);
+
+	assert_zdb_ok(rc);
+
+	rc = zdb_kv_set(&kv, "counter", &value, sizeof(value));
+	assert_zdb_ok(rc);
+
+	zassert_equal(g_event_count, 1U, "Expected one event, got %u", g_event_count);
+	zassert_equal(g_last_event.type, ZDB_EVENT_KV_SET, "Unexpected event type: %d",
+		      g_last_event.type);
+	zassert_equal(g_last_event.status, ZDB_OK, "Unexpected event status: %d",
+		      g_last_event.status);
+	zassert_equal(g_last_event.value_len, sizeof(value),
+		      "Unexpected value_len: %zu", g_last_event.value_len);
+	zassert_equal(strcmp(g_last_event.namespace_name, "test_ns"), 0,
+		      "Unexpected namespace");
+	zassert_equal(strcmp(g_last_event.key, "counter"), 0, "Unexpected key");
+
+	zdb_kv_close(&kv);
+}
+
+static void test_kv_delete_emits_event(void)
+{
+	zdb_kv_t kv;
+	uint32_t value = 7U;
+	zdb_status_t rc = zdb_kv_open(&g_test_db, "delete_ns", &kv);
+
+	assert_zdb_ok(rc);
+
+	rc = zdb_kv_set(&kv, "victim", &value, sizeof(value));
+	assert_zdb_ok(rc);
+	zassert_equal(g_event_count, 1U, "Set should emit one event");
+
+	rc = zdb_kv_delete(&kv, "victim");
+	assert_zdb_ok(rc);
+
+	zassert_equal(g_event_count, 2U, "Expected two events, got %u", g_event_count);
+	zassert_equal(g_last_event.type, ZDB_EVENT_KV_DELETE, "Unexpected event type: %d",
+		      g_last_event.type);
+	zassert_equal(g_last_event.status, ZDB_OK, "Unexpected event status: %d",
+		      g_last_event.status);
+	zassert_equal(g_last_event.value_len, 0U,
+		      "Delete event value_len should be 0, got %zu", g_last_event.value_len);
+	zassert_equal(strcmp(g_last_event.namespace_name, "delete_ns"), 0,
+		      "Unexpected namespace");
+	zassert_equal(strcmp(g_last_event.key, "victim"), 0, "Unexpected key");
+
+	zdb_kv_close(&kv);
+}
+#endif
+
 /* ===== Test Suite Registration ===== */
 
 ztest_suite(zephyrdb_kv_basic, kv_test_setup, kv_test_teardown,
@@ -310,3 +403,7 @@ ztest_unit_test(test_kv_delete_not_found);
 ztest_unit_test(test_kv_value_max_length);
 ztest_unit_test(test_kv_key_max_length);
 ztest_unit_test(test_kv_multiple_namespaces);
+#if defined(CONFIG_ZDB_EVENTING) && (CONFIG_ZDB_EVENTING)
+ztest_unit_test(test_kv_set_emits_event);
+ztest_unit_test(test_kv_delete_emits_event);
+#endif

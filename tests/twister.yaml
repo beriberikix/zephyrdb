@@ -58,6 +58,18 @@ tests:
       - nvs
     timeout: 30
 
+  zephyrdb.unit.kv.events:
+    description: "KV Event Emitter/Listener Unit Tests"
+    path: tests/unit_kv_events
+    build_on_all: false
+    platforms:
+      - native_sim
+    tags:
+      - unit
+      - kv
+      - events
+    timeout: 5
+
   zephyrdb.samples.verify:
     description: "Sample Validation Tests"
     path: tests/samples/verify_samples_test.c
@@ -73,6 +85,7 @@ tests:
 test_groups:
   unit:
     - zephyrdb.unit.kv_basic
+    - zephyrdb.unit.kv.events
     - zephyrdb.unit.ts_basic
     - zephyrdb.unit.doc_basic
 
@@ -87,6 +100,7 @@ test_groups:
 
   all:
     - zephyrdb.unit.kv_basic
+    - zephyrdb.unit.kv.events
     - zephyrdb.unit.ts_basic
     - zephyrdb.unit.doc_basic
     - zephyrdb.integration.workflows

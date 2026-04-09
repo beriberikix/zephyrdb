@@ -262,6 +262,15 @@ endmenu
 
 menu "Diagnostics"
 
+config ZDB_EVENTING
+	bool "Enable ZephyrDB event emitter/listener hooks"
+	default n
+	depends on ZDB_KV
+	help
+	  Enables lightweight local mutation events for KV operations.
+	  This feature is intended for in-process listeners and does not
+	  provide durability or distributed delivery guarantees.
+
 config ZDB_STATS
 	bool "Enable ZephyrDB statistics counters"
 	default n
