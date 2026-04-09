@@ -7,6 +7,10 @@
 
 ZBUS_CHAN_DEFINE(zdb_kv_event_chan, zdb_kv_event_t, NULL, NULL,
 		 ZBUS_OBSERVERS_EMPTY, ZBUS_MSG_INIT(0));
+ZBUS_CHAN_DEFINE(zdb_ts_event_chan, zdb_ts_event_t, NULL, NULL,
+		 ZBUS_OBSERVERS_EMPTY, ZBUS_MSG_INIT(0));
+ZBUS_CHAN_DEFINE(zdb_doc_event_chan, zdb_doc_event_t, NULL, NULL,
+		 ZBUS_OBSERVERS_EMPTY, ZBUS_MSG_INIT(0));
 
 int zdb_eventing_zbus_publish(const zdb_kv_event_t *event)
 {
@@ -15,6 +19,24 @@ int zdb_eventing_zbus_publish(const zdb_kv_event_t *event)
 	}
 
 	return zbus_chan_pub(&zdb_kv_event_chan, event, K_NO_WAIT);
+}
+
+int zdb_eventing_zbus_publish_ts(const zdb_ts_event_t *event)
+{
+	if (event == NULL) {
+		return -EINVAL;
+	}
+
+	return zbus_chan_pub(&zdb_ts_event_chan, event, K_NO_WAIT);
+}
+
+int zdb_eventing_zbus_publish_doc(const zdb_doc_event_t *event)
+{
+	if (event == NULL) {
+		return -EINVAL;
+	}
+
+	return zbus_chan_pub(&zdb_doc_event_chan, event, K_NO_WAIT);
 }
 
 #endif /* CONFIG_ZDB_EVENTING_ZBUS */

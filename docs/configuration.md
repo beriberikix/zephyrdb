@@ -10,13 +10,13 @@ ZephyrDB is configured through [../Kconfig.zephyrdb](../Kconfig.zephyrdb).
 
 ## Eventing Options
 
-- `CONFIG_ZDB_EVENTING`: enable local KV mutation events
-- `CONFIG_ZDB_EVENTING_ZBUS`: publish KV mutation events to zbus
+- `CONFIG_ZDB_EVENTING`: enable local KV/TS/DOC mutation events
+- `CONFIG_ZDB_EVENTING_ZBUS`: publish KV/TS/DOC mutation events to zbus
 
 Notes:
 
 - `CONFIG_ZDB_EVENTING_ZBUS` depends on `CONFIG_ZDB_EVENTING` and `CONFIG_ZBUS`.
-- Event publication is best-effort and does not alter KV write/delete return values.
+- Event publication is best-effort and does not alter operation return values.
 
 ## Key-Value Options
 
