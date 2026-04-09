@@ -9,7 +9,14 @@
 #include <zephyr/ztest.h>
 #include <zephyr/kernel.h>
 #include <zephyrdb.h>
+#include "../fixtures/common.h"
 #include <string.h>
+
+ZDB_TEST_INSTANCE_DEFINE(g_sample_kv_db);
+ZDB_TEST_INSTANCE_DEFINE(g_sample_ts_db);
+ZDB_TEST_INSTANCE_DEFINE(g_sample_doc_db);
+static struct mock_nvs_fs g_sample_nvs;
+static struct mock_lfs_fs g_sample_lfs;
 
 /* ===== Sample Integration Tests ===== */
 
@@ -20,26 +27,23 @@
  */
 static void test_sample_kv_basic_workflow(void)
 {
-	ZDB_TEST_INSTANCE_DEFINE(sample_db);
-	static struct mock_nvs_fs sample_nvs;
-
 	/* Initialize mock backend */
-	int rc = mock_nvs_init(&sample_nvs);
+	int rc = mock_nvs_init(&g_sample_nvs);
 	zassert_equal(rc, 0, "Mock NVS init failed");
 
 	/* Init DB */
 	zdb_cfg_t cfg = {
-		.kv_backend_fs = &sample_nvs.base,
+		.kv_backend_fs = &g_sample_nvs.base,
 		.lfs_mount_point = "/lfs",
 		.work_q = &k_sys_work_q,
 	};
 
-	zdb_status_t status = zdb_init(&sample_db, &cfg);
+	zdb_status_t status = zdb_init(&g_sample_kv_db, &cfg);
 	zassert_equal(status, ZDB_OK, "DB init failed: %d", status);
 
 	/* Open namespace */
 	zdb_kv_t kv;
-	status = zdb_kv_open(&sample_db, "app", &kv);
+	status = zdb_kv_open(&g_sample_kv_db, "app", &kv);
 	zassert_equal(status, ZDB_OK, "KV open failed: %d", status);
 
 	/* Set boot count */
@@ -65,8 +69,8 @@ static void test_sample_kv_basic_workflow(void)
 
 	/* Cleanup */
 	zdb_kv_close(&kv);
-	zdb_deinit(&sample_db);
-	mock_nvs_reset(&sample_nvs);
+	zdb_deinit(&g_sample_kv_db);
+	mock_nvs_reset(&g_sample_nvs);
 
 	ztest_pass();
 }
@@ -78,11 +82,8 @@ static void test_sample_kv_basic_workflow(void)
  */
 static void test_sample_ts_basic_workflow(void)
 {
-	ZDB_TEST_INSTANCE_DEFINE(sample_db);
-	static struct mock_lfs_fs sample_lfs;
-
 	/* Initialize mock backend */
-	int rc = mock_lfs_init(&sample_lfs);
+	int rc = mock_lfs_init(&g_sample_lfs);
 	zassert_equal(rc, 0, "Mock LittleFS init failed");
 
 	/* Init DB */
@@ -92,12 +93,12 @@ static void test_sample_ts_basic_workflow(void)
 		.work_q = &k_sys_work_q,
 	};
 
-	zdb_status_t status = zdb_init(&sample_db, &cfg);
+	zdb_status_t status = zdb_init(&g_sample_ts_db, &cfg);
 	zassert_equal(status, ZDB_OK, "DB init failed: %d", status);
 
 	/* Open stream */
 	zdb_ts_t stream;
-	status = zdb_ts_open(&sample_db, "metrics", &stream);
+	status = zdb_ts_open(&g_sample_ts_db, "metrics", &stream);
 	zassert_equal(status, ZDB_OK, "TS open failed: %d", status);
 
 	/* Append samples */
@@ -124,8 +125,8 @@ static void test_sample_ts_basic_workflow(void)
 
 	/* Cleanup */
 	zdb_ts_close(&stream);
-	zdb_deinit(&sample_db);
-	mock_lfs_reset(&sample_lfs);
+	zdb_deinit(&g_sample_ts_db);
+	mock_lfs_reset(&g_sample_lfs);
 
 	ztest_pass();
 }
@@ -137,11 +138,8 @@ static void test_sample_ts_basic_workflow(void)
  */
 static void test_sample_doc_basic_workflow(void)
 {
-	ZDB_TEST_INSTANCE_DEFINE(sample_db);
-	static struct mock_lfs_fs sample_lfs;
-
 	/* Initialize mock backend */
-	int rc = mock_lfs_init(&sample_lfs);
+	int rc = mock_lfs_init(&g_sample_lfs);
 	zassert_equal(rc, 0, "Mock LittleFS init failed");
 
 	/* Init DB */
@@ -151,12 +149,12 @@ static void test_sample_doc_basic_workflow(void)
 		.work_q = &k_sys_work_q,
 	};
 
-	zdb_status_t status = zdb_init(&sample_db, &cfg);
+	zdb_status_t status = zdb_init(&g_sample_doc_db, &cfg);
 	zassert_equal(status, ZDB_OK, "DB init failed: %d", status);
 
 	/* Create document */
 	zdb_doc_t doc;
-	status = zdb_doc_create(&sample_db, "users", "u1", &doc);
+	status = zdb_doc_create(&g_sample_doc_db, "users", "u1", &doc);
 	if (status != ZDB_OK) {
 		zskip("DOC module not available");
 		return;
@@ -202,8 +200,8 @@ static void test_sample_doc_basic_workflow(void)
 
 	/* Cleanup */
 	zdb_doc_close(&doc);
-	zdb_deinit(&sample_db);
-	mock_lfs_reset(&sample_lfs);
+	zdb_deinit(&g_sample_doc_db);
+	mock_lfs_reset(&g_sample_lfs);
 
 	ztest_pass();
 }

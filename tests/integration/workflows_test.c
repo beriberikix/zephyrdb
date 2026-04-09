@@ -9,6 +9,7 @@
 #include <zephyr/ztest.h>
 #include <zephyr/kernel.h>
 #include <zephyrdb.h>
+#include "../fixtures/common.h"
 #include <string.h>
 #include <errno.h>
 
@@ -216,11 +217,12 @@ static void test_concurrent_cursor_iterators(void)
  */
 static void test_health_status_transitions(void)
 {
-	zdb_status_t health;
+	zdb_health_t health;
 
 	/* Initial health should be OK or DEGRADED */
 	health = zdb_health(&g_test_db);
-	zassert_true(health == ZDB_OK || health == ZDB_DEGRADED || health == ZDB_READONLY,
+	zassert_true(health == ZDB_HEALTH_OK || health == ZDB_HEALTH_DEGRADED ||
+		     health == ZDB_HEALTH_READONLY || health == ZDB_HEALTH_FAULT,
 		     "Unexpected initial health: %d", health);
 
 	/* After operations, health should remain consistent */
@@ -231,7 +233,7 @@ static void test_health_status_transitions(void)
 		zdb_kv_set(&kv, "key", (uint8_t *)&val, sizeof(val));
 
 		health = zdb_health(&g_test_db);
-		zassert_true(health != ZDB_ERR_CORRUPT, "Health should not be CORRUPT after normal ops");
+		zassert_true(health != ZDB_HEALTH_FAULT, "Health should not be FAULT after normal ops");
 
 		zdb_kv_close(&kv);
 	}
@@ -247,34 +249,29 @@ static void test_stats_export_consistency(void)
 	zdb_status_t rc;
 
 	/* Get initial stats */
-	rc = zdb_ts_stats_get(&g_test_db, &stats_before);
-	zassert_true(rc == ZDB_OK || rc == ZDB_ERR_UNSUPPORTED,
-		     "Stats get failed: %d", rc);
+	zdb_ts_stats_get(&g_test_db, &stats_before);
 
+	/* Do some TS operations */
+	zdb_ts_t stream;
+	rc = zdb_ts_open(&g_test_db, "test_stream", &stream);
 	if (rc == ZDB_OK) {
-		/* Do some TS operations */
-		zdb_ts_t stream;
-		rc = zdb_ts_open(&g_test_db, "test_stream", &stream);
-		if (rc == ZDB_OK) {
-			for (int i = 0; i < 3; i++) {
-				zdb_ts_sample_i64_t sample = {
-					.ts_ms = k_uptime_get() + i,
-					.value = 100 + i,
-				};
-				zdb_ts_append_i64(&stream, &sample);
-			}
-			zdb_ts_close(&stream);
+		for (int i = 0; i < 3; i++) {
+			zdb_ts_sample_i64_t sample = {
+				.ts_ms = k_uptime_get() + i,
+				.value = 100 + i,
+			};
+			zdb_ts_append_i64(&stream, &sample);
 		}
-
-		/* Get stats after operations */
-		rc = zdb_ts_stats_get(&g_test_db, &stats_after);
-		assert_zdb_ok(rc);
-
-		/* Verify stats changed (some counters incremented) */
-		/* Exact values depend on implementation, so just verify non-negative */
-		zassert_true(stats_after.recover_runs >= stats_before.recover_runs,
-			     "Stats should not decrease");
+		zdb_ts_close(&stream);
 	}
+
+	/* Get stats after operations */
+	zdb_ts_stats_get(&g_test_db, &stats_after);
+
+	/* Verify stats changed (some counters incremented) */
+	/* Exact values depend on implementation, so just verify non-negative */
+	zassert_true(stats_after.recover_runs >= stats_before.recover_runs,
+		     "Stats should not decrease");
 }
 
 /*

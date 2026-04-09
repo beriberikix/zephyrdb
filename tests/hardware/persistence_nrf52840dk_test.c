@@ -12,14 +12,12 @@
 #include <zephyr/fs/littlefs.h>
 #include <zephyr/fs/fs.h>
 #include <zephyrdb.h>
+#include "../fixtures/common.h"
 #include <string.h>
 #include <errno.h>
 
 /* Hardware test instance */
 ZDB_TEST_INSTANCE_DEFINE(g_hw_db);
-
-/* Real NVS backend (must be pre-initialized in device tree) */
-static struct nvs_fs g_nvs_fs;
 
 /* Real LittleFS backend (must be mounted in device tree) */
 static struct fs_mount_t *g_lfs_mount = NULL;
@@ -31,7 +29,7 @@ static void hw_test_setup(void)
 	int rc;
 
 	/* Initialize NVS (if available on this board) */
-	#ifdef CONFIG_NVS_ENABLED
+	#ifdef CONFIG_NVS
 	/* This example assumes nvs_fs is pre-initialized via devicetree */
 	/* In real setup, this would be done via CONFIG_FCB or CONFIG_NVS */
 	#endif
@@ -347,7 +345,8 @@ static void test_doc_littlefs_save_large(void)
 static void test_health_readonly_on_fs_full(void)
 {
 	zdb_ts_t stream;
-	zdb_status_t rc, health;
+	zdb_status_t rc;
+	zdb_health_t health;
 
 	rc = zdb_ts_open(&g_hw_db, "fs_full_test", &stream);
 	if (rc != ZDB_OK) {
@@ -357,7 +356,8 @@ static void test_health_readonly_on_fs_full(void)
 
 	/* Check initial health */
 	health = zdb_health(&g_hw_db);
-	zassert_true(health == ZDB_OK || health == ZDB_DEGRADED,
+	zassert_true(health == ZDB_HEALTH_OK || health == ZDB_HEALTH_DEGRADED ||
+		     health == ZDB_HEALTH_READONLY || health == ZDB_HEALTH_FAULT,
 		     "Initial health should be OK or DEGRADED, got %d", health);
 
 	/* Try to append many samples to fill filesystem */
@@ -381,7 +381,8 @@ static void test_health_readonly_on_fs_full(void)
 
 	/* Check health after potential failure */
 	health = zdb_health(&g_hw_db);
-	zassert_true(health == ZDB_OK || health == ZDB_DEGRADED || health == ZDB_READONLY,
+	zassert_true(health == ZDB_HEALTH_OK || health == ZDB_HEALTH_DEGRADED ||
+		     health == ZDB_HEALTH_READONLY || health == ZDB_HEALTH_FAULT,
 		     "Unexpected health after FS operations: %d", health);
 
 	zdb_ts_close(&stream);

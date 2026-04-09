@@ -9,6 +9,7 @@
 #include <zephyr/ztest.h>
 #include <zephyr/kernel.h>
 #include <zephyrdb.h>
+#include "../fixtures/common.h"
 #include <string.h>
 #include <errno.h>
 

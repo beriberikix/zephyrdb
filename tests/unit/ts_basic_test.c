@@ -9,6 +9,7 @@
 #include <zephyr/ztest.h>
 #include <zephyr/kernel.h>
 #include <zephyrdb.h>
+#include "../fixtures/common.h"
 #include <string.h>
 #include <errno.h>
 
@@ -394,9 +395,12 @@ static void test_ts_sample_export_flatbuffer(void)
 
 	/* Export sample to FlatBuffer */
 	int rc = zdb_ts_sample_i64_export_flatbuffer(&sample, buffer, sizeof(buffer), &out_len);
-	
-	/* May not be supported in unit test environment */
-	zassert_true(rc == 0 || rc != 0, "Export test completed (result: %d)", rc);
+
+	if (rc == 0) {
+		zassert_true(out_len > 0, "FlatBuffer export succeeded but produced empty output");
+	} else {
+		zassert_true(out_len == 0, "FlatBuffer export failed but reported output length %zu", out_len);
+	}
 }
 
 /* ===== Test Suite Registration ===== */

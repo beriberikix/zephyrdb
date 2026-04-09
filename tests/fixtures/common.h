@@ -18,22 +18,10 @@
  * Creates slabs sized for testing (smaller than production).
  */
 #define ZDB_TEST_SLABS_DEFINE(instance_name)                                  \
-	K_MEM_SLAB_DEFINE(instance_name##_core_slab,                           \
-			  sizeof(struct zdb_internal_core),                     \
-			  16,                                                    \
-			  4);                                                    \
-	K_MEM_SLAB_DEFINE(instance_name##_cursor_slab,                        \
-			  sizeof(struct zdb_cursor_state),                      \
-			  8,                                                     \
-			  4);                                                    \
-	K_MEM_SLAB_DEFINE(instance_name##_kv_io_slab,                         \
-			  128,                                                   \
-			  2,                                                     \
-			  4);                                                    \
-	K_MEM_SLAB_DEFINE(instance_name##_ts_ingest_slab,                     \
-			  64,                                                    \
-			  16,                                                    \
-			  4)
+	ZDB_DEFINE_CORE_SLAB(instance_name##_core_slab);                       \
+	ZDB_DEFINE_CURSOR_SLAB(instance_name##_cursor_slab);                   \
+	ZDB_DEFINE_KV_IO_SLAB(instance_name##_kv_io_slab);                     \
+	ZDB_DEFINE_TS_INGEST_SLAB(instance_name##_ts_ingest_slab)
 
 /*
  * Macro to declare a static database instance with pre-allocated slabs.
@@ -120,15 +108,16 @@ void mock_lfs_reset(struct mock_lfs_fs *mock_lfs);
  * Initialize a database instance for testing with mock backends.
  * Sets up configuration with mocked NVS and LittleFS.
  *
- * Returns: 0 on success, -1 on error
+ * Returns: ZDB_OK on success, or a zdb_status_t error code from zdb_init()
+ * on failure.
  */
 int zdb_test_init(zdb_t *db, struct k_work_q *work_q);
 
 /*
- * Cleanup and verify no resource leaks after test.
- * Calls zdb_deinit and checks slab state.
+ * Cleanup database resources after a test.
+ * Calls zdb_deinit.
  *
- * Returns: 0 on success (no leaks), -1 if leaks detected
+ * Returns: 0 on completion
  */
 int zdb_test_cleanup(zdb_t *db);
 
