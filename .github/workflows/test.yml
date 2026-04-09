@@ -27,6 +27,9 @@ jobs:
     
     - name: Set up Zephyr workspace
       run: |
+        sudo apt-get update
+        sudo apt-get install -y gcc-multilib g++-multilib libc6-dev-i386
+
         python3 -m pip install --user --upgrade pip
         python3 -m pip install --user west
         echo "$HOME/.local/bin" >> "$GITHUB_PATH"
@@ -77,6 +80,9 @@ jobs:
     
     - name: Set up Zephyr workspace
       run: |
+        sudo apt-get update
+        sudo apt-get install -y gcc-multilib g++-multilib libc6-dev-i386
+
         python3 -m pip install --user --upgrade pip
         python3 -m pip install --user west
         echo "$HOME/.local/bin" >> "$GITHUB_PATH"
