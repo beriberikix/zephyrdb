@@ -272,6 +272,13 @@ config ZDB_DEBUG
 
 endmenu
 
+config ZDB_SHELL
+	bool "Enable ZephyrDB shell interface"
+	depends on SHELL
+	help
+	  Enables a compact Zephyr shell interface under the 'zdb' command
+	  for common development operations.
+
 menu "Stage 2 (Experimental)"
 
 config ZDB_FLATBUFFERS

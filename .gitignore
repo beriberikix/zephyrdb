@@ -9,8 +9,10 @@ zephyr/
 
 # Build output
 build/
+build_*/
 twister-out/
 twister-out.*/
+flash.bin
 
 # Editor/OS noise
 .vscode/
