@@ -1,15 +1,7 @@
-# ZephyrDB Core Health/Stats Helper Sample
+# core_health_stats
 
-This helper sample is intended for app bring-up and diagnostics.
+This helper sample demonstrates health and stats usage.
 
-It demonstrates:
-- core initialization/deinitialization
-- health checks (`zdb_health`)
-- TS stats snapshot/reset (`zdb_ts_stats_get`, `zdb_ts_stats_reset`)
+Full documentation:
 
-Build example:
-
-```bash
-west build -p always -s samples/core_health_stats -b native_sim
-west build -t run
-```
+- [../../docs/samples.md](../../docs/samples.md)
