@@ -1,0 +1,94 @@
+---
+# ZephyrDB Test Suite Configuration for Twister
+# Defines test scenarios, boards, and filtering
+
+tests:
+  zephyrdb.unit.kv_basic:
+    description: "KV Basic Unit Tests"
+    path: tests/unit/kv_basic_test.c
+    build_on_all: false
+    platforms:
+      - native_sim
+    tags:
+      - unit
+      - kv
+    timeout: 5
+
+  zephyrdb.unit.ts_basic:
+    description: "TS Basic Unit Tests"
+    path: tests/unit/ts_basic_test.c
+    build_on_all: false
+    platforms:
+      - native_sim
+    tags:
+      - unit
+      - ts
+    timeout: 5
+
+  zephyrdb.unit.doc_basic:
+    description: "DOC Basic Unit Tests"
+    path: tests/unit/doc_basic_test.c
+    build_on_all: false
+    platforms:
+      - native_sim
+    tags:
+      - unit
+      - doc
+    timeout: 5
+
+  zephyrdb.integration.workflows:
+    description: "Integration Workflow Tests"
+    path: tests/integration/workflows_test.c
+    build_on_all: false
+    platforms:
+      - native_sim
+    tags:
+      - integration
+    timeout: 10
+
+  zephyrdb.hardware.persistence_nrf52840dk:
+    description: "Hardware Persistence Tests (nRF52840 DK)"
+    path: tests/hardware/persistence_nrf52840dk_test.c
+    build_on_all: false
+    platforms:
+      - nrf52840dk_nrf52840
+    tags:
+      - hardware
+      - persistence
+      - nvs
+    timeout: 30
+
+  zephyrdb.samples.verify:
+    description: "Sample Validation Tests"
+    path: tests/samples/verify_samples_test.c
+    build_on_all: false
+    platforms:
+      - native_sim
+    tags:
+      - samples
+      - validation
+    timeout: 15
+
+# Test groups for convenient filtering
+test_groups:
+  unit:
+    - zephyrdb.unit.kv_basic
+    - zephyrdb.unit.ts_basic
+    - zephyrdb.unit.doc_basic
+
+  integration:
+    - zephyrdb.integration.workflows
+
+  hardware:
+    - zephyrdb.hardware.persistence_nrf52840dk
+
+  samples:
+    - zephyrdb.samples.verify
+
+  all:
+    - zephyrdb.unit.kv_basic
+    - zephyrdb.unit.ts_basic
+    - zephyrdb.unit.doc_basic
+    - zephyrdb.integration.workflows
+    - zephyrdb.hardware.persistence_nrf52840dk
+    - zephyrdb.samples.verify

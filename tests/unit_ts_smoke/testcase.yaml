@@ -1,0 +1,10 @@
+tests:
+  zephyrdb.unit_smoke.ts:
+    tags:
+      - zephyrdb
+      - unit
+      - ts
+      - smoke
+    harness: ztest
+    platform_allow:
+      - native_sim
