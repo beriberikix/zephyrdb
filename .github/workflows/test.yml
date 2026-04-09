@@ -41,15 +41,15 @@ jobs:
     
     - name: Run unit tests (native_sim)
       run: |
-        python3 "$ZEPHYR_BASE/scripts/twister" -T tests/unit/ -p native_sim -v --timeout 10
+        python3 "$ZEPHYR_BASE/scripts/twister" -T tests/unit/ -p native_sim -v
     
     - name: Run integration tests (native_sim)
       run: |
-        python3 "$ZEPHYR_BASE/scripts/twister" -T tests/integration/ -p native_sim -v --timeout 15
+        python3 "$ZEPHYR_BASE/scripts/twister" -T tests/integration/ -p native_sim -v
     
     - name: Run sample validation tests (native_sim)
       run: |
-        python3 "$ZEPHYR_BASE/scripts/twister" -T tests/samples/ -p native_sim -v --timeout 20
+        python3 "$ZEPHYR_BASE/scripts/twister" -T tests/samples/ -p native_sim -v
     
     - name: Upload test results
       if: always()
@@ -92,7 +92,7 @@ jobs:
     - name: Build hardware tests for nRF52840dk
       run: |
         python3 "$ZEPHYR_BASE/scripts/twister" -T tests/hardware/ -p nrf52840dk_nrf52840 \
-          --build-only -v --timeout 30 || echo "Build check complete"
+          --build-only -v || echo "Build check complete"
     
     - name: Note on hardware tests
       run: |
