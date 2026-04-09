@@ -87,6 +87,23 @@ Notes:
 
 - Requires filesystem-backed storage and `flatcc-zephyr` dependency.
 
+### shell_basic
+
+Developer-oriented Zephyr shell sample that exposes the `zdb` command tree for common runtime operations.
+
+Build:
+
+```bash
+west build -p always -s samples/shell_basic -b native_sim
+west build -t run
+```
+
+Notes:
+
+- Uses ZMS on `storage_partition` for KV backend on `native_sim`.
+- Runs a startup KV smoke check (`set/get/delete`) before enabling interactive shell usage.
+- Useful for validating command behavior such as `zdb health`, `zdb stats`, and `zdb kv ...`.
+
 ## Notes
 
 - DOC samples require `flatcc-zephyr` in the same workspace.

@@ -199,6 +199,11 @@ zdb_health_t zdb_health(const zdb_t *db);
 void zdb_ts_stats_get(const zdb_t *db, zdb_ts_stats_t *out_stats);
 void zdb_ts_stats_reset(zdb_t *db);
 
+#if defined(CONFIG_ZDB_SHELL) && (CONFIG_ZDB_SHELL)
+/* Register app-owned DB instance used by the "zdb" shell command tree. */
+void zdb_shell_register(zdb_t *db);
+#endif
+
 /*
  * Export TS stats in compact, transport-ready format with CRC.
  */

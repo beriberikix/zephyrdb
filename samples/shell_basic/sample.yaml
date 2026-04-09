@@ -1,0 +1,22 @@
+sample:
+  name: ZephyrDB shell basic sample
+
+common:
+  tags:
+    - zephyrdb
+    - samples
+    - shell
+  integration_platforms:
+    - native_sim
+
+tests:
+  zephyrdb.samples.shell_basic:
+    harness: console
+    harness_config:
+      type: multi_line
+      regex:
+        - "shell_basic: KV selftest PASS"
+        - "shell_basic: ZephyrDB shell ready"
+    platform_allow:
+      - native_sim
+    timeout: 20
