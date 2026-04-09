@@ -9,6 +9,8 @@ This page summarizes the currently implemented ZephyrDB public APIs.
 - TS APIs are available when `CONFIG_ZDB_TS=y`.
 - Document APIs are available when `CONFIG_ZDB_DOC=y`.
 - FlatBuffers export helper requires `CONFIG_ZDB_FLATBUFFERS=y` and `CONFIG_FLATCC=y`.
+- Eventing APIs are available when `CONFIG_ZDB_EVENTING=y`.
+- zbus adapter APIs are available when `CONFIG_ZDB_EVENTING_ZBUS=y`.
 
 ## Core
 
@@ -27,6 +29,33 @@ This page summarizes the currently implemented ZephyrDB public APIs.
 - `zdb_kv_set(kv, key, value, value_len)`
 - `zdb_kv_get(kv, key, out_value, out_capacity, out_len)`
 - `zdb_kv_delete(kv, key)`
+
+## Eventing
+
+- `zdb_event_type_t`
+- `zdb_kv_event_t`
+- `zdb_event_listener_fn_t`
+- `zdb_event_listener_t`
+
+Configuration fields in `zdb_cfg_t` when eventing is enabled:
+
+- `event_listeners`
+- `event_listener_count`
+
+## zbus Adapter
+
+Header:
+
+- `zephyrdb_eventing_zbus.h`
+
+Symbols:
+
+- `ZBUS_CHAN_DECLARE(zdb_kv_event_chan)`
+- `zdb_eventing_zbus_publish(const zdb_kv_event_t *event)`
+
+Channel payload type:
+
+- `zdb_kv_event_t`
 
 ## Time-Series
 

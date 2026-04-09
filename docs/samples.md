@@ -104,6 +104,23 @@ Notes:
 - Runs a startup KV smoke check (`set/get/delete`) before enabling interactive shell usage.
 - Useful for validating command behavior such as `zdb health`, `zdb stats`, and `zdb kv ...`.
 
+### eventing_zbus
+
+Demonstrates KV mutation event emission published to zbus through the optional adapter.
+
+Build:
+
+```bash
+west build -p always -s samples/eventing_zbus -b native_sim
+west build -t run
+```
+
+Notes:
+
+- Enables `CONFIG_ZDB_EVENTING` and `CONFIG_ZDB_EVENTING_ZBUS`.
+- Uses ZMS on `storage_partition` for KV backend on `native_sim`.
+- Prints latest zbus event after KV set/delete operations.
+
 ## Notes
 
 - DOC samples require `flatcc-zephyr` in the same workspace.

@@ -8,6 +8,16 @@ ZephyrDB is configured through [../Kconfig.zephyrdb](../Kconfig.zephyrdb).
 - `CONFIG_ZDB_STATS`: enable runtime statistics
 - `CONFIG_ZDB_SCAN_YIELD_EVERY_N`: cooperative scan yield frequency
 
+## Eventing Options
+
+- `CONFIG_ZDB_EVENTING`: enable local KV mutation events
+- `CONFIG_ZDB_EVENTING_ZBUS`: publish KV mutation events to zbus
+
+Notes:
+
+- `CONFIG_ZDB_EVENTING_ZBUS` depends on `CONFIG_ZDB_EVENTING` and `CONFIG_ZBUS`.
+- Event publication is best-effort and does not alter KV write/delete return values.
+
 ## Key-Value Options
 
 - `CONFIG_ZDB_KV`: enable KV module
