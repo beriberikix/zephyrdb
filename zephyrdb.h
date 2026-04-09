@@ -134,6 +134,27 @@ typedef struct {
 	uint32_t unsupported_versions;
 } zdb_ts_stats_t;
 
+typedef enum {
+	ZDB_EVENT_KV_SET = 0,
+	ZDB_EVENT_KV_DELETE,
+} zdb_event_type_t;
+
+typedef struct {
+	zdb_event_type_t type;
+	const char *namespace_name;
+	const char *key;
+	size_t value_len;
+	uint64_t timestamp_ms;
+	zdb_status_t status;
+} zdb_kv_event_t;
+
+typedef void (*zdb_event_listener_fn_t)(const zdb_kv_event_t *event, void *user_ctx);
+
+typedef struct {
+	zdb_event_listener_fn_t notify;
+	void *user_ctx;
+} zdb_event_listener_t;
+
 /*
  * Compact telemetry export format for transport/logging.
  * Includes CRC for integrity during transmission.
@@ -160,6 +181,10 @@ typedef struct {
 	const void *kv_backend_fs;
 	const char *lfs_mount_point;
 	struct k_work_q *work_q;
+#if defined(CONFIG_ZDB_EVENTING) && (CONFIG_ZDB_EVENTING)
+	const zdb_event_listener_t *event_listeners;
+	size_t event_listener_count;
+#endif
 } zdb_cfg_t;
 
 typedef struct {
@@ -173,6 +198,10 @@ typedef struct {
 	void *ts_ctx;
 	const zdb_cfg_t *cfg;
 	zdb_ts_stats_t ts_stats;
+#if defined(CONFIG_ZDB_EVENTING) && (CONFIG_ZDB_EVENTING)
+	const zdb_event_listener_t *event_listeners;
+	size_t event_listener_count;
+#endif
 } zdb_t;
 
 typedef bool (*zdb_predicate_fn)(zdb_model_t model, const zdb_bytes_t *record, void *user_ctx);

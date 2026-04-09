@@ -180,6 +180,34 @@ static void zdb_unlock_write(zdb_t *db)
 	k_mutex_unlock(&db->lock);
 }
 
+#if defined(CONFIG_ZDB_EVENTING) && (CONFIG_ZDB_EVENTING)
+static void zdb_emit_kv_event(zdb_t *db, zdb_event_type_t type, const char *namespace_name,
+			      const char *key, size_t value_len, zdb_status_t status)
+{
+	zdb_kv_event_t event;
+	size_t i;
+
+	if ((db == NULL) || (db->event_listeners == NULL) || (db->event_listener_count == 0U)) {
+		return;
+	}
+
+	event.type = type;
+	event.namespace_name = namespace_name;
+	event.key = key;
+	event.value_len = value_len;
+	event.timestamp_ms = (uint64_t)k_uptime_get();
+	event.status = status;
+
+	for (i = 0U; i < db->event_listener_count; i++) {
+		const zdb_event_listener_t *listener = &db->event_listeners[i];
+
+		if (listener->notify != NULL) {
+			listener->notify(&event, listener->user_ctx);
+		}
+	}
+}
+#endif
+
 #if defined(CONFIG_ZDB_TS) && (CONFIG_ZDB_TS)
 struct __packed zdb_ts_record_i64 {
 	uint32_t magic_le;
@@ -836,6 +864,10 @@ zdb_status_t zdb_init(zdb_t *db, const zdb_cfg_t *cfg)
 	db->kv_ctx = NULL;
 	db->ts_ctx = NULL;
 	(void)memset(&db->ts_stats, 0, sizeof(db->ts_stats));
+#if defined(CONFIG_ZDB_EVENTING) && (CONFIG_ZDB_EVENTING)
+	db->event_listeners = cfg->event_listeners;
+	db->event_listener_count = cfg->event_listener_count;
+#endif
 
 	return ZDB_OK;
 }
@@ -861,6 +893,10 @@ zdb_status_t zdb_deinit(zdb_t *db)
 	db->core_ctx = NULL;
 	db->kv_ctx = NULL;
 	db->ts_ctx = NULL;
+#if defined(CONFIG_ZDB_EVENTING) && (CONFIG_ZDB_EVENTING)
+	db->event_listeners = NULL;
+	db->event_listener_count = 0U;
+#endif
 
 	return ZDB_OK;
 }
@@ -1131,6 +1167,7 @@ zdb_status_t zdb_kv_set(zdb_kv_t *kv, const char *key, const void *value, size_t
 	uint32_t id;
 	ssize_t wr;
 	zdb_status_t lock_rc;
+	zdb_status_t status;
 
 	if ((kv == NULL) || (kv->db == NULL) || (value == NULL) || (value_len == 0U) ||
 	    !zdb_key_valid(key)) {
@@ -1151,14 +1188,18 @@ zdb_status_t zdb_kv_set(zdb_kv_t *kv, const char *key, const void *value, size_t
 	zdb_unlock_write(kv->db);
 
 	if (wr < 0) {
-		return zdb_status_from_errno((int)wr);
+		status = zdb_status_from_errno((int)wr);
+	} else if ((size_t)wr != value_len) {
+		status = ZDB_ERR_IO;
+	} else {
+		status = ZDB_OK;
 	}
 
-	if ((size_t)wr != value_len) {
-		return ZDB_ERR_IO;
-	}
+#if defined(CONFIG_ZDB_EVENTING) && (CONFIG_ZDB_EVENTING)
+	zdb_emit_kv_event(kv->db, ZDB_EVENT_KV_SET, kv->namespace_name, key, value_len, status);
+#endif
 
-	return ZDB_OK;
+	return status;
 }
 
 zdb_status_t zdb_kv_get(zdb_kv_t *kv, const char *key, void *out_value,
@@ -1203,6 +1244,7 @@ zdb_status_t zdb_kv_delete(zdb_kv_t *kv, const char *key)
 	uint32_t id;
 	int rc;
 	zdb_status_t lock_rc;
+	zdb_status_t status;
 
 	if ((kv == NULL) || (kv->db == NULL) || !zdb_key_valid(key)) {
 		return ZDB_ERR_INVAL;
@@ -1222,10 +1264,16 @@ zdb_status_t zdb_kv_delete(zdb_kv_t *kv, const char *key)
 	zdb_unlock_write(kv->db);
 
 	if (rc < 0) {
-		return zdb_status_from_errno(rc);
+		status = zdb_status_from_errno(rc);
+	} else {
+		status = ZDB_OK;
 	}
 
-	return ZDB_OK;
+#if defined(CONFIG_ZDB_EVENTING) && (CONFIG_ZDB_EVENTING)
+	zdb_emit_kv_event(kv->db, ZDB_EVENT_KV_DELETE, kv->namespace_name, key, 0U, status);
+#endif
+
+	return status;
 }
 
 static uint32_t zdb_kv_key_to_id(const char *key)
