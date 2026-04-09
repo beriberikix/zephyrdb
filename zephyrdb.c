@@ -37,6 +37,10 @@
 
 #include <zephyr/sys/crc.h>
 
+#if defined(CONFIG_ZDB_EVENTING_ZBUS) && (CONFIG_ZDB_EVENTING_ZBUS)
+#include "zephyrdb_eventing_zbus.h"
+#endif
+
 #ifndef CONFIG_ZDB_MAX_KEY_LEN
 #define CONFIG_ZDB_MAX_KEY_LEN 48
 #endif
@@ -187,7 +191,7 @@ static void zdb_emit_kv_event(zdb_t *db, zdb_event_type_t type, const char *name
 	zdb_kv_event_t event;
 	size_t i;
 
-	if ((db == NULL) || (db->event_listeners == NULL) || (db->event_listener_count == 0U)) {
+	if (db == NULL) {
 		return;
 	}
 
@@ -198,11 +202,18 @@ static void zdb_emit_kv_event(zdb_t *db, zdb_event_type_t type, const char *name
 	event.timestamp_ms = (uint64_t)k_uptime_get();
 	event.status = status;
 
-	for (i = 0U; i < db->event_listener_count; i++) {
-		const zdb_event_listener_t *listener = &db->event_listeners[i];
+#if defined(CONFIG_ZDB_EVENTING_ZBUS) && (CONFIG_ZDB_EVENTING_ZBUS)
+	/* zbus publishing is best-effort and must not affect DB operation status. */
+	(void)zdb_eventing_zbus_publish(&event);
+#endif
 
-		if (listener->notify != NULL) {
-			listener->notify(&event, listener->user_ctx);
+	if ((db->event_listeners != NULL) && (db->event_listener_count > 0U)) {
+		for (i = 0U; i < db->event_listener_count; i++) {
+			const zdb_event_listener_t *listener = &db->event_listeners[i];
+
+			if (listener->notify != NULL) {
+				listener->notify(&event, listener->user_ctx);
+			}
 		}
 	}
 }

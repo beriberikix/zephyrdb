@@ -271,6 +271,15 @@ config ZDB_EVENTING
 	  This feature is intended for in-process listeners and does not
 	  provide durability or distributed delivery guarantees.
 
+config ZDB_EVENTING_ZBUS
+	bool "Publish KV events to zbus"
+	default n
+	depends on ZDB_EVENTING && ZBUS
+	help
+	  Publishes ZephyrDB KV mutation events to a zbus channel.
+	  This is an optional adapter layer and does not change write-path
+	  behavior if publish fails.
+
 config ZDB_STATS
 	bool "Enable ZephyrDB statistics counters"
 	default n

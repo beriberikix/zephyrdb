@@ -10,6 +10,8 @@ Embedded multi-model database for Zephyr RTOS, designed for memory-constrained s
 - Document model with typed fields and query APIs
 - Durability helpers: integrity checks, recovery, stats export
 - Optional FlatBuffers export helper for TS samples
+- Optional KV event emitter/listener hooks
+- Optional zbus adapter for KV event publication
 
 ## Quick Start
 
@@ -72,6 +74,20 @@ if (rc != ZDB_OK) {
 - [Testing Guide](docs/testing.md)
 - [Samples Guide](docs/samples.md)
 - [Roadmap](docs/roadmap.md)
+
+## Eventing and zbus Adapter
+
+ZephyrDB can emit lightweight KV mutation events when enabled:
+
+- `CONFIG_ZDB_EVENTING=y` enables local KV event emission
+- `CONFIG_ZDB_EVENTING_ZBUS=y` bridges those events to a zbus channel
+
+The zbus channel carries `zdb_kv_event_t` messages and is intended as an
+optional adapter layer for local subscribers.
+
+See sample:
+
+- [samples/eventing_zbus](samples/eventing_zbus)
 
 ## Storage Layout
 
