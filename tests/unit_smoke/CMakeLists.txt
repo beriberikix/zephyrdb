@@ -4,7 +4,7 @@ project(zephyrdb_unit_smoke)
 
 target_sources(app PRIVATE
   src/main.c
-  ${CMAKE_CURRENT_LIST_DIR}/../../zephyrdb.c
+  ${CMAKE_CURRENT_LIST_DIR}/../../zephyrdb_core.c
 )
 
 target_include_directories(app PRIVATE
