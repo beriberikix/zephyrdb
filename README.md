@@ -7,11 +7,22 @@ Embedded multi-model database for Zephyr RTOS, designed for memory-constrained s
 - Zero-malloc static-slab memory model
 - Key-value model with NVS or ZMS backends
 - Time-series model with LittleFS or FCB backends
-- Document model with typed fields and query APIs
+- Document model with typed fields and query APIs (⚠️ requires `CONFIG_ZDB_TS=y`)
 - Durability helpers: integrity checks, recovery, stats export
-- Optional FlatBuffers export helper for TS samples
+- Optional FlatBuffers export helper for TS samples (⚠️ DOC export not yet implemented)
 - Optional KV event emitter/listener hooks
 - Optional zbus adapter for KV event publication
+
+## Before You Use
+
+ZephyrDB has several known limitations you should understand before deployment:
+
+- **DOC module requires TS:** `CONFIG_ZDB_DOC` depends on `CONFIG_ZDB_TS=y`. Building with DOC enabled but TS disabled will fail at link time.
+- **KV hash collisions:** Both NVS and ZMS backends use hash-based key IDs with no collision detection. The 16-bit NVS hash reaches ~50% collision probability around 256 keys. Size your keyspace accordingly.
+- **TS cursor I/O performance:** Each `zdb_cursor_next()` call opens a new file handle instead of caching. For large result sets, prefer batch aggregation APIs (`zdb_ts_query_aggregate()`) instead of iteration.
+- **`zdb_ts_flush_sync()` spin-waits:** Uses `k_yield()` busy-wait instead of proper event signaling. On cooperative-only schedulers, this may not work as expected.
+
+See [docs/api.md](docs/api.md#known-limitations) for detailed limitations.
 
 ## Quick Start
 
