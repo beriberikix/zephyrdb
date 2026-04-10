@@ -311,11 +311,42 @@ config ZDB_FLATBUFFERS
 config ZDB_DOC
 	bool "Enable document model (Stage 3)"
 	default n
-	depends on ZDB_FLATBUFFERS
+	depends on ZDB_FLATBUFFERS && (FILE_SYSTEM || NVS || ZMS)
 	help
 	  Enables semi-structured document APIs built on FlatBuffers.
 	  Supports variable-length strings, nested objects, and dynamic queries
-	  on document properties.
+	  on document properties. Can use LittleFS, NVS, or ZMS as backend.
+
+choice ZDB_DOC_BACKEND
+	prompt "Document storage backend"
+	default ZDB_DOC_BACKEND_LITTLEFS
+	depends on ZDB_DOC
+
+config ZDB_DOC_BACKEND_LITTLEFS
+	bool "LittleFS (filesystem-based)"
+	depends on FILE_SYSTEM
+	help
+	  Store documents as individual files in a LittleFS filesystem.
+	  Offers native directory structure and efficient queries via directory scanning.
+	  Requires sufficient flash or external storage for filesystem overhead.
+
+config ZDB_DOC_BACKEND_NVS
+	bool "NVS (flash key-value)"
+	depends on NVS
+	help
+	  Store documents as serialized blobs in NVS entries.
+	  Enables document storage on boards with limited flash (no filesystem).
+	  Queries require full scan and deserialization of all entries.
+
+config ZDB_DOC_BACKEND_ZMS
+	bool "ZMS (Zephyr Memory Storage)"
+	depends on ZMS
+	help
+	  Store documents as serialized blobs in ZMS entries.
+	  Better wear-leveling and larger ID space than NVS.
+	  Queries require full scan and deserialization of all entries.
+
+endchoice
 
 menu "Document Model (Stage 3)"
 	depends on ZDB_DOC
@@ -364,6 +395,25 @@ config ZDB_DOC_SLAB_BLOCK_COUNT
 	int "Document field slab block count"
 	range 1 256
 	default 16
+
+config ZDB_DOC_MAX_SERIALIZED_SIZE
+	int "Max serialized document size (bytes)"
+	range 256 65536
+	default 1024
+	depends on (ZDB_DOC_BACKEND_NVS || ZDB_DOC_BACKEND_ZMS)
+	help
+	  Maximum size for a serialized document blob when using NVS or ZMS backend.
+	  Larger documents are rejected at save time to prevent entry overhead.
+	  For LittleFS backend, this limit is not enforced (filesystem handles arbitrary sizes).
+
+config ZDB_DOC_MANIFEST_MAX_ENTRIES
+	int "Max documents in manifest cache"
+	range 8 1024
+	default 64
+	depends on (ZDB_DOC_BACKEND_NVS || ZDB_DOC_BACKEND_ZMS)
+	help
+	  Maximum number of (collection, document_id) pairs cached in RAM
+	  when using NVS or ZMS backend. Queries enumerate manifest to discover documents.
 
 endmenu
 

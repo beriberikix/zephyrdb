@@ -2394,6 +2394,26 @@ static inline void zdb_doc_metadata_entry_free(zdb_doc_metadata_t *metadata)
 	}
 }
 
+/*
+ * Deserialize document from filesystem storage.
+ *
+ * Reads and parses the binary document format (see zdb_doc_save for format spec).
+ * Validates magic number and version; returns ZDB_ERR_CORRUPT if invalid.
+ * Each field is deserialized based on its type flag and added to the output document.
+ *
+ * If take_read_lock is true, acquires database read lock for file access safety.
+ * Caller should set take_read_lock=true for public API calls to ensure correct
+ * visibility and atomic reads; internal queries may use false to avoid deadlock.
+ *
+ * Errors:
+ *   - ZDB_ERR_NOT_FOUND: document file doesn't exist
+ *   - ZDB_ERR_CORRUPT: invalid magic, version, name length, or field count
+ *   - ZDB_ERR_NOMEM: insufficient memory for fields or field names
+ *   - ZDB_ERR_IO: read errors
+ *
+ * On error, out_doc is partially initialized and must be freed; caller should call
+ * zdb_doc_close(out_doc) to release resources safely.
+ */
 static zdb_status_t zdb_doc_open_impl(zdb_t *db, const char *collection_name,
 				      const char *document_id, zdb_doc_t *out_doc,
 				      bool take_read_lock)
@@ -2438,6 +2458,7 @@ static zdb_status_t zdb_doc_open_impl(zdb_t *db, const char *collection_name,
 	}
 	file_open = true;
 
+	/* Read and validate document header (magic, version, field count, timestamps) */
 	ret = zdb_fs_read_exact(&file, &hdr, sizeof(hdr));
 	if (ret != ZDB_OK) {
 		goto cleanup;
@@ -2456,6 +2477,7 @@ static zdb_status_t zdb_doc_open_impl(zdb_t *db, const char *collection_name,
 		goto cleanup;
 	}
 
+	/* Deserialize each field: read header, name, then type-specific value */
 	for (i = 0U; i < (size_t)sys_le16_to_cpu(hdr.field_count_le); i++) {
 		char *name = NULL;
 		uint16_t name_len;
@@ -2486,6 +2508,7 @@ static zdb_status_t zdb_doc_open_impl(zdb_t *db, const char *collection_name,
 		}
 		name[name_len] = '\0';
 
+		/* Read and convert field value based on type from file format */
 		switch (type) {
 		case ZDB_DOC_FIELD_INT64: {
 			uint64_t tmp_le;
@@ -2915,6 +2938,29 @@ zdb_status_t zdb_doc_open(zdb_t *db, const char *collection_name,
 	return zdb_doc_open_impl(db, collection_name, document_id, out_doc, true);
 }
 
+/*
+ * Serialize document to persistent storage (filesystem).
+ *
+ * Binary Format (little-endian throughout):
+ *   - Header (32 bytes): magic | version | field_count | created_ms | updated_ms | crc
+ *   - For each field:
+ *     - Field header (8 bytes): name_len | reserved | type | reserved[3]
+ *     - Field name (name_len bytes): UTF-8 null-terminated string
+ *     - Field value (type-dependent):
+ *       - INT64 (8 bytes): signed 64-bit integer
+ *       - DOUBLE (8 bytes): IEEE-754 double
+ *       - BOOL (1 byte): 0 or 1
+ *       - STRING: 4-byte length prefix + null-terminated UTF-8 string
+ *       - BYTES: 4-byte length prefix + raw binary data
+ *
+ * Error Behavior:
+ *   - Invalid inputs or state return ZDB_ERR_INVAL
+ *   - Memory/filesystem issues return ZDB_ERR_NOMEM or ZDB_ERR_IO
+ *   - Unsupported field types return ZDB_ERR_UNSUPPORTED
+ *
+ *   On partial write failure, file is closed and write lock released;
+ *   caller must handle incomplete file on disk.
+ */
 zdb_status_t zdb_doc_save(zdb_doc_t *doc)
 {
 	char path[ZDB_DOC_PATH_MAX];
@@ -2954,12 +3000,13 @@ zdb_status_t zdb_doc_save(zdb_doc_t *doc)
 		return zdb_status_from_errno(rc);
 	}
 
+	/* Build document header with magic, version, counts, and timestamps */
 	hdr.magic_le = sys_cpu_to_le32(ZDB_DOC_MAGIC);
 	hdr.version_le = sys_cpu_to_le16(ZDB_DOC_VERSION);
 	hdr.field_count_le = sys_cpu_to_le16((uint16_t)doc->field_count);
 	hdr.created_ms_le = sys_cpu_to_le64(doc->created_ms);
 	hdr.updated_ms_le = sys_cpu_to_le64(doc->updated_ms);
-	hdr.crc_le = sys_cpu_to_le32(0U);
+	hdr.crc_le = sys_cpu_to_le32(0U); /* Reserved for future CRC validation */
 
 	fs_file_t_init(&file);
 	rc = fs_open(&file, path, FS_O_CREATE | FS_O_WRITE | FS_O_TRUNC);
@@ -2968,6 +3015,7 @@ zdb_status_t zdb_doc_save(zdb_doc_t *doc)
 		return zdb_status_from_errno(rc);
 	}
 
+	/* Write header to file */
 	wr = fs_write(&file, &hdr, sizeof(hdr));
 	if (wr != (ssize_t)sizeof(hdr)) {
 		(void)fs_close(&file);
@@ -2975,10 +3023,12 @@ zdb_status_t zdb_doc_save(zdb_doc_t *doc)
 		return (wr < 0) ? zdb_status_from_errno((int)wr) : ZDB_ERR_IO;
 	}
 
+	/* Serialize each field: header, name, then type-specific value */
 	for (i = 0U; i < doc->field_count; i++) {
 		const zdb_doc_field_t *field = &doc->fields[i];
 		uint16_t name_len = (uint16_t)strlen(field->name);
 
+		/* Write field header with type and name length */
 		fh.name_len_le = sys_cpu_to_le16(name_len);
 		fh.reserved_le = 0U;
 		fh.type = (uint8_t)field->type;
@@ -2991,6 +3041,7 @@ zdb_status_t zdb_doc_save(zdb_doc_t *doc)
 			return (wr < 0) ? zdb_status_from_errno((int)wr) : ZDB_ERR_IO;
 		}
 
+		/* Write field name */
 		wr = fs_write(&file, field->name, name_len);
 		if (wr != (ssize_t)name_len) {
 			(void)fs_close(&file);
@@ -2998,6 +3049,7 @@ zdb_status_t zdb_doc_save(zdb_doc_t *doc)
 			return (wr < 0) ? zdb_status_from_errno((int)wr) : ZDB_ERR_IO;
 		}
 
+		/* Write field value based on type */
 		switch (field->type) {
 		case ZDB_DOC_FIELD_INT64: {
 			uint64_t tmp_le = sys_cpu_to_le64((uint64_t)field->value.i64);
@@ -3010,6 +3062,7 @@ zdb_status_t zdb_doc_save(zdb_doc_t *doc)
 			break;
 		}
 		case ZDB_DOC_FIELD_DOUBLE: {
+			/* Note: double is bit-copied as-is then endian-swapped to preserve IEEE-754 */
 			uint64_t tmp_le;
 			(void)memcpy(&tmp_le, &field->value.f64, sizeof(tmp_le));
 			tmp_le = sys_cpu_to_le64(tmp_le);
@@ -3022,6 +3075,7 @@ zdb_status_t zdb_doc_save(zdb_doc_t *doc)
 			break;
 		}
 		case ZDB_DOC_FIELD_BOOL: {
+			/* Store boolean as single byte: 0 or 1 */
 			uint8_t b = field->value.b ? 1U : 0U;
 			wr = fs_write(&file, &b, sizeof(b));
 			if (wr != (ssize_t)sizeof(b)) {
@@ -3032,6 +3086,7 @@ zdb_status_t zdb_doc_save(zdb_doc_t *doc)
 			break;
 		}
 		case ZDB_DOC_FIELD_STRING: {
+			/* Write variable-length string: 4-byte length prefix + data */
 			uint32_t str_len = (uint32_t)strlen(field->value.str != NULL ? field->value.str : "");
 			uint32_t str_len_le = sys_cpu_to_le32(str_len);
 			wr = fs_write(&file, &str_len_le, sizeof(str_len_le));
@@ -3051,6 +3106,7 @@ zdb_status_t zdb_doc_save(zdb_doc_t *doc)
 			break;
 		}
 		case ZDB_DOC_FIELD_BYTES: {
+			/* Write variable-length binary data: 4-byte length prefix + data */
 			uint32_t bytes_len = (uint32_t)field->value.bytes.len;
 			uint32_t bytes_len_le = sys_cpu_to_le32(bytes_len);
 			wr = fs_write(&file, &bytes_len_le, sizeof(bytes_len_le));
@@ -3076,6 +3132,7 @@ zdb_status_t zdb_doc_save(zdb_doc_t *doc)
 		}
 	}
 
+	/* Record final file size for event reporting */
 	{
 		off_t end_pos = fs_tell(&file);
 		if (end_pos > 0) {
@@ -3086,6 +3143,7 @@ zdb_status_t zdb_doc_save(zdb_doc_t *doc)
 	(void)fs_close(&file);
 	zdb_unlock_write(doc->db);
 #if defined(CONFIG_ZDB_EVENTING) && (CONFIG_ZDB_EVENTING)
+	/* Emit save event with serialized size for monitoring */
 	zdb_emit_doc_event(doc->db, ZDB_DOC_EVENT_SAVE, doc->collection_name, doc->document_id,
 			   doc->field_count, serialized_bytes, ZDB_OK);
 #endif
@@ -3093,6 +3151,21 @@ zdb_status_t zdb_doc_save(zdb_doc_t *doc)
 
 }
 
+/*
+ * Delete document file from persistent storage.
+ *
+ * Acquires database write lock to prevent concurrent open/query operations.
+ * Removes the document file from the filesystem. If the file doesn't exist,
+ * returns success (idempotent deletion).
+ *
+ * Error behavior:
+ *   - ZDB_ERR_INVAL: invalid pointers or collection/document names
+ *   - ZDB_ERR_IO: filesystem errors during path building or unlink
+ *
+ * After successful deletion, the document is removed from storage.
+ * Callers with open document handles should close them;
+ * subsequent open() calls will fail with ZDB_ERR_NOT_FOUND.
+ */
 zdb_status_t zdb_doc_delete(zdb_t *db, const char *collection_name,
 			     const char *document_id)
 {

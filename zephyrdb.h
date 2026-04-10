@@ -245,6 +245,7 @@ typedef struct {
 	void *core_ctx;
 	void *kv_ctx;
 	void *ts_ctx;
+	void *doc_ctx;  /* DOC backend context (manifest cache for NVS/ZMS) */
 	const zdb_cfg_t *cfg;
 	zdb_ts_stats_t ts_stats;
 #if defined(CONFIG_ZDB_EVENTING) && (CONFIG_ZDB_EVENTING)
@@ -464,6 +465,15 @@ typedef struct {
 	uint64_t updated_ms;
 	uint32_t field_count;
 } zdb_doc_metadata_t;
+
+/*
+ * Internal manifest entry for NVS/ZMS backends.
+ * Tracks (collection, document_id) pairs to enable queries without directory scanning.
+ */
+typedef struct {
+	const char *collection_name;
+	const char *document_id;
+} zdb_doc_manifest_entry_t;
 
 /*
  * Document lifecycle
