@@ -24,34 +24,6 @@ static zdb_t *zdb_shell_db_get(const struct shell *sh)
 	return g_shell_db;
 }
 
-static const char *zdb_status_str(zdb_status_t status)
-{
-	switch (status) {
-	case ZDB_OK:
-		return "OK";
-	case ZDB_ERR_INVAL:
-		return "EINVAL";
-	case ZDB_ERR_NOMEM:
-		return "ENOMEM";
-	case ZDB_ERR_NOT_FOUND:
-		return "NOT_FOUND";
-	case ZDB_ERR_IO:
-		return "IO";
-	case ZDB_ERR_BUSY:
-		return "BUSY";
-	case ZDB_ERR_TIMEOUT:
-		return "TIMEOUT";
-	case ZDB_ERR_UNSUPPORTED:
-		return "UNSUPPORTED";
-	case ZDB_ERR_CORRUPT:
-		return "CORRUPT";
-	case ZDB_ERR_INTERNAL:
-		return "INTERNAL";
-	default:
-		return "UNKNOWN";
-	}
-}
-
 static const char *zdb_health_str(zdb_health_t health)
 {
 	switch (health) {

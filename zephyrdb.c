@@ -41,30 +41,24 @@
 #include "zephyrdb_eventing_zbus.h"
 #endif
 
-#ifndef CONFIG_ZDB_MAX_KEY_LEN
-#define CONFIG_ZDB_MAX_KEY_LEN 48
-#endif
-
+/*
+ * Safe defaults for unit tests compiled outside full Kconfig integration.
+ */
 #ifndef CONFIG_ZDB_TS_STREAM_NAME_MAX_LEN
 #define CONFIG_ZDB_TS_STREAM_NAME_MAX_LEN 24
 #endif
-
 #ifndef CONFIG_ZDB_TS_INGEST_SLAB_BLOCK_SIZE
 #define CONFIG_ZDB_TS_INGEST_SLAB_BLOCK_SIZE 64
 #endif
-
 #ifndef CONFIG_ZDB_TS_INGEST_BUFFER_BYTES
 #define CONFIG_ZDB_TS_INGEST_BUFFER_BYTES 1024
 #endif
-
 #ifndef CONFIG_ZDB_TS_MAX_AGG_POINTS
 #define CONFIG_ZDB_TS_MAX_AGG_POINTS 4096
 #endif
-
 #ifndef CONFIG_ZDB_TS_MAX_RECOVERY_TRUNCATE_BYTES
 #define CONFIG_ZDB_TS_MAX_RECOVERY_TRUNCATE_BYTES 4096
 #endif
-
 #ifndef CONFIG_ZDB_TS_DIRNAME
 #define CONFIG_ZDB_TS_DIRNAME "zdb"
 #endif
@@ -133,6 +127,51 @@ static zdb_status_t zdb_status_from_errno(int err)
 	}
 }
 
+const char *zdb_status_str(zdb_status_t status)
+{
+	switch (status) {
+	case ZDB_OK:
+		return "OK";
+	case ZDB_ERR_INVAL:
+		return "EINVAL";
+	case ZDB_ERR_NOMEM:
+		return "ENOMEM";
+	case ZDB_ERR_NOT_FOUND:
+		return "NOT_FOUND";
+	case ZDB_ERR_IO:
+		return "IO";
+	case ZDB_ERR_BUSY:
+		return "BUSY";
+	case ZDB_ERR_TIMEOUT:
+		return "TIMEOUT";
+	case ZDB_ERR_UNSUPPORTED:
+		return "UNSUPPORTED";
+	case ZDB_ERR_CORRUPT:
+		return "CORRUPT";
+	case ZDB_ERR_INTERNAL:
+		return "INTERNAL";
+	default:
+		return "UNKNOWN";
+	}
+}
+
+#if defined(CONFIG_ZDB_TS) && (CONFIG_ZDB_TS)
+static void zdb_health_check(zdb_t *db)
+{
+	if (db == NULL) {
+		return;
+	}
+
+	if ((db->ts_stats.corrupt_records > 0U) ||
+	    (db->ts_stats.crc_failures > 0U) ||
+	    (db->ts_stats.recover_failures > 0U)) {
+		if (db->health < ZDB_HEALTH_DEGRADED) {
+			db->health = ZDB_HEALTH_DEGRADED;
+		}
+	}
+}
+#endif /* CONFIG_ZDB_TS */
+
 #if defined(CONFIG_ZDB_KV) && (CONFIG_ZDB_KV)
 static bool zdb_key_valid(const char *key)
 {
@@ -196,8 +235,11 @@ static void zdb_emit_kv_event(zdb_t *db, zdb_event_type_t type, const char *name
 	}
 
 	event.type = type;
-	event.namespace_name = namespace_name;
-	event.key = key;
+	strncpy(event.namespace_name, namespace_name,
+		sizeof(event.namespace_name) - 1);
+	event.namespace_name[sizeof(event.namespace_name) - 1] = '\0';
+	strncpy(event.key, key, sizeof(event.key) - 1);
+	event.key[sizeof(event.key) - 1] = '\0';
 	event.value_len = value_len;
 	event.timestamp_ms = (uint64_t)k_uptime_get();
 	event.status = status;
@@ -218,6 +260,7 @@ static void zdb_emit_kv_event(zdb_t *db, zdb_event_type_t type, const char *name
 	}
 }
 
+#if defined(CONFIG_ZDB_TS) && (CONFIG_ZDB_TS)
 static void zdb_emit_ts_event(zdb_t *db, zdb_ts_event_type_t type, const char *stream_name,
 			      uint64_t sample_ts_ms, int64_t sample_value,
 			      size_t flushed_bytes, size_t truncated_bytes,
@@ -231,7 +274,9 @@ static void zdb_emit_ts_event(zdb_t *db, zdb_ts_event_type_t type, const char *s
 	}
 
 	event.type = type;
-	event.stream_name = stream_name;
+	strncpy(event.stream_name, stream_name,
+		sizeof(event.stream_name) - 1);
+	event.stream_name[sizeof(event.stream_name) - 1] = '\0';
 	event.timestamp_ms = (uint64_t)k_uptime_get();
 	event.sample_ts_ms = sample_ts_ms;
 	event.sample_value = sample_value;
@@ -253,7 +298,9 @@ static void zdb_emit_ts_event(zdb_t *db, zdb_ts_event_type_t type, const char *s
 		}
 	}
 }
+#endif /* CONFIG_ZDB_TS */
 
+#if defined(CONFIG_ZDB_DOC) && (CONFIG_ZDB_DOC)
 static void zdb_emit_doc_event(zdb_t *db, zdb_doc_event_type_t type,
 			       const char *collection_name, const char *document_id,
 			       size_t field_count, size_t serialized_bytes,
@@ -267,8 +314,12 @@ static void zdb_emit_doc_event(zdb_t *db, zdb_doc_event_type_t type,
 	}
 
 	event.type = type;
-	event.collection_name = collection_name;
-	event.document_id = document_id;
+	strncpy(event.collection_name, collection_name,
+		sizeof(event.collection_name) - 1);
+	event.collection_name[sizeof(event.collection_name) - 1] = '\0';
+	strncpy(event.document_id, document_id,
+		sizeof(event.document_id) - 1);
+	event.document_id[sizeof(event.document_id) - 1] = '\0';
 	event.timestamp_ms = (uint64_t)k_uptime_get();
 	event.field_count = field_count;
 	event.serialized_bytes = serialized_bytes;
@@ -288,6 +339,7 @@ static void zdb_emit_doc_event(zdb_t *db, zdb_doc_event_type_t type,
 		}
 	}
 }
+#endif /* CONFIG_ZDB_DOC */
 #endif
 
 #if defined(CONFIG_ZDB_TS) && (CONFIG_ZDB_TS)
@@ -322,6 +374,10 @@ struct zdb_ts_cursor_ctx {
 	size_t file_offset;
 	size_t ram_offset;
 	bool file_done;
+#if ZDB_TS_USE_LITTLEFS
+	struct fs_file_t file;
+	bool file_open;
+#endif
 #if ZDB_TS_USE_FCB
 	struct fcb_entry fcb_loc;
 	bool fcb_started;
@@ -330,6 +386,7 @@ struct zdb_ts_cursor_ctx {
 
 struct zdb_ts_core_ctx {
 	struct k_work flush_work;
+	struct k_sem flush_done;
 	struct k_work_q *work_q;
 	zdb_t *db;
 	uint8_t *ingest_buf;
@@ -602,6 +659,7 @@ static zdb_status_t zdb_ts_record_decode(zdb_t *db,
 
 	if (sys_le32_to_cpu(rec->magic_le) != ZDB_TS_REC_MAGIC) {
 		ZDB_STAT_INC(db, corrupt_records);
+		zdb_health_check(db);
 		return ZDB_ERR_CORRUPT;
 	}
 
@@ -615,6 +673,7 @@ static zdb_status_t zdb_ts_record_decode(zdb_t *db,
 	if (got_crc != expect_crc) {
 		ZDB_STAT_INC(db, crc_failures);
 		ZDB_STAT_INC(db, corrupt_records);
+		zdb_health_check(db);
 		return ZDB_ERR_CORRUPT;
 	}
 
@@ -730,40 +789,17 @@ static bool zdb_ts_agg_update(zdb_ts_agg_t agg, double sample, uint32_t *points,
 static zdb_status_t zdb_ts_cursor_read_file_record(struct zdb_ts_cursor_ctx *cctx,
 						    zdb_bytes_t *out_record)
 {
-	struct fs_file_t file;
-	char path[ZDB_TS_PATH_MAX];
 	ssize_t rd;
-	int rc;
 
-	if ((cctx == NULL) || (cctx->db == NULL) || (cctx->db->cfg == NULL) ||
-	    (cctx->stream_name == NULL) || (out_record == NULL)) {
+	if ((cctx == NULL) || (cctx->db == NULL) || (out_record == NULL)) {
 		return ZDB_ERR_INVAL;
 	}
 
-	rc = zdb_ts_build_path(cctx->db->cfg, cctx->stream_name, path, sizeof(path));
-	if (rc < 0) {
-		return zdb_status_from_errno(rc);
+	if (!cctx->file_open) {
+		return ZDB_ERR_NOT_FOUND;
 	}
 
-	fs_file_t_init(&file);
-	rc = fs_open(&file, path, FS_O_READ);
-	if (rc < 0) {
-		if (rc == -ENOENT) {
-			return ZDB_ERR_NOT_FOUND;
-		}
-		return zdb_status_from_errno(rc);
-	}
-
-	if (cctx->file_offset > 0U) {
-		rc = fs_seek(&file, (off_t)cctx->file_offset, FS_SEEK_SET);
-		if (rc < 0) {
-			(void)fs_close(&file);
-			return zdb_status_from_errno(rc);
-		}
-	}
-
-	rd = fs_read(&file, &cctx->cache, sizeof(cctx->cache));
-	(void)fs_close(&file);
+	rd = fs_read(&cctx->file, &cctx->cache, sizeof(cctx->cache));
 
 	if (rd == 0) {
 		return ZDB_ERR_NOT_FOUND;
@@ -877,6 +913,7 @@ static void zdb_ts_flush_work_handler(struct k_work *work)
 
 	if (zdb_lock_write(ctx->db) != ZDB_OK) {
 		ctx->flush_pending = false;
+		k_sem_give(&ctx->flush_done);
 		return;
 	}
 
@@ -891,6 +928,7 @@ static void zdb_ts_flush_work_handler(struct k_work *work)
 	ARG_UNUSED(rc);
 #endif
 	ctx->flush_pending = false;
+	k_sem_give(&ctx->flush_done);
 	zdb_unlock_write(ctx->db);
 
 #if defined(CONFIG_ZDB_EVENTING) && (CONFIG_ZDB_EVENTING)
@@ -935,6 +973,7 @@ static struct zdb_ts_core_ctx *zdb_ts_ctx_get_or_alloc(zdb_t *db)
 #endif
 
 	k_work_init(&ctx->flush_work, zdb_ts_flush_work_handler);
+	k_sem_init(&ctx->flush_done, 0, 1);
 	db->ts_ctx = ctx;
 
 	return ctx;
@@ -957,13 +996,18 @@ zdb_status_t zdb_init(zdb_t *db, const zdb_cfg_t *cfg)
 	db->kv_ctx = NULL;
 	db->ts_ctx = NULL;
 	(void)memset(&db->ts_stats, 0, sizeof(db->ts_stats));
+	db->health = ZDB_HEALTH_OK;
 #if defined(CONFIG_ZDB_EVENTING) && (CONFIG_ZDB_EVENTING)
 	db->event_listeners = cfg->event_listeners;
 	db->event_listener_count = cfg->event_listener_count;
+#if defined(CONFIG_ZDB_TS) && (CONFIG_ZDB_TS)
 	db->ts_event_listeners = cfg->ts_event_listeners;
 	db->ts_event_listener_count = cfg->ts_event_listener_count;
+#endif
+#if defined(CONFIG_ZDB_DOC) && (CONFIG_ZDB_DOC)
 	db->doc_event_listeners = cfg->doc_event_listeners;
 	db->doc_event_listener_count = cfg->doc_event_listener_count;
+#endif
 #endif
 
 	return ZDB_OK;
@@ -993,10 +1037,14 @@ zdb_status_t zdb_deinit(zdb_t *db)
 #if defined(CONFIG_ZDB_EVENTING) && (CONFIG_ZDB_EVENTING)
 	db->event_listeners = NULL;
 	db->event_listener_count = 0U;
+#if defined(CONFIG_ZDB_TS) && (CONFIG_ZDB_TS)
 	db->ts_event_listeners = NULL;
 	db->ts_event_listener_count = 0U;
+#endif
+#if defined(CONFIG_ZDB_DOC) && (CONFIG_ZDB_DOC)
 	db->doc_event_listeners = NULL;
 	db->doc_event_listener_count = 0U;
+#endif
 #endif
 
 	return ZDB_OK;
@@ -1008,7 +1056,7 @@ zdb_health_t zdb_health(const zdb_t *db)
 		return ZDB_HEALTH_FAULT;
 	}
 
-	return ZDB_HEALTH_OK;
+	return db->health;
 }
 
 void zdb_ts_stats_get(const zdb_t *db, zdb_ts_stats_t *out_stats)
@@ -1105,6 +1153,12 @@ zdb_status_t zdb_cursor_close(zdb_cursor_t *cursor)
 	if ((cursor->model == ZDB_MODEL_TS) && (cursor->impl != NULL)) {
 		struct zdb_ts_cursor_ctx *ctx = (struct zdb_ts_cursor_ctx *)cursor->impl;
 
+#if ZDB_TS_USE_LITTLEFS
+		if (ctx->file_open) {
+			(void)fs_close(&ctx->file);
+			ctx->file_open = false;
+		}
+#endif
 		if ((ctx->db != NULL) && (ctx->db->cursor_slab != NULL)) {
 			k_mem_slab_free(ctx->db->cursor_slab, ctx);
 		}
@@ -1237,6 +1291,8 @@ zdb_status_t zdb_kv_open(zdb_t *db, const char *namespace_name, zdb_kv_t *kv)
 	if ((db == NULL) || (namespace_name == NULL) || (kv == NULL)) {
 		return ZDB_ERR_INVAL;
 	}
+
+	(void)memset(kv, 0, sizeof(*kv));
 
 	if (db->cfg == NULL) {
 		return ZDB_ERR_INVAL;
@@ -1556,21 +1612,79 @@ out:
 zdb_status_t zdb_ts_append_batch_i64(zdb_ts_t *ts, const zdb_ts_sample_i64_t *samples,
 			      size_t sample_count)
 {
+	struct zdb_ts_core_ctx *ctx;
+	struct zdb_ts_record_i64 rec;
+	zdb_status_t lock_rc;
+	zdb_status_t status = ZDB_OK;
 	size_t i;
-	zdb_status_t rc;
+	int rc;
 
-	if ((ts == NULL) || (samples == NULL) || (sample_count == 0U)) {
+	if ((ts == NULL) || (ts->db == NULL) || (samples == NULL) || (sample_count == 0U)) {
 		return ZDB_ERR_INVAL;
 	}
 
-	for (i = 0U; i < sample_count; i++) {
-		rc = zdb_ts_append_i64(ts, &samples[i]);
-		if (rc != ZDB_OK) {
-			return rc;
-		}
+	ctx = zdb_ts_ctx_get_or_alloc(ts->db);
+	if (ctx == NULL) {
+		return ZDB_ERR_INVAL;
 	}
 
-	return ZDB_OK;
+	lock_rc = zdb_lock_write(ts->db);
+	if (lock_rc != ZDB_OK) {
+		return lock_rc;
+	}
+
+	if (ctx->active_stream == NULL) {
+		zdb_unlock_write(ts->db);
+		return ZDB_ERR_INVAL;
+	}
+
+	if (strcmp(ctx->active_stream, ts->stream_name) != 0) {
+		zdb_unlock_write(ts->db);
+		return ZDB_ERR_BUSY;
+	}
+
+	for (i = 0U; i < sample_count; i++) {
+#if ZDB_TS_USE_FCB
+		zdb_ts_record_encode(&samples[i], &rec);
+		rc = zdb_ts_fcb_append_record(ctx, &rec);
+		if (rc < 0) {
+			status = zdb_status_from_errno(rc);
+			break;
+		}
+#else
+		if ((ctx->ingest_capacity < sizeof(rec)) || (ctx->ingest_buf == NULL)) {
+			status = ZDB_ERR_NOMEM;
+			break;
+		}
+
+		if ((ctx->ingest_used + sizeof(rec)) > ctx->ingest_capacity) {
+			rc = zdb_ts_flush_buffer_locked(ctx);
+			if (rc < 0) {
+				status = zdb_status_from_errno(rc);
+				break;
+			}
+		}
+
+		zdb_ts_record_encode(&samples[i], &rec);
+		(void)memcpy(&ctx->ingest_buf[ctx->ingest_used], &rec, sizeof(rec));
+		ctx->ingest_used += sizeof(rec);
+#endif
+	}
+
+	zdb_unlock_write(ts->db);
+
+#if !ZDB_TS_USE_FCB
+	if ((status == ZDB_OK) && (ctx->ingest_used == ctx->ingest_capacity)) {
+		(void)zdb_ts_flush_async(ts);
+	}
+#endif
+
+#if defined(CONFIG_ZDB_EVENTING) && (CONFIG_ZDB_EVENTING)
+	zdb_emit_ts_event(ts->db, ZDB_TS_EVENT_APPEND, ts->stream_name,
+			  samples[0].ts_ms, samples[0].value, 0U, 0U, status);
+#endif
+
+	return status;
 }
 
 zdb_status_t zdb_ts_sample_i64_export_flatbuffer(const zdb_ts_sample_i64_t *sample,
@@ -1716,17 +1830,12 @@ zdb_status_t zdb_ts_flush_sync(zdb_ts_t *ts, k_timeout_t timeout)
 	}
 	return ZDB_OK;
 #else
-	int64_t deadline;
 	zdb_status_t rc;
 	struct zdb_ts_core_ctx *ctx;
+	int sem_rc;
 
 	if ((ts == NULL) || (ts->db == NULL)) {
 		return ZDB_ERR_INVAL;
-	}
-
-	rc = zdb_ts_flush_async(ts);
-	if ((rc != ZDB_OK) && (rc != ZDB_ERR_BUSY)) {
-		return rc;
 	}
 
 	ctx = zdb_ts_ctx_get_or_alloc(ts->db);
@@ -1734,26 +1843,27 @@ zdb_status_t zdb_ts_flush_sync(zdb_ts_t *ts, k_timeout_t timeout)
 		return ZDB_ERR_INTERNAL;
 	}
 
-	if (K_TIMEOUT_EQ(timeout, K_NO_WAIT)) {
-		return ctx->flush_pending ? ZDB_ERR_BUSY : ZDB_OK;
+	/* Drain any stale token from a previous flush cycle. */
+	(void)k_sem_take(&ctx->flush_done, K_NO_WAIT);
+
+	rc = zdb_ts_flush_async(ts);
+	if ((rc != ZDB_OK) && (rc != ZDB_ERR_BUSY)) {
+		return rc;
 	}
 
-	if (K_TIMEOUT_EQ(timeout, K_FOREVER)) {
-		while (ctx->flush_pending) {
-			k_yield();
-		}
+	if (!ctx->flush_pending) {
 		return ZDB_OK;
 	}
 
-	deadline = k_uptime_get() + k_ticks_to_ms_floor64(timeout.ticks);
-	while (ctx->flush_pending) {
-		if (k_uptime_get() >= deadline) {
-			return ZDB_ERR_TIMEOUT;
-		}
-		k_yield();
+	sem_rc = k_sem_take(&ctx->flush_done, timeout);
+	if (sem_rc == -EAGAIN) {
+		return ZDB_ERR_TIMEOUT;
+	}
+	if (sem_rc != 0) {
+		return zdb_status_from_errno(sem_rc);
 	}
 
-	return ZDB_OK;
+	return ctx->flush_pending ? ZDB_ERR_BUSY : ZDB_OK;
 #endif
 }
 
@@ -1769,17 +1879,12 @@ zdb_status_t zdb_ts_query_aggregate(zdb_ts_t *ts, zdb_ts_window_t window,
 	}
 	return ZDB_ERR_UNSUPPORTED;
 #else
-	struct zdb_ts_core_ctx *ctx;
-	struct fs_file_t file;
-	struct zdb_ts_stream_header hdr;
-	char path[ZDB_TS_PATH_MAX];
+	zdb_cursor_t cursor;
+	zdb_bytes_t record;
 	struct zdb_ts_record_i64 rec;
-	size_t off;
 	uint32_t points = 0U;
 	double acc = 0.0;
-	zdb_status_t lock_rc;
-	int rc;
-	ssize_t rd;
+	zdb_status_t rc;
 
 	if ((ts == NULL) || (ts->db == NULL) || (out_result == NULL)) {
 		return ZDB_ERR_INVAL;
@@ -1789,116 +1894,42 @@ zdb_status_t zdb_ts_query_aggregate(zdb_ts_t *ts, zdb_ts_window_t window,
 		return ZDB_ERR_INVAL;
 	}
 
-	ctx = zdb_ts_ctx_get_or_alloc(ts->db);
-	if ((ctx == NULL) || (ctx->ingest_buf == NULL)) {
-		return ZDB_ERR_INVAL;
+	rc = zdb_ts_cursor_open(ts, window, NULL, NULL, &cursor);
+	if (rc != ZDB_OK) {
+		return rc;
 	}
 
-	{
-		zdb_status_t rc_hdr = zdb_ts_ensure_stream_header(ts->db, ts->stream_name);
-		if (rc_hdr != ZDB_OK) {
-			return rc_hdr;
-		}
-	}
-
-	rc = zdb_ts_build_path(ts->db->cfg, ts->stream_name, path, sizeof(path));
-	if (rc < 0) {
-		return zdb_status_from_errno(rc);
-	}
-
-	fs_file_t_init(&file);
-	rc = fs_open(&file, path, FS_O_READ);
-	if ((rc < 0) && (rc != -ENOENT)) {
-		return zdb_status_from_errno(rc);
-	}
-
-	if (rc == 0) {
-		rd = fs_read(&file, &hdr, sizeof(hdr));
-		if ((rd < 0) || ((size_t)rd != sizeof(hdr))) {
-			(void)fs_close(&file);
-			return (rd < 0) ? zdb_status_from_errno((int)rd) : ZDB_ERR_CORRUPT;
-		}
-		{
-			zdb_status_t dec = zdb_ts_stream_header_decode(ts->db, &hdr, ts->stream_name);
-			if (dec != ZDB_OK) {
-				(void)fs_close(&file);
-				return dec;
-			}
-		}
-
-		while (points < CONFIG_ZDB_TS_MAX_AGG_POINTS) {
-			uint64_t ts_ms;
-			int64_t val;
-			zdb_status_t dec_rc;
-
-			rd = fs_read(&file, &rec, sizeof(rec));
-			if (rd == 0) {
-				break;
-			}
-			if (rd < 0) {
-				(void)fs_close(&file);
-				return zdb_status_from_errno((int)rd);
-			}
-			if ((size_t)rd != sizeof(rec)) {
-				(void)fs_close(&file);
-				return ZDB_ERR_CORRUPT;
-			}
-
-			dec_rc = zdb_ts_record_decode(ts->db, &rec, &ts_ms, &val);
-			if (dec_rc == ZDB_ERR_UNSUPPORTED) {
-				continue;
-			}
-			if (dec_rc != ZDB_OK) {
-				(void)fs_close(&file);
-				return dec_rc;
-			}
-			if (!zdb_ts_window_match(window, ts_ms)) {
-				continue;
-			}
-
-			if (!zdb_ts_agg_update(agg, (double)val, &points, &acc)) {
-				(void)fs_close(&file);
-				return ZDB_ERR_INVAL;
-			}
-		}
-
-		(void)fs_close(&file);
-	}
-
-	lock_rc = zdb_lock_read(ts->db);
-	if (lock_rc != ZDB_OK) {
-		return lock_rc;
-	}
-
-	for (off = 0U; (off + sizeof(rec)) <= ctx->ingest_used; off += sizeof(rec)) {
+	while (points < CONFIG_ZDB_TS_MAX_AGG_POINTS) {
 		uint64_t ts_ms;
 		int64_t val;
 		zdb_status_t dec_rc;
 
-		if (points >= CONFIG_ZDB_TS_MAX_AGG_POINTS) {
+		rc = zdb_cursor_next(&cursor, &record);
+		if (rc == ZDB_ERR_NOT_FOUND) {
 			break;
 		}
+		if (rc != ZDB_OK) {
+			(void)zdb_cursor_close(&cursor);
+			return rc;
+		}
 
-		(void)memcpy(&rec, &ctx->ingest_buf[off], sizeof(rec));
+		(void)memcpy(&rec, record.data, sizeof(rec));
 		dec_rc = zdb_ts_record_decode(ts->db, &rec, &ts_ms, &val);
 		if (dec_rc == ZDB_ERR_UNSUPPORTED) {
 			continue;
 		}
 		if (dec_rc != ZDB_OK) {
-			zdb_unlock_read(ts->db);
+			(void)zdb_cursor_close(&cursor);
 			return dec_rc;
-		}
-		if (!zdb_ts_window_match(window, ts_ms)) {
-			continue;
 		}
 
 		if (!zdb_ts_agg_update(agg, (double)val, &points, &acc)) {
-			zdb_unlock_read(ts->db);
+			(void)zdb_cursor_close(&cursor);
 			return ZDB_ERR_INVAL;
 		}
 	}
 
-	zdb_unlock_read(ts->db);
+	(void)zdb_cursor_close(&cursor);
 
 	if (points == 0U) {
 		return ZDB_ERR_NOT_FOUND;
@@ -1948,6 +1979,35 @@ zdb_status_t zdb_ts_cursor_open(zdb_ts_t *ts, zdb_ts_window_t window,
 	ctx->file_offset = sizeof(struct zdb_ts_stream_header);
 	ctx->ram_offset = 0U;
 	ctx->file_done = false;
+#if ZDB_TS_USE_LITTLEFS
+	{
+		char cursor_path[ZDB_TS_PATH_MAX];
+		int open_rc;
+
+		fs_file_t_init(&ctx->file);
+		ctx->file_open = false;
+		open_rc = zdb_ts_build_path(ts->db->cfg, ts->stream_name,
+					    cursor_path, sizeof(cursor_path));
+		if (open_rc < 0) {
+			k_mem_slab_free(ts->db->cursor_slab, ctx);
+			return zdb_status_from_errno(open_rc);
+		}
+		open_rc = fs_open(&ctx->file, cursor_path, FS_O_READ);
+		if (open_rc != 0) {
+			k_mem_slab_free(ts->db->cursor_slab, ctx);
+			return zdb_status_from_errno(open_rc);
+		}
+		ctx->file_open = true;
+		open_rc = fs_seek(&ctx->file,
+				  (off_t)ctx->file_offset,
+				  FS_SEEK_SET);
+		if (open_rc != 0) {
+			(void)fs_close(&ctx->file);
+			k_mem_slab_free(ts->db->cursor_slab, ctx);
+			return zdb_status_from_errno(open_rc);
+		}
+	}
+#endif
 #if ZDB_TS_USE_FCB
 	ctx->fcb_started = false;
 	(void)memset(&ctx->fcb_loc, 0, sizeof(ctx->fcb_loc));
@@ -2186,6 +2246,7 @@ zdb_status_t zdb_ts_recover_stream(zdb_ts_t *ts, size_t *out_truncated_bytes)
 	rc = zdb_ts_build_path(ts->db->cfg, ts->stream_name, path, sizeof(path));
 	if (rc < 0) {
 		ZDB_STAT_INC(ts->db, recover_failures);
+		zdb_health_check(ts->db);
 		return zdb_status_from_errno(rc);
 	}
 
@@ -2193,6 +2254,7 @@ zdb_status_t zdb_ts_recover_stream(zdb_ts_t *ts, size_t *out_truncated_bytes)
 	rc = fs_open(&file, path, FS_O_CREATE | FS_O_RDWR);
 	if (rc < 0) {
 		ZDB_STAT_INC(ts->db, recover_failures);
+		zdb_health_check(ts->db);
 		return zdb_status_from_errno(rc);
 	}
 
@@ -2203,12 +2265,14 @@ zdb_status_t zdb_ts_recover_stream(zdb_ts_t *ts, size_t *out_truncated_bytes)
 		if (rc < 0) {
 			(void)fs_close(&file);
 			ZDB_STAT_INC(ts->db, recover_failures);
+			zdb_health_check(ts->db);
 			return zdb_status_from_errno(rc);
 		}
 		rd = fs_write(&file, &hdr, sizeof(hdr));
 		(void)fs_close(&file);
 		if ((rd < 0) || ((size_t)rd != sizeof(hdr))) {
 			ZDB_STAT_INC(ts->db, recover_failures);
+			zdb_health_check(ts->db);
 			return (rd < 0) ? zdb_status_from_errno((int)rd) : ZDB_ERR_IO;
 		}
 #if defined(CONFIG_ZDB_EVENTING) && (CONFIG_ZDB_EVENTING)
@@ -2221,6 +2285,7 @@ zdb_status_t zdb_ts_recover_stream(zdb_ts_t *ts, size_t *out_truncated_bytes)
 	if ((rd < 0) || ((size_t)rd != sizeof(hdr))) {
 		(void)fs_close(&file);
 		ZDB_STAT_INC(ts->db, recover_failures);
+		zdb_health_check(ts->db);
 		return (rd < 0) ? zdb_status_from_errno((int)rd) : ZDB_ERR_CORRUPT;
 	}
 
@@ -2229,6 +2294,7 @@ zdb_status_t zdb_ts_recover_stream(zdb_ts_t *ts, size_t *out_truncated_bytes)
 		if (dec != ZDB_OK) {
 			(void)fs_close(&file);
 			ZDB_STAT_INC(ts->db, recover_failures);
+			zdb_health_check(ts->db);
 			return dec;
 		}
 	}
@@ -2246,6 +2312,7 @@ zdb_status_t zdb_ts_recover_stream(zdb_ts_t *ts, size_t *out_truncated_bytes)
 		if (rd < 0) {
 			(void)fs_close(&file);
 			ZDB_STAT_INC(ts->db, recover_failures);
+			zdb_health_check(ts->db);
 			return zdb_status_from_errno((int)rd);
 		}
 		if ((size_t)rd != sizeof(rec)) {
@@ -2265,6 +2332,7 @@ zdb_status_t zdb_ts_recover_stream(zdb_ts_t *ts, size_t *out_truncated_bytes)
 		if (end_pos < 0) {
 			(void)fs_close(&file);
 			ZDB_STAT_INC(ts->db, recover_failures);
+			zdb_health_check(ts->db);
 			return zdb_status_from_errno((int)end_pos);
 		}
 
@@ -2273,6 +2341,7 @@ zdb_status_t zdb_ts_recover_stream(zdb_ts_t *ts, size_t *out_truncated_bytes)
 			if (rc < 0) {
 				(void)fs_close(&file);
 				ZDB_STAT_INC(ts->db, recover_failures);
+				zdb_health_check(ts->db);
 				return zdb_status_from_errno(rc);
 			}
 
@@ -2292,6 +2361,7 @@ zdb_status_t zdb_ts_recover_stream(zdb_ts_t *ts, size_t *out_truncated_bytes)
 	return ZDB_OK;
 #endif
 }
+#endif /* CONFIG_ZDB_TS */
 
 /*
  * Stage 3: Document model implementation
@@ -3679,24 +3749,11 @@ zdb_status_t zdb_doc_export_flatbuffer(zdb_doc_t *doc, uint8_t *out_buf,
 		return ZDB_ERR_INVAL;
 	}
 
-	/* Stage 3: Export document as FlatBuffer */
-	/* For now, estimate size based on field count and types */
-	size_t estimated_size = 64 + (doc->field_count * 32);
-
-	if (out_buf == NULL) {
-		*out_len = estimated_size;
-		return ZDB_OK;
-	}
-
-	if (out_capacity < estimated_size) {
-		return ZDB_ERR_INVAL;
-	}
-
-	/* Placeholder serialization */
-	*out_len = estimated_size;
-	return ZDB_OK;
+	/* Stage 3: FlatBuffer export not yet implemented */
+	ARG_UNUSED(out_buf);
+	ARG_UNUSED(out_capacity);
+	*out_len = 0U;
+	return ZDB_ERR_UNSUPPORTED;
 }
 
 #endif /* CONFIG_ZDB_DOC */
-
-#endif /* CONFIG_ZDB_TS */

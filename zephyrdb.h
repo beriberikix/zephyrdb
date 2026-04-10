@@ -134,6 +134,14 @@ typedef struct {
 	uint32_t unsupported_versions;
 } zdb_ts_stats_t;
 
+/*
+ * Provide safe defaults when headers are included outside full Kconfig
+ * builds (e.g., unit tests that compile sources directly).
+ */
+#ifndef CONFIG_ZDB_MAX_KEY_LEN
+#define CONFIG_ZDB_MAX_KEY_LEN 48
+#endif
+
 typedef enum {
 	ZDB_EVENT_KV_SET = 0,
 	ZDB_EVENT_KV_DELETE,
@@ -141,13 +149,17 @@ typedef enum {
 
 typedef struct {
 	zdb_event_type_t type;
-	const char *namespace_name;
-	const char *key;
+	char namespace_name[CONFIG_ZDB_MAX_KEY_LEN + 1];
+	char key[CONFIG_ZDB_MAX_KEY_LEN + 1];
 	size_t value_len;
 	uint64_t timestamp_ms;
 	zdb_status_t status;
 } zdb_kv_event_t;
 
+#if defined(CONFIG_ZDB_TS) && (CONFIG_ZDB_TS)
+#ifndef CONFIG_ZDB_TS_STREAM_NAME_MAX_LEN
+#define CONFIG_ZDB_TS_STREAM_NAME_MAX_LEN 24
+#endif
 typedef enum {
 	ZDB_TS_EVENT_APPEND = 0,
 	ZDB_TS_EVENT_FLUSH,
@@ -156,7 +168,7 @@ typedef enum {
 
 typedef struct {
 	zdb_ts_event_type_t type;
-	const char *stream_name;
+	char stream_name[CONFIG_ZDB_TS_STREAM_NAME_MAX_LEN + 1];
 	uint64_t timestamp_ms;
 	uint64_t sample_ts_ms;
 	int64_t sample_value;
@@ -165,6 +177,15 @@ typedef struct {
 	zdb_status_t status;
 } zdb_ts_event_t;
 
+typedef void (*zdb_ts_event_listener_fn_t)(const zdb_ts_event_t *event, void *user_ctx);
+
+typedef struct {
+	zdb_ts_event_listener_fn_t notify;
+	void *user_ctx;
+} zdb_ts_event_listener_t;
+#endif /* CONFIG_ZDB_TS */
+
+#if defined(CONFIG_ZDB_DOC) && (CONFIG_ZDB_DOC)
 typedef enum {
 	ZDB_DOC_EVENT_CREATE = 0,
 	ZDB_DOC_EVENT_SAVE,
@@ -173,32 +194,28 @@ typedef enum {
 
 typedef struct {
 	zdb_doc_event_type_t type;
-	const char *collection_name;
-	const char *document_id;
+	char collection_name[CONFIG_ZDB_MAX_KEY_LEN + 1];
+	char document_id[CONFIG_ZDB_MAX_KEY_LEN + 1];
 	uint64_t timestamp_ms;
 	size_t field_count;
 	size_t serialized_bytes;
 	zdb_status_t status;
 } zdb_doc_event_t;
 
-typedef void (*zdb_event_listener_fn_t)(const zdb_kv_event_t *event, void *user_ctx);
-typedef void (*zdb_ts_event_listener_fn_t)(const zdb_ts_event_t *event, void *user_ctx);
 typedef void (*zdb_doc_event_listener_fn_t)(const zdb_doc_event_t *event, void *user_ctx);
-
-typedef struct {
-	zdb_event_listener_fn_t notify;
-	void *user_ctx;
-} zdb_event_listener_t;
-
-typedef struct {
-	zdb_ts_event_listener_fn_t notify;
-	void *user_ctx;
-} zdb_ts_event_listener_t;
 
 typedef struct {
 	zdb_doc_event_listener_fn_t notify;
 	void *user_ctx;
 } zdb_doc_event_listener_t;
+#endif /* CONFIG_ZDB_DOC */
+
+typedef void (*zdb_event_listener_fn_t)(const zdb_kv_event_t *event, void *user_ctx);
+
+typedef struct {
+	zdb_event_listener_fn_t notify;
+	void *user_ctx;
+} zdb_event_listener_t;
 
 /*
  * Compact telemetry export format for transport/logging.
@@ -229,13 +246,23 @@ typedef struct {
 #if defined(CONFIG_ZDB_EVENTING) && (CONFIG_ZDB_EVENTING)
 	const zdb_event_listener_t *event_listeners;
 	size_t event_listener_count;
+#if defined(CONFIG_ZDB_TS) && (CONFIG_ZDB_TS)
 	const zdb_ts_event_listener_t *ts_event_listeners;
 	size_t ts_event_listener_count;
+#endif
+#if defined(CONFIG_ZDB_DOC) && (CONFIG_ZDB_DOC)
 	const zdb_doc_event_listener_t *doc_event_listeners;
 	size_t doc_event_listener_count;
 #endif
+#endif
 } zdb_cfg_t;
 
+/*
+ * NOTE: All ZephyrDB operations are fully serialized through a single mutex.
+ * There is no reader/writer distinction — concurrent reads will block each other.
+ * Callers should minimize time spent in event listener callbacks as these execute
+ * under the caller's context (not under the database lock).
+ */
 typedef struct {
 	struct k_mutex lock;
 	struct k_mem_slab *core_slab;
@@ -248,13 +275,18 @@ typedef struct {
 	void *doc_ctx;  /* DOC backend context (manifest cache for NVS/ZMS) */
 	const zdb_cfg_t *cfg;
 	zdb_ts_stats_t ts_stats;
+	zdb_health_t health;
 #if defined(CONFIG_ZDB_EVENTING) && (CONFIG_ZDB_EVENTING)
 	const zdb_event_listener_t *event_listeners;
 	size_t event_listener_count;
+#if defined(CONFIG_ZDB_TS) && (CONFIG_ZDB_TS)
 	const zdb_ts_event_listener_t *ts_event_listeners;
 	size_t ts_event_listener_count;
+#endif
+#if defined(CONFIG_ZDB_DOC) && (CONFIG_ZDB_DOC)
 	const zdb_doc_event_listener_t *doc_event_listeners;
 	size_t doc_event_listener_count;
+#endif
 #endif
 } zdb_t;
 
@@ -531,6 +563,8 @@ zdb_status_t zdb_doc_export_flatbuffer(zdb_doc_t *doc, uint8_t *out_buf,
 				       size_t out_capacity, size_t *out_len);
 
 #endif /* CONFIG_ZDB_DOC */
+
+const char *zdb_status_str(zdb_status_t status);
 
 #ifdef __cplusplus
 }
