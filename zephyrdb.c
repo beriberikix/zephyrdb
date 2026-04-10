@@ -913,6 +913,7 @@ static void zdb_ts_flush_work_handler(struct k_work *work)
 
 	if (zdb_lock_write(ctx->db) != ZDB_OK) {
 		ctx->flush_pending = false;
+		k_sem_give(&ctx->flush_done);
 		return;
 	}
 
@@ -1623,17 +1624,23 @@ zdb_status_t zdb_ts_append_batch_i64(zdb_ts_t *ts, const zdb_ts_sample_i64_t *sa
 	}
 
 	ctx = zdb_ts_ctx_get_or_alloc(ts->db);
-	if ((ctx == NULL) || (ctx->active_stream == NULL)) {
+	if (ctx == NULL) {
 		return ZDB_ERR_INVAL;
-	}
-
-	if (strcmp(ctx->active_stream, ts->stream_name) != 0) {
-		return ZDB_ERR_BUSY;
 	}
 
 	lock_rc = zdb_lock_write(ts->db);
 	if (lock_rc != ZDB_OK) {
 		return lock_rc;
+	}
+
+	if (ctx->active_stream == NULL) {
+		zdb_unlock_write(ts->db);
+		return ZDB_ERR_INVAL;
+	}
+
+	if (strcmp(ctx->active_stream, ts->stream_name) != 0) {
+		zdb_unlock_write(ts->db);
+		return ZDB_ERR_BUSY;
 	}
 
 	for (i = 0U; i < sample_count; i++) {
@@ -1836,6 +1843,9 @@ zdb_status_t zdb_ts_flush_sync(zdb_ts_t *ts, k_timeout_t timeout)
 		return ZDB_ERR_INTERNAL;
 	}
 
+	/* Drain any stale token from a previous flush cycle. */
+	(void)k_sem_take(&ctx->flush_done, K_NO_WAIT);
+
 	rc = zdb_ts_flush_async(ts);
 	if ((rc != ZDB_OK) && (rc != ZDB_ERR_BUSY)) {
 		return rc;
@@ -1848,6 +1858,9 @@ zdb_status_t zdb_ts_flush_sync(zdb_ts_t *ts, k_timeout_t timeout)
 	sem_rc = k_sem_take(&ctx->flush_done, timeout);
 	if (sem_rc == -EAGAIN) {
 		return ZDB_ERR_TIMEOUT;
+	}
+	if (sem_rc != 0) {
+		return zdb_status_from_errno(sem_rc);
 	}
 
 	return ctx->flush_pending ? ZDB_ERR_BUSY : ZDB_OK;
@@ -1975,14 +1988,23 @@ zdb_status_t zdb_ts_cursor_open(zdb_ts_t *ts, zdb_ts_window_t window,
 		ctx->file_open = false;
 		open_rc = zdb_ts_build_path(ts->db->cfg, ts->stream_name,
 					    cursor_path, sizeof(cursor_path));
-		if (open_rc >= 0) {
-			open_rc = fs_open(&ctx->file, cursor_path, FS_O_READ);
-			if (open_rc == 0) {
-				ctx->file_open = true;
-				(void)fs_seek(&ctx->file,
-					      (off_t)ctx->file_offset,
-					      FS_SEEK_SET);
-			}
+		if (open_rc < 0) {
+			k_mem_slab_free(ts->db->cursor_slab, ctx);
+			return zdb_status_from_errno(open_rc);
+		}
+		open_rc = fs_open(&ctx->file, cursor_path, FS_O_READ);
+		if (open_rc != 0) {
+			k_mem_slab_free(ts->db->cursor_slab, ctx);
+			return zdb_status_from_errno(open_rc);
+		}
+		ctx->file_open = true;
+		open_rc = fs_seek(&ctx->file,
+				  (off_t)ctx->file_offset,
+				  FS_SEEK_SET);
+		if (open_rc != 0) {
+			(void)fs_close(&ctx->file);
+			k_mem_slab_free(ts->db->cursor_slab, ctx);
+			return zdb_status_from_errno(open_rc);
 		}
 	}
 #endif
