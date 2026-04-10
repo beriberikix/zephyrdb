@@ -148,12 +148,57 @@ typedef struct {
 	zdb_status_t status;
 } zdb_kv_event_t;
 
+typedef enum {
+	ZDB_TS_EVENT_APPEND = 0,
+	ZDB_TS_EVENT_FLUSH,
+	ZDB_TS_EVENT_RECOVER,
+} zdb_ts_event_type_t;
+
+typedef struct {
+	zdb_ts_event_type_t type;
+	const char *stream_name;
+	uint64_t timestamp_ms;
+	uint64_t sample_ts_ms;
+	int64_t sample_value;
+	size_t flushed_bytes;
+	size_t truncated_bytes;
+	zdb_status_t status;
+} zdb_ts_event_t;
+
+typedef enum {
+	ZDB_DOC_EVENT_CREATE = 0,
+	ZDB_DOC_EVENT_SAVE,
+	ZDB_DOC_EVENT_DELETE,
+} zdb_doc_event_type_t;
+
+typedef struct {
+	zdb_doc_event_type_t type;
+	const char *collection_name;
+	const char *document_id;
+	uint64_t timestamp_ms;
+	size_t field_count;
+	size_t serialized_bytes;
+	zdb_status_t status;
+} zdb_doc_event_t;
+
 typedef void (*zdb_event_listener_fn_t)(const zdb_kv_event_t *event, void *user_ctx);
+typedef void (*zdb_ts_event_listener_fn_t)(const zdb_ts_event_t *event, void *user_ctx);
+typedef void (*zdb_doc_event_listener_fn_t)(const zdb_doc_event_t *event, void *user_ctx);
 
 typedef struct {
 	zdb_event_listener_fn_t notify;
 	void *user_ctx;
 } zdb_event_listener_t;
+
+typedef struct {
+	zdb_ts_event_listener_fn_t notify;
+	void *user_ctx;
+} zdb_ts_event_listener_t;
+
+typedef struct {
+	zdb_doc_event_listener_fn_t notify;
+	void *user_ctx;
+} zdb_doc_event_listener_t;
 
 /*
  * Compact telemetry export format for transport/logging.
@@ -184,6 +229,10 @@ typedef struct {
 #if defined(CONFIG_ZDB_EVENTING) && (CONFIG_ZDB_EVENTING)
 	const zdb_event_listener_t *event_listeners;
 	size_t event_listener_count;
+	const zdb_ts_event_listener_t *ts_event_listeners;
+	size_t ts_event_listener_count;
+	const zdb_doc_event_listener_t *doc_event_listeners;
+	size_t doc_event_listener_count;
 #endif
 } zdb_cfg_t;
 
@@ -201,6 +250,10 @@ typedef struct {
 #if defined(CONFIG_ZDB_EVENTING) && (CONFIG_ZDB_EVENTING)
 	const zdb_event_listener_t *event_listeners;
 	size_t event_listener_count;
+	const zdb_ts_event_listener_t *ts_event_listeners;
+	size_t ts_event_listener_count;
+	const zdb_doc_event_listener_t *doc_event_listeners;
+	size_t doc_event_listener_count;
 #endif
 } zdb_t;
 

@@ -1,0 +1,19 @@
+manifest:
+  version: "0.13"
+  
+  remotes:
+    - name: zephyrproject
+      url-base: https://github.com/zephyrproject-rtos
+    - name: beriberikix
+      url-base: https://github.com/beriberikix
+
+  projects:
+    - name: zephyr
+      remote: zephyrproject
+      revision: main
+      import: true
+    
+    - name: flatcc-zephyr
+      remote: beriberikix
+      revision: main
+      path: modules/lib/flatcc-zephyr

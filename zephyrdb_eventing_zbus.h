@@ -7,8 +7,12 @@
 #include <zephyr/zbus/zbus.h>
 
 ZBUS_CHAN_DECLARE(zdb_kv_event_chan);
+ZBUS_CHAN_DECLARE(zdb_ts_event_chan);
+ZBUS_CHAN_DECLARE(zdb_doc_event_chan);
 
 int zdb_eventing_zbus_publish(const zdb_kv_event_t *event);
+int zdb_eventing_zbus_publish_ts(const zdb_ts_event_t *event);
+int zdb_eventing_zbus_publish_doc(const zdb_doc_event_t *event);
 
 #endif /* CONFIG_ZDB_EVENTING_ZBUS */
 

@@ -106,7 +106,7 @@ Notes:
 
 ### eventing_zbus
 
-Demonstrates KV mutation event emission published to zbus through the optional adapter.
+Demonstrates KV, TS, and DOC mutation event emission published to zbus through the optional adapter.
 
 Build:
 
@@ -119,7 +119,7 @@ Notes:
 
 - Enables `CONFIG_ZDB_EVENTING` and `CONFIG_ZDB_EVENTING_ZBUS`.
 - Uses ZMS on `storage_partition` for KV backend on `native_sim`.
-- Prints latest zbus event after KV set/delete operations.
+- Prints latest zbus events for KV (`zdb_kv_event_chan`), TS (`zdb_ts_event_chan`), and DOC (`zdb_doc_event_chan`).
 
 ## Notes
 

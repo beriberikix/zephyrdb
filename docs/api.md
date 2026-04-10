@@ -36,11 +36,23 @@ This page summarizes the currently implemented ZephyrDB public APIs.
 - `zdb_kv_event_t`
 - `zdb_event_listener_fn_t`
 - `zdb_event_listener_t`
+- `zdb_ts_event_type_t`
+- `zdb_ts_event_t`
+- `zdb_ts_event_listener_fn_t`
+- `zdb_ts_event_listener_t`
+- `zdb_doc_event_type_t`
+- `zdb_doc_event_t`
+- `zdb_doc_event_listener_fn_t`
+- `zdb_doc_event_listener_t`
 
 Configuration fields in `zdb_cfg_t` when eventing is enabled:
 
 - `event_listeners`
 - `event_listener_count`
+- `ts_event_listeners`
+- `ts_event_listener_count`
+- `doc_event_listeners`
+- `doc_event_listener_count`
 
 ## zbus Adapter
 
@@ -51,11 +63,17 @@ Header:
 Symbols:
 
 - `ZBUS_CHAN_DECLARE(zdb_kv_event_chan)`
+- `ZBUS_CHAN_DECLARE(zdb_ts_event_chan)`
+- `ZBUS_CHAN_DECLARE(zdb_doc_event_chan)`
 - `zdb_eventing_zbus_publish(const zdb_kv_event_t *event)`
+- `zdb_eventing_zbus_publish_ts(const zdb_ts_event_t *event)`
+- `zdb_eventing_zbus_publish_doc(const zdb_doc_event_t *event)`
 
-Channel payload type:
+Channel payload types:
 
 - `zdb_kv_event_t`
+- `zdb_ts_event_t`
+- `zdb_doc_event_t`
 
 ## Time-Series
 
