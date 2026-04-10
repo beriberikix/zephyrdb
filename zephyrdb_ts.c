@@ -937,20 +937,16 @@ zdb_status_t zdb_ts_sample_i64_export_flatbuffer(const zdb_ts_sample_i64_t *samp
 
 zdb_status_t zdb_ts_flush_async(zdb_ts_t *ts)
 {
-	struct zdb_ts_core_ctx *ctx;
-	zdb_status_t lock_rc;
-	int rc;
-
 	if ((ts == NULL) || (ts->db == NULL) || (ts->db->cfg == NULL)) {
 		return ZDB_ERR_INVAL;
 	}
 
 #if ZDB_TS_USE_FCB
-	ARG_UNUSED(ctx);
-	ARG_UNUSED(lock_rc);
-	ARG_UNUSED(rc);
 	return ZDB_OK;
-#endif
+#else
+	struct zdb_ts_core_ctx *ctx;
+	zdb_status_t lock_rc;
+	int rc;
 
 	ctx = zdb_ts_ctx_get_or_alloc(ts->db);
 	if ((ctx == NULL) || (ctx->work_q == NULL)) {
@@ -977,6 +973,7 @@ zdb_status_t zdb_ts_flush_async(zdb_ts_t *ts)
 	}
 
 	return ZDB_OK;
+#endif
 }
 
 zdb_status_t zdb_ts_flush_sync(zdb_ts_t *ts, k_timeout_t timeout)

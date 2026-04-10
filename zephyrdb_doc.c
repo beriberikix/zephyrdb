@@ -386,16 +386,7 @@ static void zdb_doc_field_value_free(zdb_doc_field_t *field)
 		field->name = NULL;
 	}
 
-	if ((field->type == ZDB_DOC_FIELD_STRING) && (field->value.str != NULL)) {
-		k_free((void *)field->value.str);
-		field->value.str = NULL;
-	}
-
-	if ((field->type == ZDB_DOC_FIELD_BYTES) && (field->value.bytes.data != NULL)) {
-		k_free((void *)field->value.bytes.data);
-		field->value.bytes.data = NULL;
-		field->value.bytes.len = 0U;
-	}
+	zdb_doc_field_payload_free(field);
 }
 
 static void zdb_doc_fields_reset(zdb_doc_t *doc)
