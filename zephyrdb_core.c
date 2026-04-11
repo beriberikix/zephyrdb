@@ -85,24 +85,24 @@ void zdb_health_check(zdb_t *db)
 
 zdb_status_t zdb_lock_read(zdb_t *db)
 {
-	int rc = k_rwlock_read_lock(&db->rwlock, K_FOREVER);
+	int rc = k_mutex_lock(&db->lock, K_FOREVER);
 	return (rc == 0) ? ZDB_OK : ZDB_ERR_BUSY;
 }
 
 zdb_status_t zdb_lock_write(zdb_t *db)
 {
-	int rc = k_rwlock_write_lock(&db->rwlock, K_FOREVER);
+	int rc = k_mutex_lock(&db->lock, K_FOREVER);
 	return (rc == 0) ? ZDB_OK : ZDB_ERR_BUSY;
 }
 
 void zdb_unlock_read(zdb_t *db)
 {
-	k_rwlock_read_unlock(&db->rwlock);
+	k_mutex_unlock(&db->lock);
 }
 
 void zdb_unlock_write(zdb_t *db)
 {
-	k_rwlock_write_unlock(&db->rwlock);
+	k_mutex_unlock(&db->lock);
 }
 
 #if defined(CONFIG_ZDB_EVENTING) && (CONFIG_ZDB_EVENTING)
@@ -234,7 +234,7 @@ zdb_status_t zdb_init(zdb_t *db, const zdb_cfg_t *cfg)
 		return ZDB_ERR_INVAL;
 	}
 
-	k_rwlock_init(&db->rwlock);
+	k_mutex_init(&db->lock);
 	db->cfg = cfg;
 	db->core_ctx = NULL;
 	db->kv_ctx = NULL;
