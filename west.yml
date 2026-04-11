@@ -11,6 +11,7 @@ manifest:
     - name: zephyr
       remote: zephyrproject
       revision: main
+      path: tools/zephyr
       import: true
     
     - name: flatcc-zephyr

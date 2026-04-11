@@ -1,0 +1,7 @@
+name: zephyrdb
+description: Embedded multi-model database for Zephyr RTOS with Core, KV (NVS-backed), and TS (LittleFS-backed) modules
+
+type: module
+build:
+  cmake: .
+  kconfig: Kconfig

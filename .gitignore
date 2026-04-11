@@ -5,7 +5,7 @@
 .west/
 
 # Zephyr checkout created by `west init` in this repo
-zephyr/
+tools/zephyr/
 
 # Build output
 build/
