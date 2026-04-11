@@ -189,16 +189,6 @@ extern "C"
 
 	typedef struct
 	{
-		uint32_t ts_recover_runs;
-		uint32_t ts_recover_failures;
-		uint64_t ts_recover_truncated_bytes;
-		uint32_t ts_crc_failures;
-		uint32_t ts_corrupt_records;
-		uint32_t ts_unsupported_versions;
-	} zdb_stats_t;
-
-	typedef struct
-	{
 		uint32_t recover_runs;
 		uint32_t recover_failures;
 		uint64_t recover_truncated_bytes;
@@ -233,7 +223,6 @@ extern "C"
 		 */
 		const void *kv_backend_fs;
 		const char *lfs_mount_point;
-		const char *kv_namespace;
 		struct k_work_q *work_q;
 		uint16_t scan_yield_every_n;
 #if defined(CONFIG_ZDB_EVENTING) && (CONFIG_ZDB_EVENTING)
@@ -299,8 +288,6 @@ extern "C"
 	zdb_status_t zdb_init(zdb_t *db, const zdb_cfg_t *cfg);
 	zdb_status_t zdb_deinit(zdb_t *db);
 	zdb_health_t zdb_health(const zdb_t *db);
-	void zdb_stats_get(const zdb_t *db, zdb_stats_t *out_stats);
-	void zdb_stats_reset(zdb_t *db);
 	void zdb_ts_stats_get(const zdb_t *db, zdb_ts_stats_t *out_stats);
 	void zdb_ts_stats_reset(zdb_t *db);
 

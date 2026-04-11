@@ -35,7 +35,7 @@ This page summarizes the currently implemented ZephyrDB public APIs.
 
 Notes:
 
-- The first `zdb_kv_iter_open()` call lazily scans the NVS backend (IDs 1–65535) to discover entries written before the current session. ZMS backends skip this scan (32-bit ID space is too large for brute-force enumeration).
+- The iterator tracks keys set/deleted during the current session. Cross-session iteration from persisted data requires namespace metadata in the on-disk format (not yet implemented).
 
 ## Eventing
 

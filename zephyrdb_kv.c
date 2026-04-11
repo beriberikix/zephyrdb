@@ -24,7 +24,6 @@ struct zdb_kv_index_entry {
 struct zdb_kv_ctx {
 	struct zdb_kv_index_entry entries[ZDB_KV_INDEX_MAX_ENTRIES];
 	size_t entry_count;
-	bool hydrated;
 };
 
 static bool zdb_key_valid(const char *key)
@@ -181,7 +180,6 @@ static void zdb_kv_ctx_track_delete(zdb_t *db, const char *namespace_name, const
 }
 
 static uint32_t zdb_kv_key_to_id(const char *key);
-static void zdb_kv_hydrate_from_backend(zdb_t *db, const char *namespace_name);
 
 static uint16_t __unused zdb_fnv1a16(const char *s)
 {
@@ -562,104 +560,7 @@ static uint32_t zdb_kv_key_to_id(const char *key)
 	return id;
 }
 
-/*
- * Hydration from persisted v2 KV records is intentionally disabled.
- *
- * The in-RAM index is namespace-aware, but the persisted v2 record format does
- * not encode namespace information.  Rebuilding the index during startup would
- * therefore misattribute recovered keys to whichever namespace first triggers
- * hydration, breaking correct cross-session namespace iteration.
- *
- * Until namespace metadata is persisted as part of the backend record (and
- * hydration can reconstruct it), skip backend hydration entirely rather than
- * populating an incorrect index.
- */
-static void zdb_kv_hydrate_from_backend(zdb_t *db, const char *namespace_name)
-{
-	(void)db;
-	(void)namespace_name;
-}
 
-#if 0 /* disabled: namespace not encoded in on-disk format */
-static void zdb_kv_hydrate_from_backend_nvs(zdb_t *db, const char *namespace_name)
-{
-#if defined(CONFIG_ZDB_KV_BACKEND_NVS) && (CONFIG_ZDB_KV_BACKEND_NVS)
-	struct nvs_fs *nvs;
-	struct zdb_kv_ctx *ctx;
-	uint8_t *io_buf = NULL;
-	size_t block_size;
-	uint16_t scan_id;
-
-	if ((db == NULL) || (db->kv_io_slab == NULL)) {
-		return;
-	}
-
-	nvs = (struct nvs_fs *)zdb_kv_backend_fs_from_db(db);
-	if (nvs == NULL) {
-		return;
-	}
-
-	ctx = zdb_kv_ctx_get_or_alloc(db);
-	if (ctx == NULL) {
-		return;
-	}
-
-	block_size = db->kv_io_slab->info.block_size;
-	if (k_mem_slab_alloc(db->kv_io_slab, (void **)&io_buf, K_NO_WAIT) != 0) {
-		return;
-	}
-
-	for (scan_id = 1U; scan_id != 0U; scan_id++) {
-		ssize_t rd;
-		size_t stored_key_len;
-		char key_buf[CONFIG_ZDB_MAX_KEY_LEN + 1U];
-		uint32_t verify_id;
-
-		if (ctx->entry_count >= ZDB_KV_INDEX_MAX_ENTRIES) {
-			break;
-		}
-
-		rd = nvs_read(nvs, scan_id, io_buf, block_size);
-		if (rd <= 0) {
-			continue;
-		}
-
-		/* Validate v2 entry format: [key_len:1][key][value] */
-		stored_key_len = (size_t)io_buf[0];
-		if ((stored_key_len == 0U) ||
-		    (stored_key_len > (size_t)CONFIG_ZDB_MAX_KEY_LEN) ||
-		    ((size_t)rd < (1U + stored_key_len))) {
-			continue;
-		}
-
-		(void)memcpy(key_buf, &io_buf[1], stored_key_len);
-		key_buf[stored_key_len] = '\0';
-
-		/* Verify extracted key hashes to this ID (proves ZephyrDB ownership) */
-		verify_id = (uint32_t)zdb_fnv1a16(key_buf);
-		if (verify_id == 0U) {
-			verify_id = 1U;
-		}
-		if (verify_id != (uint32_t)scan_id) {
-			continue;
-		}
-
-		/* Skip if already tracked (e.g. from a runtime set) */
-		if (zdb_kv_ctx_find_entry(ctx, namespace_name, key_buf) >= 0) {
-			continue;
-		}
-
-		zdb_kv_ctx_track_set(db, namespace_name, key_buf, (uint32_t)scan_id);
-	}
-
-	k_mem_slab_free(db->kv_io_slab, io_buf);
-#else
-	/* ZMS 32-bit ID space is too large for brute-force scan */
-	ARG_UNUSED(db);
-	ARG_UNUSED(namespace_name);
-#endif
-}
-#endif /* disabled hydration */
 
 zdb_status_t zdb_kv_iter_open(zdb_kv_t *kv, zdb_kv_iter_t *out_iter)
 {
@@ -670,14 +571,6 @@ zdb_status_t zdb_kv_iter_open(zdb_kv_t *kv, zdb_kv_iter_t *out_iter)
 	}
 
 	ctx = zdb_kv_ctx_get_or_alloc(kv->db);
-	if (ctx != NULL) {
-		zdb_lock_write(kv->db);
-		if (!ctx->hydrated) {
-			zdb_kv_hydrate_from_backend(kv->db, kv->namespace_name);
-			ctx->hydrated = true;
-		}
-		zdb_unlock_write(kv->db);
-	}
 
 	(void)memset(out_iter, 0, sizeof(*out_iter));
 	out_iter->kv = kv;
