@@ -170,6 +170,67 @@ static int cmd_zdb_kv_delete(const struct shell *sh, size_t argc, char **argv)
 	shell_print(sh, "kv delete ok");
 	return 0;
 }
+
+static int cmd_zdb_kv_list(const struct shell *sh, size_t argc, char **argv)
+{
+	zdb_t *db = zdb_shell_db_get(sh);
+	zdb_kv_t kv;
+	zdb_kv_iter_t iter;
+	zdb_status_t status;
+	uint8_t value[256];
+	char key[CONFIG_ZDB_MAX_KEY_LEN + 1U];
+	size_t key_len = 0U;
+	size_t value_len = 0U;
+	unsigned int listed = 0U;
+
+	if (db == NULL) {
+		return -ENODEV;
+	}
+
+	ARG_UNUSED(argc);
+	status = zdb_kv_open(db, argv[1], &kv);
+	if (status != ZDB_OK) {
+		shell_error(sh, "kv open failed: %s", zdb_status_str(status));
+		return -EIO;
+	}
+
+	status = zdb_kv_iter_open(&kv, &iter);
+	if (status != ZDB_OK) {
+		(void)zdb_kv_close(&kv);
+		shell_error(sh, "kv iter open failed: %s", zdb_status_str(status));
+		return -EIO;
+	}
+
+	while (true) {
+		status = zdb_kv_iter_next(&iter, key, sizeof(key), &key_len,
+					value, sizeof(value), &value_len);
+		if (status == ZDB_ERR_NOT_FOUND) {
+			break;
+		}
+		if (status != ZDB_OK) {
+			(void)zdb_kv_iter_close(&iter);
+			(void)zdb_kv_close(&kv);
+			shell_error(sh, "kv iter failed: %s", zdb_status_str(status));
+			return -EIO;
+		}
+
+		listed++;
+		shell_print(sh, "key[%u]: %s (key_len=%u value_len=%u)", listed, key,
+			    (unsigned int)key_len, (unsigned int)value_len);
+
+		if (value_len > sizeof(value)) {
+			shell_print(sh, "value truncated to %u bytes", (unsigned int)sizeof(value));
+			shell_hexdump(sh, value, sizeof(value));
+		} else {
+			shell_hexdump(sh, value, value_len);
+		}
+	}
+
+	(void)zdb_kv_iter_close(&iter);
+	(void)zdb_kv_close(&kv);
+	shell_print(sh, "kv list done: %u entries", listed);
+	return 0;
+}
 #endif
 
 #if defined(CONFIG_ZDB_TS) && (CONFIG_ZDB_TS)
@@ -388,6 +449,7 @@ SHELL_STATIC_SUBCMD_SET_CREATE(
 	SHELL_CMD_ARG(set, NULL, "Set KV value: <namespace> <key> <value>", cmd_zdb_kv_set, 4, 0),
 	SHELL_CMD_ARG(get, NULL, "Get KV value: <namespace> <key>", cmd_zdb_kv_get, 3, 0),
 	SHELL_CMD_ARG(delete, NULL, "Delete KV key: <namespace> <key>", cmd_zdb_kv_delete, 3, 0),
+	SHELL_CMD_ARG(list, NULL, "List KV entries: <namespace>", cmd_zdb_kv_list, 2, 0),
 	SHELL_SUBCMD_SET_END
 );
 #endif

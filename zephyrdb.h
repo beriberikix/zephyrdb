@@ -79,7 +79,9 @@ extern "C"
 	{
 		ZDB_BACKEND_NONE = 0,
 		ZDB_BACKEND_NVS,
+		ZDB_BACKEND_ZMS,
 		ZDB_BACKEND_LFS,
+		ZDB_BACKEND_FCB,
 	} zdb_backend_t;
 
 	typedef enum
@@ -226,6 +228,7 @@ extern "C"
 		const void *kv_backend_fs;
 		const char *lfs_mount_point;
 		struct k_work_q *work_q;
+		uint16_t scan_yield_every_n;
 #if defined(CONFIG_ZDB_EVENTING) && (CONFIG_ZDB_EVENTING)
 		const zdb_event_listener_t *event_listeners;
 		size_t event_listener_count;
@@ -343,6 +346,13 @@ extern "C"
 		const char *namespace_name;
 	} zdb_kv_t;
 
+	typedef struct
+	{
+		zdb_kv_t *kv;
+		size_t position;
+		void *impl;
+	} zdb_kv_iter_t;
+
 	zdb_status_t zdb_kv_open(zdb_t *db, const char *namespace_name, zdb_kv_t *kv);
 	zdb_status_t zdb_kv_close(zdb_kv_t *kv);
 
@@ -350,6 +360,12 @@ extern "C"
 	zdb_status_t zdb_kv_get(zdb_kv_t *kv, const char *key, void *out_value,
 							size_t out_capacity, size_t *out_len);
 	zdb_status_t zdb_kv_delete(zdb_kv_t *kv, const char *key);
+	zdb_status_t zdb_kv_iter_open(zdb_kv_t *kv, zdb_kv_iter_t *out_iter);
+	zdb_status_t zdb_kv_iter_next(zdb_kv_iter_t *iter, char *out_key,
+							   size_t out_key_capacity, size_t *out_key_len,
+							   void *out_value, size_t out_value_capacity,
+							   size_t *out_value_len);
+	zdb_status_t zdb_kv_iter_close(zdb_kv_iter_t *iter);
 #endif /* CONFIG_ZDB_KV */
 
 /*
@@ -499,6 +515,12 @@ extern "C"
 		uint64_t updated_ms;
 		uint32_t field_count;
 	} zdb_doc_metadata_t;
+
+	typedef struct
+	{
+		const char *collection_name;
+		const char *document_id;
+	} zdb_doc_manifest_entry_t;
 
 	zdb_status_t zdb_doc_create(zdb_t *db, const char *collection_name,
 								const char *document_id, zdb_doc_t *out_doc);

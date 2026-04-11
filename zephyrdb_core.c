@@ -263,6 +263,10 @@ zdb_status_t zdb_deinit(zdb_t *db)
 		return ZDB_ERR_INVAL;
 	}
 
+	if (db->kv_ctx != NULL) {
+		k_free(db->kv_ctx);
+	}
+
 #if defined(CONFIG_ZDB_TS) && (CONFIG_ZDB_TS)
 	if ((db->core_slab != NULL) && (db->ts_ctx != NULL)) {
 		struct zdb_ts_core_ctx *ctx = (struct zdb_ts_core_ctx *)db->ts_ctx;

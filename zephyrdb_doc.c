@@ -11,6 +11,7 @@
 
 #include <zephyr/fs/fs.h>
 #include <zephyr/sys/byteorder.h>
+#include <zephyr/sys/crc.h>
 #include <zephyr/kernel.h>
 
 struct zdb_doc_hdr_v1 {
@@ -183,6 +184,17 @@ static zdb_status_t zdb_doc_open_impl(zdb_t *db, const char *collection_name,
 	    (sys_le16_to_cpu(hdr.version_le) != ZDB_DOC_VERSION)) {
 		ret = ZDB_ERR_CORRUPT;
 		goto cleanup;
+	}
+
+	{
+		uint32_t expect_crc = crc32_ieee((const uint8_t *)&hdr,
+						 offsetof(struct zdb_doc_hdr_v1, crc_le));
+		uint32_t got_crc = sys_le32_to_cpu(hdr.crc_le);
+
+		if (got_crc != expect_crc) {
+			ret = ZDB_ERR_CORRUPT;
+			goto cleanup;
+		}
 	}
 
 	saved_created_ms = sys_le64_to_cpu(hdr.created_ms_le);
@@ -573,6 +585,33 @@ static bool zdb_doc_matches_query(const zdb_doc_t *doc, const zdb_doc_query_t *q
 	return true;
 }
 
+/**
+ * @brief Validate a name component for use in filesystem paths.
+ *
+ * Rejects names containing path separators, parent directory references,
+ * or embedded null bytes that could enable directory traversal.
+ */
+static bool zdb_doc_name_valid(const char *name)
+{
+	const char *p;
+
+	if ((name == NULL) || (name[0] == '\0')) {
+		return false;
+	}
+
+	if ((strcmp(name, ".") == 0) || (strcmp(name, "..") == 0)) {
+		return false;
+	}
+
+	for (p = name; *p != '\0'; p++) {
+		if ((*p == '/') || (*p == '\\')) {
+			return false;
+		}
+	}
+
+	return true;
+}
+
 zdb_status_t zdb_doc_create(zdb_t *db, const char *collection_name,
 			     const char *document_id, zdb_doc_t *out_doc)
 {
@@ -590,6 +629,11 @@ zdb_status_t zdb_doc_create(zdb_t *db, const char *collection_name,
 	/* Validate collection_name and document_id against CONFIG_ZDB_MAX_KEY_LEN */
 	if ((strlen(collection_name) == 0U) || (strlen(collection_name) > CONFIG_ZDB_MAX_KEY_LEN) ||
 	    (strlen(document_id) == 0U) || (strlen(document_id) > CONFIG_ZDB_MAX_KEY_LEN)) {
+		return ZDB_ERR_INVAL;
+	}
+
+	/* Reject path traversal in collection/document names */
+	if (!zdb_doc_name_valid(collection_name) || !zdb_doc_name_valid(document_id)) {
 		return ZDB_ERR_INVAL;
 	}
 
@@ -712,7 +756,9 @@ zdb_status_t zdb_doc_save(zdb_doc_t *doc)
 	hdr.field_count_le = sys_cpu_to_le16((uint16_t)doc->field_count);
 	hdr.created_ms_le = sys_cpu_to_le64(doc->created_ms);
 	hdr.updated_ms_le = sys_cpu_to_le64(doc->updated_ms);
-	hdr.crc_le = sys_cpu_to_le32(0U); /* Reserved for future CRC validation */
+	hdr.crc_le = sys_cpu_to_le32(
+		crc32_ieee((const uint8_t *)&hdr,
+			   offsetof(struct zdb_doc_hdr_v1, crc_le)));
 
 	fs_file_t_init(&file);
 	rc = fs_open(&file, path, FS_O_CREATE | FS_O_WRITE | FS_O_TRUNC);
@@ -884,6 +930,15 @@ zdb_status_t zdb_doc_delete(zdb_t *db, const char *collection_name,
 	}
 
 	if ((db->cfg == NULL) || (db->cfg->lfs_mount_point == NULL)) {
+		return ZDB_ERR_INVAL;
+	}
+
+	if ((strlen(collection_name) == 0U) || (strlen(collection_name) > CONFIG_ZDB_MAX_KEY_LEN) ||
+	    (strlen(document_id) == 0U) || (strlen(document_id) > CONFIG_ZDB_MAX_KEY_LEN)) {
+		return ZDB_ERR_INVAL;
+	}
+
+	if (!zdb_doc_name_valid(collection_name) || !zdb_doc_name_valid(document_id)) {
 		return ZDB_ERR_INVAL;
 	}
 

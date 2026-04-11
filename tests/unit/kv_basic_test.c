@@ -12,6 +12,7 @@
 #include "../fixtures/common.h"
 #include <string.h>
 #include <errno.h>
+#include <limits.h>
 
 /* Test instance and backend */
 ZDB_TEST_INSTANCE_DEFINE(g_test_db);
@@ -78,6 +79,73 @@ static void kv_test_teardown(void)
 	zdb_deinit(&g_test_db);
 	mock_nvs_reset(&g_mock_nvs);
 }
+
+#if defined(CONFIG_ZDB_KV_BACKEND_NVS) && (CONFIG_ZDB_KV_BACKEND_NVS)
+static uint16_t test_fnv1a16(const char *s)
+{
+	uint32_t hash = 0x811C9DC5u;
+
+	while ((*s) != '\0') {
+		hash ^= (uint8_t)(*s);
+		hash *= 0x01000193u;
+		s++;
+	}
+
+	hash &= 0xFFFFu;
+	if (hash == 0U) {
+		hash = 1U;
+	}
+
+	return (uint16_t)hash;
+}
+
+static void test_key_from_index(uint32_t idx, char out_key[5])
+{
+	/* 17 symbols -> 17^4 inputs (> 2^16), guarantees at least one collision. */
+	static const char alphabet[] = "abcdefghijklmnopq";
+	const uint32_t base = (uint32_t)(sizeof(alphabet) - 1U);
+
+	out_key[0] = alphabet[idx % base];
+	idx /= base;
+	out_key[1] = alphabet[idx % base];
+	idx /= base;
+	out_key[2] = alphabet[idx % base];
+	idx /= base;
+	out_key[3] = alphabet[idx % base];
+	out_key[4] = '\0';
+}
+
+static bool test_find_fnv16_collision(char key_a[5], char key_b[5])
+{
+	static uint32_t first_idx[65536];
+	uint32_t i;
+	const uint32_t total = 17U * 17U * 17U * 17U;
+
+	for (i = 0U; i < ARRAY_SIZE(first_idx); i++) {
+		first_idx[i] = UINT32_MAX;
+	}
+
+	for (i = 0U; i < total; i++) {
+		char key[5];
+		uint16_t h;
+
+		test_key_from_index(i, key);
+		h = test_fnv1a16(key);
+
+		if (first_idx[h] != UINT32_MAX) {
+			test_key_from_index(first_idx[h], key_a);
+			(void)strcpy(key_b, key);
+			if (strcmp(key_a, key_b) != 0) {
+				return true;
+			}
+		} else {
+			first_idx[h] = i;
+		}
+	}
+
+	return false;
+}
+#endif
 
 /* ===== Test Cases ===== */
 
@@ -332,6 +400,170 @@ static void test_kv_multiple_namespaces(void)
 	zdb_kv_close(&kv2);
 }
 
+static void test_kv_ops_require_io_slab(void)
+{
+	zdb_kv_t kv;
+	uint8_t out_buf[8];
+	uint32_t value = 0x12345678U;
+	size_t out_len = 0U;
+	struct k_mem_slab *saved_slab = g_test_db.kv_io_slab;
+	zdb_status_t rc = zdb_kv_open(&g_test_db, "test_ns", &kv);
+
+	assert_zdb_ok(rc);
+	g_test_db.kv_io_slab = NULL;
+
+	rc = zdb_kv_set(&kv, "k", &value, sizeof(value));
+	assert_zdb_eq(rc, ZDB_ERR_INVAL);
+
+	rc = zdb_kv_get(&kv, "k", out_buf, sizeof(out_buf), &out_len);
+	assert_zdb_eq(rc, ZDB_ERR_INVAL);
+
+	rc = zdb_kv_delete(&kv, "k");
+	assert_zdb_eq(rc, ZDB_ERR_INVAL);
+
+	g_test_db.kv_io_slab = saved_slab;
+	zdb_kv_close(&kv);
+}
+
+static void test_kv_hash_collision_detected(void)
+{
+	zdb_kv_t kv;
+	zdb_status_t rc = zdb_kv_open(&g_test_db, "collision_ns", &kv);
+
+	assert_zdb_ok(rc);
+
+#if defined(CONFIG_ZDB_KV_BACKEND_NVS) && (CONFIG_ZDB_KV_BACKEND_NVS)
+	{
+		char key_a[5];
+		char key_b[5];
+		uint32_t value_a = 0xAAAAAAAAU;
+		uint32_t value_b = 0xBBBBBBBBU;
+		uint32_t out_val = 0U;
+		size_t out_len = 0U;
+
+		zassert_true(test_find_fnv16_collision(key_a, key_b),
+			     "Failed to find deterministic FNV16 collision");
+
+		rc = zdb_kv_set(&kv, key_a, &value_a, sizeof(value_a));
+		assert_zdb_ok(rc);
+
+		rc = zdb_kv_set(&kv, key_b, &value_b, sizeof(value_b));
+		assert_zdb_ok(rc);
+
+		rc = zdb_kv_get(&kv, key_a, &out_val, sizeof(out_val), &out_len);
+		assert_zdb_eq(rc, ZDB_ERR_NOT_FOUND);
+
+		rc = zdb_kv_get(&kv, key_b, &out_val, sizeof(out_val), &out_len);
+		assert_zdb_ok(rc);
+		zassert_equal(out_len, sizeof(value_b), "Unexpected value length");
+		zassert_equal(out_val, value_b, "Collision handling returned wrong payload");
+	}
+#else
+	zskip("Collision test currently targets NVS FNV16 backend");
+#endif
+
+	zdb_kv_close(&kv);
+}
+
+static void test_kv_iter_lists_namespace_entries(void)
+{
+	zdb_kv_t kv_ns1;
+	zdb_kv_t kv_ns2;
+	zdb_kv_iter_t iter;
+	uint32_t value_a = 11U;
+	uint32_t value_b = 22U;
+	uint32_t value_other = 99U;
+	char key[CONFIG_ZDB_MAX_KEY_LEN + 1U];
+	uint32_t out_value = 0U;
+	size_t key_len = 0U;
+	size_t out_len = 0U;
+	bool saw_alpha = false;
+	bool saw_beta = false;
+	zdb_status_t rc;
+
+	rc = zdb_kv_open(&g_test_db, "ns1", &kv_ns1);
+	assert_zdb_ok(rc);
+	rc = zdb_kv_open(&g_test_db, "ns2", &kv_ns2);
+	assert_zdb_ok(rc);
+
+	rc = zdb_kv_set(&kv_ns1, "alpha", &value_a, sizeof(value_a));
+	assert_zdb_ok(rc);
+	rc = zdb_kv_set(&kv_ns1, "beta", &value_b, sizeof(value_b));
+	assert_zdb_ok(rc);
+	rc = zdb_kv_set(&kv_ns2, "other", &value_other, sizeof(value_other));
+	assert_zdb_ok(rc);
+
+	rc = zdb_kv_iter_open(&kv_ns1, &iter);
+	assert_zdb_ok(rc);
+
+	while ((rc = zdb_kv_iter_next(&iter, key, sizeof(key), &key_len,
+				      &out_value, sizeof(out_value), &out_len)) == ZDB_OK) {
+		zassert_equal(out_len, sizeof(uint32_t), "Unexpected iter value length");
+		if (strcmp(key, "alpha") == 0) {
+			saw_alpha = true;
+			zassert_equal(out_value, value_a, "alpha value mismatch");
+		} else if (strcmp(key, "beta") == 0) {
+			saw_beta = true;
+			zassert_equal(out_value, value_b, "beta value mismatch");
+		} else {
+			zassert_unreachable("Iterator returned key from wrong namespace: %s", key);
+		}
+		zassert_true(key_len > 0U, "Iterator key length should be > 0");
+	}
+
+	assert_zdb_eq(rc, ZDB_ERR_NOT_FOUND);
+	zassert_true(saw_alpha, "Iterator did not return alpha key");
+	zassert_true(saw_beta, "Iterator did not return beta key");
+
+	rc = zdb_kv_iter_close(&iter);
+	assert_zdb_ok(rc);
+	zdb_kv_close(&kv_ns2);
+	zdb_kv_close(&kv_ns1);
+}
+
+static void test_kv_iter_skips_deleted_entries(void)
+{
+	zdb_kv_t kv;
+	zdb_kv_iter_t iter;
+	uint32_t keep_val = 1U;
+	uint32_t delete_val = 2U;
+	char key[CONFIG_ZDB_MAX_KEY_LEN + 1U];
+	uint32_t out_value = 0U;
+	size_t key_len = 0U;
+	size_t out_len = 0U;
+	unsigned int found = 0U;
+	zdb_status_t rc;
+
+	rc = zdb_kv_open(&g_test_db, "iter_ns", &kv);
+	assert_zdb_ok(rc);
+
+	rc = zdb_kv_set(&kv, "keep", &keep_val, sizeof(keep_val));
+	assert_zdb_ok(rc);
+	rc = zdb_kv_set(&kv, "gone", &delete_val, sizeof(delete_val));
+	assert_zdb_ok(rc);
+	rc = zdb_kv_delete(&kv, "gone");
+	assert_zdb_ok(rc);
+
+	rc = zdb_kv_iter_open(&kv, &iter);
+	assert_zdb_ok(rc);
+
+	while ((rc = zdb_kv_iter_next(&iter, key, sizeof(key), &key_len,
+				      &out_value, sizeof(out_value), &out_len)) == ZDB_OK) {
+		found++;
+		zassert_equal(strcmp(key, "keep"), 0, "Deleted key should not appear in iterator");
+		zassert_equal(out_len, sizeof(keep_val), "Unexpected value length");
+		zassert_equal(out_value, keep_val, "Unexpected iterator value");
+		zassert_true(key_len > 0U, "Iterator key length should be > 0");
+	}
+
+	assert_zdb_eq(rc, ZDB_ERR_NOT_FOUND);
+	zassert_equal(found, 1U, "Expected exactly one iterated key");
+
+	rc = zdb_kv_iter_close(&iter);
+	assert_zdb_ok(rc);
+	zdb_kv_close(&kv);
+}
+
 #if defined(CONFIG_ZDB_EVENTING) && (CONFIG_ZDB_EVENTING)
 static void test_kv_set_emits_event(void)
 {
@@ -403,6 +635,10 @@ ztest_unit_test(test_kv_delete_not_found);
 ztest_unit_test(test_kv_value_max_length);
 ztest_unit_test(test_kv_key_max_length);
 ztest_unit_test(test_kv_multiple_namespaces);
+ztest_unit_test(test_kv_ops_require_io_slab);
+ztest_unit_test(test_kv_hash_collision_detected);
+ztest_unit_test(test_kv_iter_lists_namespace_entries);
+ztest_unit_test(test_kv_iter_skips_deleted_entries);
 #if defined(CONFIG_ZDB_EVENTING) && (CONFIG_ZDB_EVENTING)
 ztest_unit_test(test_kv_set_emits_event);
 ztest_unit_test(test_kv_delete_emits_event);
