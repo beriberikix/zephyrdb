@@ -44,17 +44,6 @@ Notes:
 - `CONFIG_ZDB_DOC_MAX_FIELD_COUNT`: max field count per document
 - `CONFIG_ZDB_DOC_MAX_NESTED_DEPTH`: max nested document depth
 
-## Known Constraints
-
-### Build-Time Dependencies
-
-- **DOC module requires TS:** `CONFIG_ZDB_DOC=y` with `CONFIG_ZDB_TS=n` will fail at link time. This is due to nesting of the DOC module implementation inside the TS compile-time guard. **Workaround:** Always enable `CONFIG_ZDB_TS=y` when using DOC.
-
-### Runtime Limitations
-
-- **KV backend hash collisions:** See [docs/api.md#key-value-nvs--zms-backends](api.md#key-value-nvs--zms-backends) for details.
-- **TS cursor I/O:** See [docs/api.md#time-series](api.md#time-series) for performance notes.
-
 ## Practical Notes
 
 - Use board overlays to enable flash/filesystem features required by your backend.

@@ -1,0 +1,10 @@
+tests:
+  zephyrdb.unit.kv.hydrate:
+    tags:
+      - zephyrdb
+      - unit
+      - kv
+      - hydrate
+    harness: ztest
+    platform_allow:
+      - native_sim

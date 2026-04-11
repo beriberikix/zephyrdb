@@ -137,11 +137,11 @@ extern "C"
 	typedef struct
 	{
 		/*
-		 * First-pass contract:
-		 * - KV path expects partition_ref to point to an initialized struct nvs_fs.
-		 * - TS path reserves this pointer for future storage object binding.
+		 * KV path expects kv_backend_fs to point to an initialized
+		 * struct nvs_fs (NVS) or struct zms_fs (ZMS).
+		 * TS path uses lfs_mount_point for append-log files.
 		 */
-		const void *partition_ref;
+		const void *kv_backend_fs;
 		const char *lfs_mount_point;
 		const char *kv_namespace;
 		struct k_work_q *work_q;
@@ -150,6 +150,7 @@ extern "C"
 
 	typedef struct
 	{
+		struct k_mutex lock;
 		struct k_rwlock rwlock;
 		struct k_mem_slab *core_slab;
 		struct k_mem_slab *cursor_slab;
@@ -159,7 +160,8 @@ extern "C"
 		void *kv_ctx;
 		void *ts_ctx;
 		const zdb_cfg_t *cfg;
-		zdb_stats_t stats;
+		zdb_ts_stats_t ts_stats;
+		zdb_health_t health;
 	} zdb_t;
 
 	typedef bool (*zdb_predicate_fn)(zdb_model_t model, const zdb_bytes_t *record, void *user_ctx);
@@ -213,6 +215,13 @@ extern "C"
 		const char *namespace_name;
 	} zdb_kv_t;
 
+	typedef struct
+	{
+		zdb_kv_t *kv;
+		size_t position;
+		void *impl;
+	} zdb_kv_iter_t;
+
 	zdb_status_t zdb_kv_open(zdb_t *db, const char *namespace_name, zdb_kv_t *kv);
 	zdb_status_t zdb_kv_close(zdb_kv_t *kv);
 
@@ -220,6 +229,12 @@ extern "C"
 	zdb_status_t zdb_kv_get(zdb_kv_t *kv, const char *key, void *out_value,
 													size_t out_capacity, size_t *out_len);
 	zdb_status_t zdb_kv_delete(zdb_kv_t *kv, const char *key);
+	zdb_status_t zdb_kv_iter_open(zdb_kv_t *kv, zdb_kv_iter_t *out_iter);
+	zdb_status_t zdb_kv_iter_next(zdb_kv_iter_t *iter, char *out_key,
+							   size_t out_key_capacity, size_t *out_key_len,
+							   void *out_value, size_t out_value_capacity,
+							   size_t *out_value_len);
+	zdb_status_t zdb_kv_iter_close(zdb_kv_iter_t *iter);
 
 	/*
 	 * Exposes key->numeric-id mapping required by NVS.

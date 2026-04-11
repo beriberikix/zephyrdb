@@ -311,11 +311,11 @@ config ZDB_FLATBUFFERS
 config ZDB_DOC
 	bool "Enable document model (Stage 3)"
 	default n
-	depends on ZDB_FLATBUFFERS && (FILE_SYSTEM || NVS || ZMS)
+	depends on ZDB_CORE && (FILE_SYSTEM || NVS || ZMS)
 	help
-	  Enables semi-structured document APIs built on FlatBuffers.
-	  Supports variable-length strings, nested objects, and dynamic queries
-	  on document properties. Can use LittleFS, NVS, or ZMS as backend.
+	  Enables semi-structured document APIs with typed fields, queries,
+	  and optional FlatBuffers export. Can use LittleFS, NVS, or ZMS
+	  as backend. Does not require TS module.
 
 choice ZDB_DOC_BACKEND
 	prompt "Document storage backend"
