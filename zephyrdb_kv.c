@@ -475,9 +475,10 @@ zdb_status_t zdb_kv_delete(zdb_kv_t *kv, const char *key)
 	ssize_t rd;
 	zdb_status_t lock_rc;
 	zdb_status_t status;
-	uint8_t *io_buf;
+	uint8_t *io_buf = NULL;
 	size_t key_len;
 	size_t stored_key_len;
+	bool lock_held = false;
 
 	if ((kv == NULL) || (kv->db == NULL) || !zdb_key_valid(key)) {
 		return ZDB_ERR_INVAL;
@@ -492,44 +493,47 @@ zdb_status_t zdb_kv_delete(zdb_kv_t *kv, const char *key)
 	}
 
 	if (k_mem_slab_alloc(kv->db->kv_io_slab, (void **)&io_buf, K_NO_WAIT) != 0) {
-		return ZDB_ERR_NOMEM;
+		status = ZDB_ERR_NOMEM;
+		goto out;
 	}
 
 	id = zdb_kv_key_to_id(key);
 	key_len = strlen(key);
 	lock_rc = zdb_lock_write(kv->db);
 	if (lock_rc != ZDB_OK) {
-		k_mem_slab_free(kv->db->kv_io_slab, io_buf);
-		return lock_rc;
+		status = lock_rc;
+		goto out;
 	}
+	lock_held = true;
 
 	/* Read existing entry to verify key matches before deleting */
 	rd = zdb_kv_backend_read(kv->db, id, io_buf, kv->db->kv_io_slab->info.block_size);
 	if (rd < 0) {
-		zdb_unlock_write(kv->db);
-		k_mem_slab_free(kv->db->kv_io_slab, io_buf);
-		return zdb_status_from_errno((int)rd);
+		status = zdb_status_from_errno((int)rd);
+		goto out;
 	}
 
 	stored_key_len = (size_t)io_buf[0];
 	if ((size_t)rd < (1U + stored_key_len) || stored_key_len != key_len ||
 	    memcmp(&io_buf[1], key, key_len) != 0) {
-		zdb_unlock_write(kv->db);
-		k_mem_slab_free(kv->db->kv_io_slab, io_buf);
-		return ZDB_ERR_NOT_FOUND;
+		status = ZDB_ERR_NOT_FOUND;
+		goto out;
 	}
 
 	rc = zdb_kv_backend_delete(kv->db, id);
 	if (rc >= 0) {
 		zdb_kv_ctx_track_delete(kv->db, kv->namespace_name, key);
-	}
-	zdb_unlock_write(kv->db);
-	k_mem_slab_free(kv->db->kv_io_slab, io_buf);
-
-	if (rc < 0) {
-		status = zdb_status_from_errno(rc);
-	} else {
 		status = ZDB_OK;
+	} else {
+		status = zdb_status_from_errno(rc);
+	}
+
+out:
+	if (lock_held) {
+		zdb_unlock_write(kv->db);
+	}
+	if (io_buf != NULL) {
+		k_mem_slab_free(kv->db->kv_io_slab, io_buf);
 	}
 
 #if defined(CONFIG_ZDB_EVENTING) && (CONFIG_ZDB_EVENTING)
