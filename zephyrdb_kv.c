@@ -288,6 +288,10 @@ zdb_status_t zdb_kv_open(zdb_t *db, const char *namespace_name, zdb_kv_t *kv)
 		return ZDB_ERR_INVAL;
 	}
 
+	if (!zdb_key_valid(namespace_name)) {
+		return ZDB_ERR_INVAL;
+	}
+
 	(void)memset(kv, 0, sizeof(*kv));
 
 	if (db->cfg == NULL) {
@@ -559,14 +563,25 @@ static uint32_t zdb_kv_key_to_id(const char *key)
 }
 
 /*
- * Scan the NVS backend for pre-existing v2 entries and populate the in-RAM
- * key index.  For each of the 65535 possible 16-bit NVS IDs we attempt a read;
- * entries whose stored key hashes back to the scanned ID are registered.
+ * Hydration from persisted v2 KV records is intentionally disabled.
  *
- * ZMS uses a 32-bit ID space which makes brute-force scanning impractical,
- * so hydration is skipped for that backend.
+ * The in-RAM index is namespace-aware, but the persisted v2 record format does
+ * not encode namespace information.  Rebuilding the index during startup would
+ * therefore misattribute recovered keys to whichever namespace first triggers
+ * hydration, breaking correct cross-session namespace iteration.
+ *
+ * Until namespace metadata is persisted as part of the backend record (and
+ * hydration can reconstruct it), skip backend hydration entirely rather than
+ * populating an incorrect index.
  */
 static void zdb_kv_hydrate_from_backend(zdb_t *db, const char *namespace_name)
+{
+	(void)db;
+	(void)namespace_name;
+}
+
+#if 0 /* disabled: namespace not encoded in on-disk format */
+static void zdb_kv_hydrate_from_backend_nvs(zdb_t *db, const char *namespace_name)
 {
 #if defined(CONFIG_ZDB_KV_BACKEND_NVS) && (CONFIG_ZDB_KV_BACKEND_NVS)
 	struct nvs_fs *nvs;
@@ -644,6 +659,7 @@ static void zdb_kv_hydrate_from_backend(zdb_t *db, const char *namespace_name)
 	ARG_UNUSED(namespace_name);
 #endif
 }
+#endif /* disabled hydration */
 
 zdb_status_t zdb_kv_iter_open(zdb_kv_t *kv, zdb_kv_iter_t *out_iter)
 {
@@ -654,9 +670,13 @@ zdb_status_t zdb_kv_iter_open(zdb_kv_t *kv, zdb_kv_iter_t *out_iter)
 	}
 
 	ctx = zdb_kv_ctx_get_or_alloc(kv->db);
-	if ((ctx != NULL) && !ctx->hydrated) {
-		zdb_kv_hydrate_from_backend(kv->db, kv->namespace_name);
-		ctx->hydrated = true;
+	if (ctx != NULL) {
+		zdb_lock_write(kv->db);
+		if (!ctx->hydrated) {
+			zdb_kv_hydrate_from_backend(kv->db, kv->namespace_name);
+			ctx->hydrated = true;
+		}
+		zdb_unlock_write(kv->db);
 	}
 
 	(void)memset(out_iter, 0, sizeof(*out_iter));

@@ -117,7 +117,7 @@ static void test_key_from_index(uint32_t idx, char out_key[5])
 
 static bool test_find_fnv16_collision(char key_a[5], char key_b[5])
 {
-	uint32_t first_idx[65536];
+	static uint32_t first_idx[65536];
 	uint32_t i;
 	const uint32_t total = 17U * 17U * 17U * 17U;
 

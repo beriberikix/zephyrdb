@@ -933,6 +933,15 @@ zdb_status_t zdb_doc_delete(zdb_t *db, const char *collection_name,
 		return ZDB_ERR_INVAL;
 	}
 
+	if ((strlen(collection_name) == 0U) || (strlen(collection_name) > CONFIG_ZDB_MAX_KEY_LEN) ||
+	    (strlen(document_id) == 0U) || (strlen(document_id) > CONFIG_ZDB_MAX_KEY_LEN)) {
+		return ZDB_ERR_INVAL;
+	}
+
+	if (!zdb_doc_name_valid(collection_name) || !zdb_doc_name_valid(document_id)) {
+		return ZDB_ERR_INVAL;
+	}
+
 	/* Acquire write lock to prevent races with open/query */
 	lock_rc = zdb_lock_write(db);
 	if (lock_rc != ZDB_OK) {
