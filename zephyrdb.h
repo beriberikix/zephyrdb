@@ -1,8 +1,7 @@
 /*
- * ZephyrDB public API (first pass)
+ * ZephyrDB public API
  *
- * Scope: Core + KV + TS modules.
- * Document and FlatBuffers APIs are intentionally deferred.
+ * Core + KV + TS + DOC + Eventing + Shell modules.
  */
 
 #ifndef ZEPHYRDB_H_
@@ -99,16 +98,6 @@ extern "C"
 
 	typedef struct
 	{
-		uint32_t ts_recover_runs;
-		uint32_t ts_recover_failures;
-		uint64_t ts_recover_truncated_bytes;
-		uint32_t ts_crc_failures;
-		uint32_t ts_corrupt_records;
-		uint32_t ts_unsupported_versions;
-	} zdb_stats_t;
-
-	typedef struct
-	{
 		uint32_t recover_runs;
 		uint32_t recover_failures;
 		uint64_t recover_truncated_bytes;
@@ -134,23 +123,126 @@ extern "C"
 		uint32_t unsupported_versions;
 	} zdb_ts_stats_export_t;
 
+/*
+ * Safe defaults for Kconfig symbols used in struct definitions.
+ * These allow compilation in unit tests that bypass the Zephyr module system.
+ */
+#ifndef CONFIG_ZDB_MAX_KEY_LEN
+#define CONFIG_ZDB_MAX_KEY_LEN 48
+#endif
+
+/*
+ * Eventing types
+ */
+#if defined(CONFIG_ZDB_EVENTING) && (CONFIG_ZDB_EVENTING)
+
+	typedef enum
+	{
+		ZDB_EVENT_KV_SET = 0,
+		ZDB_EVENT_KV_DELETE,
+	} zdb_event_type_t;
+
 	typedef struct
 	{
-		/*
-		 * First-pass contract:
-		 * - KV path expects partition_ref to point to an initialized struct nvs_fs.
-		 * - TS path reserves this pointer for future storage object binding.
-		 */
-		const void *partition_ref;
+		zdb_event_type_t type;
+		char namespace_name[CONFIG_ZDB_MAX_KEY_LEN + 1];
+		char key[CONFIG_ZDB_MAX_KEY_LEN + 1];
+		size_t value_len;
+		uint64_t timestamp_ms;
+		zdb_status_t status;
+	} zdb_kv_event_t;
+
+	typedef struct
+	{
+		void (*notify)(const zdb_kv_event_t *event, void *user_ctx);
+		void *user_ctx;
+	} zdb_event_listener_t;
+
+#if defined(CONFIG_ZDB_TS) && (CONFIG_ZDB_TS)
+
+#ifndef CONFIG_ZDB_TS_STREAM_NAME_MAX_LEN
+#define CONFIG_ZDB_TS_STREAM_NAME_MAX_LEN 24
+#endif
+
+	typedef enum
+	{
+		ZDB_TS_EVENT_APPEND = 0,
+		ZDB_TS_EVENT_FLUSH,
+		ZDB_TS_EVENT_RECOVER,
+	} zdb_ts_event_type_t;
+
+	typedef struct
+	{
+		zdb_ts_event_type_t type;
+		char stream_name[CONFIG_ZDB_TS_STREAM_NAME_MAX_LEN + 1];
+		uint64_t timestamp_ms;
+		uint64_t sample_ts_ms;
+		int64_t sample_value;
+		size_t flushed_bytes;
+		size_t truncated_bytes;
+		zdb_status_t status;
+	} zdb_ts_event_t;
+
+	typedef struct
+	{
+		void (*notify)(const zdb_ts_event_t *event, void *user_ctx);
+		void *user_ctx;
+	} zdb_ts_event_listener_t;
+
+#endif /* CONFIG_ZDB_TS */
+
+#if defined(CONFIG_ZDB_DOC) && (CONFIG_ZDB_DOC)
+
+	typedef enum
+	{
+		ZDB_DOC_EVENT_CREATE = 0,
+		ZDB_DOC_EVENT_SAVE,
+		ZDB_DOC_EVENT_DELETE,
+	} zdb_doc_event_type_t;
+
+	typedef struct
+	{
+		zdb_doc_event_type_t type;
+		char collection_name[CONFIG_ZDB_MAX_KEY_LEN + 1];
+		char document_id[CONFIG_ZDB_MAX_KEY_LEN + 1];
+		uint64_t timestamp_ms;
+		size_t field_count;
+		size_t serialized_bytes;
+		zdb_status_t status;
+	} zdb_doc_event_t;
+
+	typedef struct
+	{
+		void (*notify)(const zdb_doc_event_t *event, void *user_ctx);
+		void *user_ctx;
+	} zdb_doc_event_listener_t;
+
+#endif /* CONFIG_ZDB_DOC */
+
+#endif /* CONFIG_ZDB_EVENTING */
+
+	typedef struct
+	{
+		const void *kv_backend_fs;
 		const char *lfs_mount_point;
-		const char *kv_namespace;
 		struct k_work_q *work_q;
-		uint16_t scan_yield_every_n;
+#if defined(CONFIG_ZDB_EVENTING) && (CONFIG_ZDB_EVENTING)
+		const zdb_event_listener_t *event_listeners;
+		size_t event_listener_count;
+#if defined(CONFIG_ZDB_TS) && (CONFIG_ZDB_TS)
+		const zdb_ts_event_listener_t *ts_event_listeners;
+		size_t ts_event_listener_count;
+#endif
+#if defined(CONFIG_ZDB_DOC) && (CONFIG_ZDB_DOC)
+		const zdb_doc_event_listener_t *doc_event_listeners;
+		size_t doc_event_listener_count;
+#endif
+#endif
 	} zdb_cfg_t;
 
 	typedef struct
 	{
-		struct k_rwlock rwlock;
+		struct k_mutex lock;
 		struct k_mem_slab *core_slab;
 		struct k_mem_slab *cursor_slab;
 		struct k_mem_slab *kv_io_slab;
@@ -159,14 +251,58 @@ extern "C"
 		void *kv_ctx;
 		void *ts_ctx;
 		const zdb_cfg_t *cfg;
-		zdb_stats_t stats;
+		zdb_ts_stats_t ts_stats;
+		zdb_health_t health;
+#if defined(CONFIG_ZDB_EVENTING) && (CONFIG_ZDB_EVENTING)
+		const zdb_event_listener_t *event_listeners;
+		size_t event_listener_count;
+#if defined(CONFIG_ZDB_TS) && (CONFIG_ZDB_TS)
+		const zdb_ts_event_listener_t *ts_event_listeners;
+		size_t ts_event_listener_count;
+#endif
+#if defined(CONFIG_ZDB_DOC) && (CONFIG_ZDB_DOC)
+		const zdb_doc_event_listener_t *doc_event_listeners;
+		size_t doc_event_listener_count;
+#endif
+#endif
 	} zdb_t;
+
+/*
+ * Static instance helper: declares Kconfig-backed slabs and wires them
+ * into a zdb_t.  Call zdb_init(&name, &cfg) before first use.
+ */
+#if defined(CONFIG_ZDB_KV) && (CONFIG_ZDB_KV)
+#define _ZDB_DEFINE_KV_IO_SLAB(name)  ZDB_DEFINE_KV_IO_SLAB(name);
+#define _ZDB_KV_IO_SLAB_INIT(name)    .kv_io_slab = &name,
+#else
+#define _ZDB_DEFINE_KV_IO_SLAB(name)
+#define _ZDB_KV_IO_SLAB_INIT(name)
+#endif
+
+#if defined(CONFIG_ZDB_TS) && (CONFIG_ZDB_TS)
+#define _ZDB_DEFINE_TS_INGEST_SLAB(name)  ZDB_DEFINE_TS_INGEST_SLAB(name);
+#define _ZDB_TS_INGEST_SLAB_INIT(name)    .ts_ingest_slab = &name,
+#else
+#define _ZDB_DEFINE_TS_INGEST_SLAB(name)
+#define _ZDB_TS_INGEST_SLAB_INIT(name)
+#endif
+
+#define ZDB_DEFINE_STATIC(db_name, cfg_name)                                       \
+	ZDB_DEFINE_CORE_SLAB(_zdb_core_##db_name);                                      \
+	ZDB_DEFINE_CURSOR_SLAB(_zdb_cursor_##db_name);                                   \
+	_ZDB_DEFINE_KV_IO_SLAB(_zdb_kv_io_##db_name)                                    \
+	_ZDB_DEFINE_TS_INGEST_SLAB(_zdb_ts_ingest_##db_name)                             \
+	static zdb_t db_name = {                                                          \
+		.core_slab = &_zdb_core_##db_name,                                              \
+		.cursor_slab = &_zdb_cursor_##db_name,                                          \
+		_ZDB_KV_IO_SLAB_INIT(_zdb_kv_io_##db_name)                                     \
+		_ZDB_TS_INGEST_SLAB_INIT(_zdb_ts_ingest_##db_name)                              \
+	}
 
 	typedef bool (*zdb_predicate_fn)(zdb_model_t model, const zdb_bytes_t *record, void *user_ctx);
 
 	/*
 	 * Cursor framework for cooperative scans.
-	 * Implementations should call k_yield according to scan_yield_every_n.
 	 */
 	typedef struct zdb_cursor
 	{
@@ -181,30 +317,24 @@ extern "C"
 		void *impl;
 	} zdb_cursor_t;
 
+	/*
+	 * Core API
+	 */
 	zdb_status_t zdb_init(zdb_t *db, const zdb_cfg_t *cfg);
 	zdb_status_t zdb_deinit(zdb_t *db);
 	zdb_health_t zdb_health(const zdb_t *db);
-	void zdb_stats_get(const zdb_t *db, zdb_stats_t *out_stats);
-	void zdb_stats_reset(zdb_t *db);
+	const char *zdb_status_str(zdb_status_t status);
+
 	void zdb_ts_stats_get(const zdb_t *db, zdb_ts_stats_t *out_stats);
 	void zdb_ts_stats_reset(zdb_t *db);
-
-	/*
-	 * Export TS stats in compact, transport-ready format with CRC.
-	 */
 	zdb_status_t zdb_ts_stats_export(const zdb_t *db, zdb_ts_stats_export_t *out_export);
-
-	/*
-	 * Validate exported TS stats CRC on deserialization.
-	 * Returns ZDB_OK if valid, ZDB_ERR_CORRUPT if CRC mismatch.
-	 */
-	zdb_status_t zdb_ts_stats_export_validate(const zdb_ts_stats_export_t *export);
+	zdb_status_t zdb_ts_stats_export_validate(const zdb_ts_stats_export_t *export_data);
 
 	zdb_status_t zdb_cursor_reset(zdb_cursor_t *cursor);
 	zdb_status_t zdb_cursor_close(zdb_cursor_t *cursor);
 
 /*
- * KV module (NVS-backed)
+ * KV module
  */
 #if defined(CONFIG_ZDB_KV) && (CONFIG_ZDB_KV)
 	typedef struct
@@ -218,18 +348,12 @@ extern "C"
 
 	zdb_status_t zdb_kv_set(zdb_kv_t *kv, const char *key, const void *value, size_t value_len);
 	zdb_status_t zdb_kv_get(zdb_kv_t *kv, const char *key, void *out_value,
-													size_t out_capacity, size_t *out_len);
+							size_t out_capacity, size_t *out_len);
 	zdb_status_t zdb_kv_delete(zdb_kv_t *kv, const char *key);
-
-	/*
-	 * Exposes key->numeric-id mapping required by NVS.
-	 * Hash algorithm is implementation-defined but stable within a release line.
-	 */
-	uint16_t zdb_kv_key_to_id(const char *key);
 #endif /* CONFIG_ZDB_KV */
 
 /*
- * Time-series module (LittleFS append-log)
+ * Time-series module
  */
 #if defined(CONFIG_ZDB_TS) && (CONFIG_ZDB_TS)
 	typedef struct
@@ -259,6 +383,8 @@ extern "C"
 		uint64_t to_ts_ms;
 	} zdb_ts_window_t;
 
+#define ZDB_TS_WINDOW_ALL ((zdb_ts_window_t){.from_ts_ms = 0, .to_ts_ms = UINT64_MAX})
+
 	typedef struct
 	{
 		zdb_ts_agg_t agg;
@@ -271,28 +397,155 @@ extern "C"
 
 	zdb_status_t zdb_ts_append_i64(zdb_ts_t *ts, const zdb_ts_sample_i64_t *sample);
 	zdb_status_t zdb_ts_append_batch_i64(zdb_ts_t *ts, const zdb_ts_sample_i64_t *samples,
-																			 size_t sample_count);
+										 size_t sample_count);
 
-	/*
-	 * Schedules background flush through Zephyr workqueue.
-	 */
 	zdb_status_t zdb_ts_flush_async(zdb_ts_t *ts);
 	zdb_status_t zdb_ts_flush_sync(zdb_ts_t *ts, k_timeout_t timeout);
 
 	zdb_status_t zdb_ts_query_aggregate(zdb_ts_t *ts, zdb_ts_window_t window,
-																			zdb_ts_agg_t agg, zdb_ts_agg_result_t *out_result);
+										zdb_ts_agg_t agg, zdb_ts_agg_result_t *out_result);
 
-	/*
-	 * Scans stream file and truncates trailing invalid/partial records.
-	 * out_truncated_bytes may be NULL.
-	 */
 	zdb_status_t zdb_ts_recover_stream(zdb_ts_t *ts, size_t *out_truncated_bytes);
 
 	zdb_status_t zdb_ts_cursor_open(zdb_ts_t *ts, zdb_ts_window_t window,
-																	zdb_predicate_fn predicate, void *predicate_ctx,
-																	zdb_cursor_t *out_cursor);
+									zdb_predicate_fn predicate, void *predicate_ctx,
+									zdb_cursor_t *out_cursor);
 	zdb_status_t zdb_cursor_next(zdb_cursor_t *cursor, zdb_bytes_t *out_record);
 #endif /* CONFIG_ZDB_TS */
+
+/*
+ * FlatBuffers helpers
+ */
+#if defined(CONFIG_ZDB_FLATBUFFERS) && (CONFIG_ZDB_FLATBUFFERS)
+#if defined(CONFIG_ZDB_TS) && (CONFIG_ZDB_TS)
+	zdb_status_t zdb_ts_sample_i64_export_flatbuffer(const zdb_ts_sample_i64_t *sample,
+													 uint8_t *out_buf, size_t out_capacity,
+													 size_t *out_len);
+#endif
+#endif /* CONFIG_ZDB_FLATBUFFERS */
+
+/*
+ * Document model (Stage 3)
+ */
+#if defined(CONFIG_ZDB_DOC) && (CONFIG_ZDB_DOC)
+
+	typedef enum
+	{
+		ZDB_DOC_FIELD_NULL = 0,
+		ZDB_DOC_FIELD_INT64,
+		ZDB_DOC_FIELD_DOUBLE,
+		ZDB_DOC_FIELD_STRING,
+		ZDB_DOC_FIELD_BOOL,
+		ZDB_DOC_FIELD_BYTES,
+		ZDB_DOC_FIELD_OBJECT,
+		ZDB_DOC_FIELD_ARRAY,
+	} zdb_doc_field_type_t;
+
+	struct zdb_doc;
+
+	typedef union
+	{
+		int64_t i64;
+		double f64;
+		const char *str;
+		bool b;
+		zdb_bytes_t bytes;
+		struct zdb_doc *obj;
+	} zdb_doc_field_value_t;
+
+	typedef struct
+	{
+		const char *name;
+		zdb_doc_field_type_t type;
+		zdb_doc_field_value_t value;
+	} zdb_doc_field_t;
+
+	typedef struct zdb_doc
+	{
+		zdb_t *db;
+		const char *collection_name;
+		const char *document_id;
+		zdb_doc_field_t *fields;
+		size_t field_count;
+		size_t max_fields;
+		uint64_t created_ms;
+		uint64_t updated_ms;
+		bool valid;
+	} zdb_doc_t;
+
+	typedef struct
+	{
+		const char *field_name;
+		zdb_doc_field_type_t type;
+		double numeric_value;
+		const char *string_value;
+		bool bool_value;
+	} zdb_doc_query_filter_t;
+
+	typedef struct
+	{
+		zdb_doc_query_filter_t *filters;
+		size_t filter_count;
+		uint64_t from_ms;
+		uint64_t to_ms;
+		uint32_t limit;
+	} zdb_doc_query_t;
+
+	typedef struct
+	{
+		const char *document_id;
+		const char *collection_name;
+		uint64_t created_ms;
+		uint64_t updated_ms;
+		uint32_t field_count;
+	} zdb_doc_metadata_t;
+
+	zdb_status_t zdb_doc_create(zdb_t *db, const char *collection_name,
+								const char *document_id, zdb_doc_t *out_doc);
+	zdb_status_t zdb_doc_open(zdb_t *db, const char *collection_name,
+							  const char *document_id, zdb_doc_t *out_doc);
+	zdb_status_t zdb_doc_save(zdb_doc_t *doc);
+	zdb_status_t zdb_doc_delete(zdb_t *db, const char *collection_name,
+								const char *document_id);
+	zdb_status_t zdb_doc_close(zdb_doc_t *doc);
+
+	zdb_status_t zdb_doc_field_set_i64(zdb_doc_t *doc, const char *field_name,
+									   int64_t value);
+	zdb_status_t zdb_doc_field_set_f64(zdb_doc_t *doc, const char *field_name,
+									   double value);
+	zdb_status_t zdb_doc_field_set_string(zdb_doc_t *doc, const char *field_name,
+										  const char *value);
+	zdb_status_t zdb_doc_field_set_bool(zdb_doc_t *doc, const char *field_name,
+										bool value);
+	zdb_status_t zdb_doc_field_set_bytes(zdb_doc_t *doc, const char *field_name,
+										 const void *value, size_t len);
+
+	zdb_status_t zdb_doc_field_get_i64(const zdb_doc_t *doc, const char *field_name,
+									   int64_t *out_value);
+	zdb_status_t zdb_doc_field_get_f64(const zdb_doc_t *doc, const char *field_name,
+									   double *out_value);
+	zdb_status_t zdb_doc_field_get_string(const zdb_doc_t *doc, const char *field_name,
+										  const char **out_value);
+	zdb_status_t zdb_doc_field_get_bool(const zdb_doc_t *doc, const char *field_name,
+										bool *out_value);
+	zdb_status_t zdb_doc_field_get_bytes(const zdb_doc_t *doc, const char *field_name,
+										 zdb_bytes_t *out_value);
+
+	zdb_status_t zdb_doc_query(zdb_t *db, const zdb_doc_query_t *query,
+							   zdb_doc_metadata_t *out_metadata, size_t *out_count);
+	zdb_status_t zdb_doc_metadata_free(zdb_doc_metadata_t *metadata, size_t count);
+
+	zdb_status_t zdb_doc_export_flatbuffer(zdb_doc_t *doc, uint8_t *out_buf,
+										   size_t out_capacity, size_t *out_len);
+
+#endif /* CONFIG_ZDB_DOC */
+
+/*
+ * Shell interface
+ */
+#if defined(CONFIG_ZDB_SHELL) && (CONFIG_ZDB_SHELL)
+	void zdb_shell_register(zdb_t *db);
+#endif /* CONFIG_ZDB_SHELL */
 
 #ifdef __cplusplus
 }
