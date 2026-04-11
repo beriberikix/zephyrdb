@@ -7,28 +7,10 @@ This page summarizes the currently implemented ZephyrDB public APIs.
 - Core APIs are available when `CONFIG_ZEPHYRDB=y`.
 - KV APIs are available when `CONFIG_ZDB_KV=y`.
 - TS APIs are available when `CONFIG_ZDB_TS=y`.
-- Document APIs are available when `CONFIG_ZDB_DOC=y`. **Note:** `CONFIG_ZDB_DOC` requires `CONFIG_ZDB_TS=y`.
+- Document APIs are available when `CONFIG_ZDB_DOC=y`. Requires `ZDB_CORE` and a storage backend (`FILE_SYSTEM`, `NVS`, or `ZMS`).
 - FlatBuffers export helper requires `CONFIG_ZDB_FLATBUFFERS=y` and `CONFIG_FLATCC=y`.
 - Eventing APIs are available when `CONFIG_ZDB_EVENTING=y`.
 - zbus adapter APIs are available when `CONFIG_ZDB_EVENTING_ZBUS=y`.
-
-## Known Limitations
-
-### Key-Value (NVS & ZMS Backends)
-
-- **Hash collision risk:** Both backends use hash-based key IDs (16-bit for NVS, 32-bit for ZMS) with no collision detection. When collisions occur, keys silently overwrite each other.
-  - **NVS (16-bit hash):** ~50% collision probability at ~256 keys; ~99% at ~1000 keys.
-  - **ZMS (32-bit hash):** Better but still vulnerable at scale (2+ billion keys).
-  - **Mitigation:** Validate your keyspace size and consider implementing application-level collision avoidance if needed.
-
-### Time-Series
-
-- **Cursor I/O performance:** `zdb_cursor_next()` opens a new file handle on each call instead of caching. For large result sets (hundreds of samples), prefer `zdb_ts_query_aggregate()` instead of iteration.
-- **`zdb_ts_flush_sync()` scheduling:** Uses `k_yield()` busy-wait instead of proper event signaling. On cooperative-only schedulers or when the work queue runs at same/lower priority, this may not respond within the timeout.
-
-### Document Model
-
-- **FlatBuffers export placeholder:** `zdb_doc_export_flatbuffer()` is declared but not fully implemented. The function returns `ZDB_OK` but produces invalid/uninitialized buffer data. **Status:** Marked for implementation; use `zdb_ts_sample_i64_export_flatbuffer()` as a reference pattern.
 
 ## Core
 
@@ -47,6 +29,13 @@ This page summarizes the currently implemented ZephyrDB public APIs.
 - `zdb_kv_set(kv, key, value, value_len)`
 - `zdb_kv_get(kv, key, out_value, out_capacity, out_len)`
 - `zdb_kv_delete(kv, key)`
+- `zdb_kv_iter_open(kv, out_iter)`
+- `zdb_kv_iter_next(iter, out_key, out_key_capacity, out_key_len, out_value, out_value_capacity, out_value_len)`
+- `zdb_kv_iter_close(iter)`
+
+Notes:
+
+- The iterator tracks keys set/deleted during the current session. Cross-session iteration from persisted data requires namespace metadata in the on-disk format (not yet implemented).
 
 ## Eventing
 
@@ -135,7 +124,7 @@ Notes:
 - `zdb_doc_field_get_bytes(doc, field_name, out_value)`
 - `zdb_doc_query(db, query, out_metadata, out_count)`
 - `zdb_doc_metadata_free(metadata, count)`
-- `zdb_doc_export_flatbuffer(doc, out_buf, out_capacity, out_len)` **(TODO: not implemented)** — Currently returns success but produces invalid buffer data. See [Known Limitations](#document-model) above.
+- `zdb_doc_export_flatbuffer(doc, out_buf, out_capacity, out_len)`
 
 ## Source of Truth
 

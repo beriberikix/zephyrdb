@@ -80,7 +80,9 @@ extern "C"
 	{
 		ZDB_BACKEND_NONE = 0,
 		ZDB_BACKEND_NVS,
+		ZDB_BACKEND_ZMS,
 		ZDB_BACKEND_LFS,
+		ZDB_BACKEND_FCB,
 	} zdb_backend_t;
 
 	typedef enum
@@ -97,15 +99,93 @@ extern "C"
 		size_t len;
 	} zdb_bytes_t;
 
+#ifndef CONFIG_ZDB_MAX_KEY_LEN
+#define CONFIG_ZDB_MAX_KEY_LEN 48
+#endif
+
+	typedef enum
+	{
+		ZDB_EVENT_KV_SET = 0,
+		ZDB_EVENT_KV_DELETE,
+	} zdb_event_type_t;
+
 	typedef struct
 	{
-		uint32_t ts_recover_runs;
-		uint32_t ts_recover_failures;
-		uint64_t ts_recover_truncated_bytes;
-		uint32_t ts_crc_failures;
-		uint32_t ts_corrupt_records;
-		uint32_t ts_unsupported_versions;
-	} zdb_stats_t;
+		zdb_event_type_t type;
+		char namespace_name[CONFIG_ZDB_MAX_KEY_LEN + 1];
+		char key[CONFIG_ZDB_MAX_KEY_LEN + 1];
+		size_t value_len;
+		uint64_t timestamp_ms;
+		zdb_status_t status;
+	} zdb_kv_event_t;
+
+#if defined(CONFIG_ZDB_TS) && (CONFIG_ZDB_TS)
+#ifndef CONFIG_ZDB_TS_STREAM_NAME_MAX_LEN
+#define CONFIG_ZDB_TS_STREAM_NAME_MAX_LEN 24
+#endif
+	typedef enum
+	{
+		ZDB_TS_EVENT_APPEND = 0,
+		ZDB_TS_EVENT_FLUSH,
+		ZDB_TS_EVENT_RECOVER,
+	} zdb_ts_event_type_t;
+
+	typedef struct
+	{
+		zdb_ts_event_type_t type;
+		char stream_name[CONFIG_ZDB_TS_STREAM_NAME_MAX_LEN + 1];
+		uint64_t timestamp_ms;
+		uint64_t sample_ts_ms;
+		int64_t sample_value;
+		size_t flushed_bytes;
+		size_t truncated_bytes;
+		zdb_status_t status;
+	} zdb_ts_event_t;
+
+	typedef void (*zdb_ts_event_listener_fn_t)(const zdb_ts_event_t *event, void *user_ctx);
+
+	typedef struct
+	{
+		zdb_ts_event_listener_fn_t notify;
+		void *user_ctx;
+	} zdb_ts_event_listener_t;
+#endif /* CONFIG_ZDB_TS */
+
+#if defined(CONFIG_ZDB_DOC) && (CONFIG_ZDB_DOC)
+	typedef enum
+	{
+		ZDB_DOC_EVENT_CREATE = 0,
+		ZDB_DOC_EVENT_SAVE,
+		ZDB_DOC_EVENT_DELETE,
+	} zdb_doc_event_type_t;
+
+	typedef struct
+	{
+		zdb_doc_event_type_t type;
+		char collection_name[CONFIG_ZDB_MAX_KEY_LEN + 1];
+		char document_id[CONFIG_ZDB_MAX_KEY_LEN + 1];
+		uint64_t timestamp_ms;
+		size_t field_count;
+		size_t serialized_bytes;
+		zdb_status_t status;
+	} zdb_doc_event_t;
+
+	typedef void (*zdb_doc_event_listener_fn_t)(const zdb_doc_event_t *event, void *user_ctx);
+
+	typedef struct
+	{
+		zdb_doc_event_listener_fn_t notify;
+		void *user_ctx;
+	} zdb_doc_event_listener_t;
+#endif /* CONFIG_ZDB_DOC */
+
+	typedef void (*zdb_event_listener_fn_t)(const zdb_kv_event_t *event, void *user_ctx);
+
+	typedef struct
+	{
+		zdb_event_listener_fn_t notify;
+		void *user_ctx;
+	} zdb_event_listener_t;
 
 	typedef struct
 	{
@@ -137,20 +217,31 @@ extern "C"
 	typedef struct
 	{
 		/*
-		 * First-pass contract:
-		 * - KV path expects partition_ref to point to an initialized struct nvs_fs.
-		 * - TS path reserves this pointer for future storage object binding.
+		 * KV path expects kv_backend_fs to point to an initialized
+		 * struct nvs_fs (NVS) or struct zms_fs (ZMS).
+		 * TS path uses lfs_mount_point for append-log files.
 		 */
-		const void *partition_ref;
+		const void *kv_backend_fs;
 		const char *lfs_mount_point;
-		const char *kv_namespace;
 		struct k_work_q *work_q;
 		uint16_t scan_yield_every_n;
+#if defined(CONFIG_ZDB_EVENTING) && (CONFIG_ZDB_EVENTING)
+		const zdb_event_listener_t *event_listeners;
+		size_t event_listener_count;
+#if defined(CONFIG_ZDB_TS) && (CONFIG_ZDB_TS)
+		const zdb_ts_event_listener_t *ts_event_listeners;
+		size_t ts_event_listener_count;
+#endif
+#if defined(CONFIG_ZDB_DOC) && (CONFIG_ZDB_DOC)
+		const zdb_doc_event_listener_t *doc_event_listeners;
+		size_t doc_event_listener_count;
+#endif
+#endif
 	} zdb_cfg_t;
 
 	typedef struct
 	{
-		struct k_rwlock rwlock;
+		struct k_mutex lock;
 		struct k_mem_slab *core_slab;
 		struct k_mem_slab *cursor_slab;
 		struct k_mem_slab *kv_io_slab;
@@ -159,7 +250,20 @@ extern "C"
 		void *kv_ctx;
 		void *ts_ctx;
 		const zdb_cfg_t *cfg;
-		zdb_stats_t stats;
+		zdb_ts_stats_t ts_stats;
+		zdb_health_t health;
+#if defined(CONFIG_ZDB_EVENTING) && (CONFIG_ZDB_EVENTING)
+		const zdb_event_listener_t *event_listeners;
+		size_t event_listener_count;
+#if defined(CONFIG_ZDB_TS) && (CONFIG_ZDB_TS)
+		const zdb_ts_event_listener_t *ts_event_listeners;
+		size_t ts_event_listener_count;
+#endif
+#if defined(CONFIG_ZDB_DOC) && (CONFIG_ZDB_DOC)
+		const zdb_doc_event_listener_t *doc_event_listeners;
+		size_t doc_event_listener_count;
+#endif
+#endif
 	} zdb_t;
 
 	typedef bool (*zdb_predicate_fn)(zdb_model_t model, const zdb_bytes_t *record, void *user_ctx);
@@ -184,8 +288,6 @@ extern "C"
 	zdb_status_t zdb_init(zdb_t *db, const zdb_cfg_t *cfg);
 	zdb_status_t zdb_deinit(zdb_t *db);
 	zdb_health_t zdb_health(const zdb_t *db);
-	void zdb_stats_get(const zdb_t *db, zdb_stats_t *out_stats);
-	void zdb_stats_reset(zdb_t *db);
 	void zdb_ts_stats_get(const zdb_t *db, zdb_ts_stats_t *out_stats);
 	void zdb_ts_stats_reset(zdb_t *db);
 
@@ -213,6 +315,13 @@ extern "C"
 		const char *namespace_name;
 	} zdb_kv_t;
 
+	typedef struct
+	{
+		zdb_kv_t *kv;
+		size_t position;
+		void *impl;
+	} zdb_kv_iter_t;
+
 	zdb_status_t zdb_kv_open(zdb_t *db, const char *namespace_name, zdb_kv_t *kv);
 	zdb_status_t zdb_kv_close(zdb_kv_t *kv);
 
@@ -220,12 +329,12 @@ extern "C"
 	zdb_status_t zdb_kv_get(zdb_kv_t *kv, const char *key, void *out_value,
 													size_t out_capacity, size_t *out_len);
 	zdb_status_t zdb_kv_delete(zdb_kv_t *kv, const char *key);
-
-	/*
-	 * Exposes key->numeric-id mapping required by NVS.
-	 * Hash algorithm is implementation-defined but stable within a release line.
-	 */
-	uint16_t zdb_kv_key_to_id(const char *key);
+	zdb_status_t zdb_kv_iter_open(zdb_kv_t *kv, zdb_kv_iter_t *out_iter);
+	zdb_status_t zdb_kv_iter_next(zdb_kv_iter_t *iter, char *out_key,
+							   size_t out_key_capacity, size_t *out_key_len,
+							   void *out_value, size_t out_value_capacity,
+							   size_t *out_value_len);
+	zdb_status_t zdb_kv_iter_close(zdb_kv_iter_t *iter);
 #endif /* CONFIG_ZDB_KV */
 
 /*
@@ -293,6 +402,120 @@ extern "C"
 																	zdb_cursor_t *out_cursor);
 	zdb_status_t zdb_cursor_next(zdb_cursor_t *cursor, zdb_bytes_t *out_record);
 #endif /* CONFIG_ZDB_TS */
+
+#if defined(CONFIG_ZDB_DOC) && (CONFIG_ZDB_DOC)
+
+	typedef enum
+	{
+		ZDB_DOC_FIELD_NULL = 0,
+		ZDB_DOC_FIELD_INT64,
+		ZDB_DOC_FIELD_DOUBLE,
+		ZDB_DOC_FIELD_STRING,
+		ZDB_DOC_FIELD_BOOL,
+		ZDB_DOC_FIELD_BYTES,
+		ZDB_DOC_FIELD_OBJECT,
+		ZDB_DOC_FIELD_ARRAY,
+	} zdb_doc_field_type_t;
+
+	typedef union
+	{
+		int64_t i64;
+		double f64;
+		const char *str;
+		bool b;
+		zdb_bytes_t bytes;
+		struct zdb_doc *obj;
+	} zdb_doc_field_value_t;
+
+	typedef struct
+	{
+		const char *name;
+		zdb_doc_field_type_t type;
+		zdb_doc_field_value_t value;
+	} zdb_doc_field_t;
+
+	typedef struct zdb_doc
+	{
+		zdb_t *db;
+		const char *collection_name;
+		const char *document_id;
+		zdb_doc_field_t *fields;
+		size_t field_count;
+		size_t max_fields;
+		uint64_t created_ms;
+		uint64_t updated_ms;
+		bool valid;
+	} zdb_doc_t;
+
+	typedef struct
+	{
+		const char *field_name;
+		zdb_doc_field_type_t type;
+		double numeric_value;
+		const char *string_value;
+		bool bool_value;
+	} zdb_doc_query_filter_t;
+
+	typedef struct
+	{
+		zdb_doc_query_filter_t *filters;
+		size_t filter_count;
+		uint64_t from_ms;
+		uint64_t to_ms;
+		uint32_t limit;
+	} zdb_doc_query_t;
+
+	typedef struct
+	{
+		const char *document_id;
+		const char *collection_name;
+		uint64_t created_ms;
+		uint64_t updated_ms;
+		uint32_t field_count;
+	} zdb_doc_metadata_t;
+
+	typedef struct
+	{
+		const char *collection_name;
+		const char *document_id;
+	} zdb_doc_manifest_entry_t;
+
+	zdb_status_t zdb_doc_create(zdb_t *db, const char *collection_name,
+				    const char *document_id, zdb_doc_t *out_doc);
+	zdb_status_t zdb_doc_open(zdb_t *db, const char *collection_name,
+				  const char *document_id, zdb_doc_t *out_doc);
+	zdb_status_t zdb_doc_save(zdb_doc_t *doc);
+	zdb_status_t zdb_doc_delete(zdb_t *db, const char *collection_name,
+				    const char *document_id);
+	zdb_status_t zdb_doc_close(zdb_doc_t *doc);
+
+	zdb_status_t zdb_doc_field_set_i64(zdb_doc_t *doc, const char *field_name,
+					   int64_t value);
+	zdb_status_t zdb_doc_field_set_f64(zdb_doc_t *doc, const char *field_name,
+					   double value);
+	zdb_status_t zdb_doc_field_set_string(zdb_doc_t *doc, const char *field_name,
+					      const char *value);
+	zdb_status_t zdb_doc_field_set_bool(zdb_doc_t *doc, const char *field_name,
+					    bool value);
+	zdb_status_t zdb_doc_field_set_bytes(zdb_doc_t *doc, const char *field_name,
+					     const void *value, size_t len);
+
+	zdb_status_t zdb_doc_field_get_i64(const zdb_doc_t *doc, const char *field_name,
+					   int64_t *out_value);
+	zdb_status_t zdb_doc_field_get_f64(const zdb_doc_t *doc, const char *field_name,
+					   double *out_value);
+	zdb_status_t zdb_doc_field_get_string(const zdb_doc_t *doc, const char *field_name,
+					      const char **out_value);
+	zdb_status_t zdb_doc_field_get_bool(const zdb_doc_t *doc, const char *field_name,
+					    bool *out_value);
+	zdb_status_t zdb_doc_field_get_bytes(const zdb_doc_t *doc, const char *field_name,
+					     zdb_bytes_t *out_value);
+
+	zdb_status_t zdb_doc_query(zdb_t *db, const zdb_doc_query_t *query,
+				   zdb_doc_metadata_t *out_metadata, size_t *out_count);
+	zdb_status_t zdb_doc_metadata_free(zdb_doc_metadata_t *metadata, size_t count);
+
+#endif /* CONFIG_ZDB_DOC */
 
 #ifdef __cplusplus
 }

@@ -4,7 +4,7 @@
  *
  * Unit tests for ZephyrDB DOC (Document) module.
  * Tests critical APIs: zdb_doc_create, zdb_doc_save, zdb_doc_field_set/get, zdb_doc_query.
- * Note: Requires CONFIG_ZDB_FLATBUFFERS and CONFIG_ZDB_TS.
+ * Note: Requires CONFIG_ZDB_DOC (depends on ZDB_CORE + storage backend).
  */
 
 #include <zephyr/ztest.h>
@@ -13,6 +13,7 @@
 #include "../fixtures/common.h"
 #include <string.h>
 #include <errno.h>
+#include <zephyr/fs/fs.h>
 
 /* Test instance */
 ZDB_TEST_INSTANCE_DEFINE(g_test_db);
@@ -417,6 +418,87 @@ static void test_doc_query_filters(void)
 	}
 }
 
+static void test_doc_rejects_path_traversal_names(void)
+{
+	zdb_doc_t doc;
+	zdb_status_t rc;
+
+	rc = zdb_doc_create(&g_test_db, "..", "ok", &doc);
+	assert_zdb_eq(rc, ZDB_ERR_INVAL);
+
+	rc = zdb_doc_create(&g_test_db, "users/evil", "ok", &doc);
+	assert_zdb_eq(rc, ZDB_ERR_INVAL);
+
+	rc = zdb_doc_create(&g_test_db, "users", "../escape", &doc);
+	assert_zdb_eq(rc, ZDB_ERR_INVAL);
+
+	rc = zdb_doc_create(&g_test_db, "users", "bad\\name", &doc);
+	assert_zdb_eq(rc, ZDB_ERR_INVAL);
+}
+
+static void test_doc_open_fails_on_header_crc_corruption(void)
+{
+	zdb_doc_t doc;
+	zdb_doc_t reopened;
+	struct fs_file_t file;
+	zdb_status_t rc;
+	int fs_rc;
+
+	struct zdb_doc_hdr_v1_test {
+		uint32_t magic_le;
+		uint16_t version_le;
+		uint16_t field_count_le;
+		uint64_t created_ms_le;
+		uint64_t updated_ms_le;
+		uint32_t crc_le;
+	} __packed hdr;
+
+	char path[160];
+
+	rc = zdb_doc_create(&g_test_db, "users", "crc_doc", &doc);
+	if (rc != ZDB_OK) {
+		zskip("DOC module not available");
+		return;
+	}
+
+	rc = zdb_doc_field_set_i64(&doc, "age", 33);
+	assert_zdb_ok(rc);
+
+	rc = zdb_doc_save(&doc);
+	assert_zdb_ok(rc);
+
+	rc = zdb_doc_close(&doc);
+	assert_zdb_ok(rc);
+
+#if defined(CONFIG_ZDB_DOC_BACKEND_LITTLEFS) && (CONFIG_ZDB_DOC_BACKEND_LITTLEFS)
+	(void)snprintf(path, sizeof(path), "%s/%s/%s/%s%s", "/lfs", "zdb_docs", "users", "crc_doc",
+		       ".zdoc");
+
+	fs_file_t_init(&file);
+	fs_rc = fs_open(&file, path, FS_O_READ | FS_O_WRITE);
+	zassert_equal(fs_rc, 0, "Failed opening saved doc file: %d", fs_rc);
+
+	fs_rc = fs_read(&file, &hdr, sizeof(hdr));
+	zassert_equal(fs_rc, (int)sizeof(hdr), "Failed reading doc header: %d", fs_rc);
+
+	hdr.crc_le ^= 0x1U;
+
+	fs_rc = fs_seek(&file, 0, FS_SEEK_SET);
+	zassert_equal(fs_rc, 0, "Failed seeking to header start: %d", fs_rc);
+
+	fs_rc = fs_write(&file, &hdr, sizeof(hdr));
+	zassert_equal(fs_rc, (int)sizeof(hdr), "Failed writing corrupted header: %d", fs_rc);
+
+	fs_rc = fs_close(&file);
+	zassert_equal(fs_rc, 0, "Failed closing doc file: %d", fs_rc);
+
+	rc = zdb_doc_open(&g_test_db, "users", "crc_doc", &reopened);
+	assert_zdb_eq(rc, ZDB_ERR_CORRUPT);
+#else
+	zskip("CRC corruption test requires filesystem DOC backend");
+#endif
+}
+
 /* ===== Test Suite Registration ===== */
 
 ztest_suite(zephyrdb_doc_basic, doc_test_setup, doc_test_teardown,
@@ -432,3 +514,5 @@ ztest_unit_test(test_doc_open_existing);
 ztest_unit_test(test_doc_delete_success);
 ztest_unit_test(test_doc_export_flatbuffer);
 ztest_unit_test(test_doc_query_filters);
+ztest_unit_test(test_doc_rejects_path_traversal_names);
+ztest_unit_test(test_doc_open_fails_on_header_crc_corruption);
