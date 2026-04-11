@@ -5,7 +5,14 @@
 .west/
 
 # Zephyr checkout created by `west init` in this repo
-zephyr/
+tools/zephyr/
+
+# West imported projects in this workspace
+bootloader/
+modules/
+tools/edtt/
+tools/net-tools/
+samples/*/modules/
 
 # Build output
 build/

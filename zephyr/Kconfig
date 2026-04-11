@@ -1,0 +1,3 @@
+# ZephyrDB module entry Kconfig wrapper
+
+rsource "../Kconfig.zephyrdb"
