@@ -65,6 +65,8 @@ if (rc != ZDB_OK) {
 }
 ```
 
+For a complete standalone application example, see [zephyrdb-example](https://github.com/beriberikix/zephyrdb-example).
+
 ## Documentation
 
 - [Documentation Index](docs/README.md)
