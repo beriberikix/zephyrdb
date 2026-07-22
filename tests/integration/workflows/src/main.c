@@ -258,23 +258,19 @@ ZTEST(workflows, test_stats_export_and_validate)
 	rc = zdb_ts_stats_export_validate(&export_data);
 	zassert_equal(rc, ZDB_OK, "validate of fresh export failed: %d", rc);
 
-	/* Tampering with a CRC-covered byte is detected. */
+	/* Tampering with any byte of the payload is detected. */
 	export_data.version ^= 0xFFU;
 	rc = zdb_ts_stats_export_validate(&export_data);
-	zassert_equal(rc, ZDB_ERR_CORRUPT, "tampered export should be CORRUPT, got %d", rc);
+	zassert_equal(rc, ZDB_ERR_CORRUPT, "tampered version should be CORRUPT, got %d", rc);
 	export_data.version ^= 0xFFU;
 
-	/*
-	 * FIXME(characterization): the export CRC is computed over
-	 * offsetof(zdb_ts_stats_export_t, crc) — only version+reserved —
-	 * because the crc field sits at the front of the struct.  Tampering
-	 * with the counters is currently NOT detected.  Flipped when the CRC
-	 * computation is fixed to cover the whole payload.
-	 */
 	export_data.corrupt_records ^= 0xFFU;
 	rc = zdb_ts_stats_export_validate(&export_data);
-	zassert_equal(rc, ZDB_OK, "characterization: counter tamper undetected, got %d", rc);
+	zassert_equal(rc, ZDB_ERR_CORRUPT, "tampered counter should be CORRUPT, got %d", rc);
 	export_data.corrupt_records ^= 0xFFU;
+
+	rc = zdb_ts_stats_export_validate(&export_data);
+	zassert_equal(rc, ZDB_OK, "untampered export failed validation: %d", rc);
 
 	zassert_equal(zdb_ts_stats_export(NULL, &export_data), ZDB_ERR_INVAL);
 	zassert_equal(zdb_ts_stats_export_validate(NULL), ZDB_ERR_INVAL);

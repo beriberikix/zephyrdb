@@ -171,17 +171,12 @@ ZTEST(kv_suite, test_kv_set_same_value_twice)
 	rc = zdb_kv_set(&kv, "sv_key", &value, sizeof(value));
 	zassert_equal(rc, ZDB_OK, "first set failed: %d", rc);
 
-	rc = zdb_kv_set(&kv, "sv_key", &value, sizeof(value));
-#if defined(CONFIG_ZDB_KV_BACKEND_NVS)
 	/*
-	 * FIXME(characterization): nvs_write() returns 0 when the stored data
-	 * is byte-identical (nothing rewritten), which zdb_kv_set currently
-	 * misreports as ZDB_ERR_IO.  Flipped to ZDB_OK by the KV v2 fix.
+	 * Backends may skip the flash write entirely for byte-identical data
+	 * (nvs_write returns 0); that is still a successful set.
 	 */
-	zassert_equal(rc, ZDB_ERR_IO, "expected current IO misreport, got %d", rc);
-#else
+	rc = zdb_kv_set(&kv, "sv_key", &value, sizeof(value));
 	zassert_equal(rc, ZDB_OK, "identical rewrite failed: %d", rc);
-#endif
 
 	rc = zdb_kv_get(&kv, "sv_key", &readback, sizeof(readback), &out_len);
 	zassert_equal(rc, ZDB_OK, "get failed: %d", rc);
@@ -289,20 +284,25 @@ ZTEST(kv_suite, test_kv_namespace_isolation)
 	rc = zdb_kv_set(&kv_b, "shared_key", &value_b, sizeof(value_b));
 	zassert_equal(rc, ZDB_OK, "set ns_b failed: %d", rc);
 
-	/*
-	 * FIXME(characterization): the backend record ID is derived from the
-	 * key alone, so the two namespaces share one storage slot and the
-	 * second write overwrites the first.  Both reads currently return
-	 * value_b.  Flipped to true isolation by the KV v2 fix.
-	 */
+	/* Each namespace keeps its own value for the same key name. */
 	rc = zdb_kv_get(&kv_a, "shared_key", &readback, sizeof(readback), &out_len);
 	zassert_equal(rc, ZDB_OK, "get ns_a failed: %d", rc);
-	zassert_equal(readback, value_b,
-		      "characterization: ns_a expected aliased value_b, got %u", readback);
+	zassert_equal(readback, value_a, "ns_a value corrupted: %u != %u", readback, value_a);
 
 	rc = zdb_kv_get(&kv_b, "shared_key", &readback, sizeof(readback), &out_len);
 	zassert_equal(rc, ZDB_OK, "get ns_b failed: %d", rc);
-	zassert_equal(readback, value_b, "get ns_b value mismatch: %u", readback);
+	zassert_equal(readback, value_b, "ns_b value corrupted: %u != %u", readback, value_b);
+
+	/* Deleting in one namespace must not touch the other. */
+	rc = zdb_kv_delete(&kv_a, "shared_key");
+	zassert_equal(rc, ZDB_OK, "delete ns_a failed: %d", rc);
+
+	rc = zdb_kv_get(&kv_a, "shared_key", &readback, sizeof(readback), &out_len);
+	zassert_equal(rc, ZDB_ERR_NOT_FOUND, "ns_a key should be gone, got %d", rc);
+
+	rc = zdb_kv_get(&kv_b, "shared_key", &readback, sizeof(readback), &out_len);
+	zassert_equal(rc, ZDB_OK, "ns_b lost its value after ns_a delete: %d", rc);
+	zassert_equal(readback, value_b, "ns_b value corrupted after ns_a delete");
 
 	zdb_kv_close(&kv_b);
 	zdb_kv_close(&kv_a);
@@ -430,31 +430,36 @@ ZTEST(kv_suite, test_kv_iter_skips_deleted_entries)
 	zdb_kv_close(&kv);
 }
 
-#if defined(CONFIG_ZDB_KV_BACKEND_NVS)
 /*
- * Deterministic 16-bit record-ID collision search.
- *
- * Mirrors the production ID derivation so the found pair collides at the
- * backend level: FNV-1a over the key, folded to 16 bits, 0 remapped to 1.
+ * Mirror of the production v2 record-ID derivation: FNV-1a over
+ * "namespace \0 key", folded to 16 bits for NVS, 0 remapped to 1.
  */
-static uint16_t test_record_id16(const char *key)
+static uint32_t test_record_id(const char *ns, const char *key)
 {
 	uint32_t hash = 0x811C9DC5u;
-	const char *s = key;
+	const char *s;
 
-	while ((*s) != '\0') {
+	for (s = ns; (*s) != '\0'; s++) {
 		hash ^= (uint8_t)(*s);
 		hash *= 0x01000193u;
-		s++;
+	}
+	hash *= 0x01000193u; /* NUL separator byte (XOR with 0 is a no-op) */
+	for (s = key; (*s) != '\0'; s++) {
+		hash ^= (uint8_t)(*s);
+		hash *= 0x01000193u;
 	}
 
+#if defined(CONFIG_ZDB_KV_BACKEND_NVS)
 	hash &= 0xFFFFu;
+#endif
 	if (hash == 0U) {
 		hash = 1U;
 	}
 
-	return (uint16_t)hash;
+	return hash;
 }
+
+#if defined(CONFIG_ZDB_KV_BACKEND_NVS)
 
 static void test_key_from_index(uint32_t idx, char out_key[5])
 {
@@ -472,7 +477,7 @@ static void test_key_from_index(uint32_t idx, char out_key[5])
 	out_key[4] = '\0';
 }
 
-static bool test_find_id16_collision(char key_a[5], char key_b[5])
+static bool test_find_id16_collision(const char *ns, char key_a[5], char key_b[5])
 {
 	static uint32_t first_idx[65536];
 	uint32_t i;
@@ -484,10 +489,10 @@ static bool test_find_id16_collision(char key_a[5], char key_b[5])
 
 	for (i = 0U; i < total; i++) {
 		char key[5];
-		uint16_t h;
+		uint32_t h;
 
 		test_key_from_index(i, key);
-		h = test_record_id16(key);
+		h = test_record_id(ns, key);
 
 		if (first_idx[h] != UINT32_MAX) {
 			test_key_from_index(first_idx[h], key_a);
@@ -503,7 +508,7 @@ static bool test_find_id16_collision(char key_a[5], char key_b[5])
 	return false;
 }
 
-ZTEST(kv_suite, test_kv_hash_collision)
+ZTEST(kv_suite, test_kv_hash_collision_rejected)
 {
 	zdb_kv_t kv;
 	char key_a[5];
@@ -516,29 +521,74 @@ ZTEST(kv_suite, test_kv_hash_collision)
 
 	zassert_equal(rc, ZDB_OK, "open failed: %d", rc);
 
-	zassert_true(test_find_id16_collision(key_a, key_b),
+	zassert_true(test_find_id16_collision("collision_ns", key_a, key_b),
 		     "failed to find deterministic 16-bit ID collision");
 
 	rc = zdb_kv_set(&kv, key_a, &value_a, sizeof(value_a));
 	zassert_equal(rc, ZDB_OK, "set key_a failed: %d", rc);
 
-	/*
-	 * FIXME(characterization): a colliding second set currently
-	 * overwrites the first record, losing key_a's data.  Flipped by the
-	 * KV v2 fix to reject the write with ZDB_ERR_COLLISION and keep
-	 * key_a intact.
-	 */
+	/* The colliding set is rejected; the stored record is untouched. */
 	rc = zdb_kv_set(&kv, key_b, &value_b, sizeof(value_b));
-	zassert_equal(rc, ZDB_OK, "characterization: colliding set overwrites: %d", rc);
+	zassert_equal(rc, ZDB_ERR_COLLISION,
+		      "colliding set should be COLLISION, got %d", rc);
 
 	rc = zdb_kv_get(&kv, key_a, &out_val, sizeof(out_val), &out_len);
-	zassert_equal(rc, ZDB_ERR_NOT_FOUND,
-		      "characterization: key_a lost to collision, got %d", rc);
+	zassert_equal(rc, ZDB_OK, "key_a lost after rejected collision: %d", rc);
+	zassert_equal(out_val, value_a, "key_a payload corrupted");
 
 	rc = zdb_kv_get(&kv, key_b, &out_val, sizeof(out_val), &out_len);
-	zassert_equal(rc, ZDB_OK, "get key_b failed: %d", rc);
-	zassert_equal(out_val, value_b, "collision returned wrong payload");
+	zassert_equal(rc, ZDB_ERR_NOT_FOUND, "key_b was never stored, got %d", rc);
+
+	rc = zdb_kv_delete(&kv, key_b);
+	zassert_equal(rc, ZDB_ERR_NOT_FOUND,
+		      "deleting the colliding key must not touch key_a, got %d", rc);
+
+	rc = zdb_kv_get(&kv, key_a, &out_val, sizeof(out_val), &out_len);
+	zassert_equal(rc, ZDB_OK, "key_a lost after key_b delete attempt: %d", rc);
 
 	zdb_kv_close(&kv);
 }
 #endif /* CONFIG_ZDB_KV_BACKEND_NVS */
+
+ZTEST(kv_suite, test_kv_old_format_record_ignored)
+{
+	zdb_kv_t kv;
+	uint8_t v1_blob[16];
+	uint32_t new_value = 0x600DF00DU;
+	uint32_t out_val = 0U;
+	size_t out_len = 0U;
+	uint32_t id = test_record_id("test_ns", "legacy");
+	const char *key = "legacy";
+	size_t key_len = strlen(key);
+	ssize_t wrc;
+	zdb_status_t rc = zdb_kv_open(&g_db, "test_ns", &kv);
+
+	zassert_equal(rc, ZDB_OK, "open failed: %d", rc);
+
+	/* Plant a v1-format record ([key_len][key][value]) in the slot. */
+	v1_blob[0] = (uint8_t)key_len;
+	(void)memcpy(&v1_blob[1], key, key_len);
+	(void)memset(&v1_blob[1 + key_len], 0xEE, 4U);
+#if defined(CONFIG_ZDB_KV_BACKEND_ZMS)
+	wrc = zms_write(&g_backend, id, v1_blob, 1U + key_len + 4U);
+#else
+	wrc = nvs_write(&g_backend, (uint16_t)id, v1_blob, 1U + key_len + 4U);
+#endif
+	zassert_true(wrc > 0, "planting v1 record failed: %zd", wrc);
+
+	/* Old-format records read as absent and are never deleted... */
+	rc = zdb_kv_get(&kv, key, &out_val, sizeof(out_val), &out_len);
+	zassert_equal(rc, ZDB_ERR_NOT_FOUND, "v1 record should read as absent, got %d", rc);
+	rc = zdb_kv_delete(&kv, key);
+	zassert_equal(rc, ZDB_ERR_NOT_FOUND, "v1 record should not be deletable, got %d", rc);
+
+	/* ...but a set reclaims the slot with a v2 record. */
+	rc = zdb_kv_set(&kv, key, &new_value, sizeof(new_value));
+	zassert_equal(rc, ZDB_OK, "reclaiming set failed: %d", rc);
+
+	rc = zdb_kv_get(&kv, key, &out_val, sizeof(out_val), &out_len);
+	zassert_equal(rc, ZDB_OK, "get after reclaim failed: %d", rc);
+	zassert_equal(out_val, new_value, "reclaimed value mismatch");
+
+	zdb_kv_close(&kv);
+}

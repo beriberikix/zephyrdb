@@ -39,28 +39,110 @@ static bool zdb_key_valid(const char *key)
 }
 
 /*
- * On-disk KV entry format (v2, with collision detection):
- *   [key_len: 1 byte] [key: key_len bytes] [value: remaining bytes]
+ * On-disk KV record format (v2):
+ *   [tag: 0xDB] [ns_len: 1 byte] [key_len: 1 byte]
+ *   [namespace: ns_len bytes] [key: key_len bytes] [value: remaining bytes]
  *
- * key_len is the string length excluding NUL terminator.
- * Total stored size = 1 + key_len + value_len.
+ * ns_len/key_len are string lengths excluding NUL terminators; both are
+ * bounded by CONFIG_ZDB_MAX_KEY_LEN (<= 128), so the tag byte 0xDB (219)
+ * can never be a valid first byte of a v1 record ([key_len][key][value]).
+ * Records whose first byte is not the tag are treated as absent: reads
+ * and deletes report NOT_FOUND, and a set reclaims the slot.
+ *
+ * The backend record ID is FNV-1a over "namespace \0 key" (the NUL
+ * separator keeps the mapping injective), folded to 16 bits for NVS.
+ * A set whose slot already holds a different (namespace, key) fails
+ * with ZDB_ERR_COLLISION and leaves the stored record untouched.
  */
-#define ZDB_KV_HEADER_SIZE(key) (1U + strlen(key))
+#define ZDB_KV_REC_TAG      0xDBu
+#define ZDB_KV_REC_HDR_SIZE 3U
 
-#if defined(CONFIG_ZDB_KV_BACKEND_ZMS) && (CONFIG_ZDB_KV_BACKEND_ZMS)
-static uint32_t zdb_fnv1a32(const char *s)
+enum zdb_kv_rec_check {
+	ZDB_KV_REC_MATCH,    /* valid v2 record for this (namespace, key) */
+	ZDB_KV_REC_MISMATCH, /* valid v2 record for a different (namespace, key) */
+	ZDB_KV_REC_FOREIGN,  /* not a v2 record (old format or garbage) */
+};
+
+static uint32_t zdb_fnv1a32_update(uint32_t state, const uint8_t *buf, size_t len)
 {
+	size_t i;
+
+	for (i = 0U; i < len; i++) {
+		state ^= buf[i];
+		state *= 0x01000193u;
+	}
+
+	return state;
+}
+
+static uint32_t zdb_kv_record_id(const char *namespace_name, const char *key)
+{
+	static const uint8_t separator = 0x00U;
 	uint32_t hash = 0x811C9DC5u;
 
-	while ((*s) != '\0') {
-		hash ^= (uint8_t)(*s);
-		hash *= 0x01000193u;
-		s++;
+	hash = zdb_fnv1a32_update(hash, (const uint8_t *)namespace_name,
+				  strlen(namespace_name));
+	hash = zdb_fnv1a32_update(hash, &separator, sizeof(separator));
+	hash = zdb_fnv1a32_update(hash, (const uint8_t *)key, strlen(key));
+
+#if !defined(CONFIG_ZDB_KV_BACKEND_ZMS) || !(CONFIG_ZDB_KV_BACKEND_ZMS)
+	/* NVS record IDs are 16-bit. */
+	hash &= 0xFFFFu;
+#endif
+
+	/* Avoid ID 0, which can be reserved by backends. */
+	if (hash == 0U) {
+		hash = 1U;
 	}
 
 	return hash;
 }
-#endif
+
+static size_t zdb_kv_record_build(uint8_t *buf, const char *namespace_name,
+				  const char *key, const void *value, size_t value_len)
+{
+	size_t ns_len = strlen(namespace_name);
+	size_t key_len = strlen(key);
+
+	buf[0] = (uint8_t)ZDB_KV_REC_TAG;
+	buf[1] = (uint8_t)ns_len;
+	buf[2] = (uint8_t)key_len;
+	(void)memcpy(&buf[ZDB_KV_REC_HDR_SIZE], namespace_name, ns_len);
+	(void)memcpy(&buf[ZDB_KV_REC_HDR_SIZE + ns_len], key, key_len);
+	(void)memcpy(&buf[ZDB_KV_REC_HDR_SIZE + ns_len + key_len], value, value_len);
+
+	return ZDB_KV_REC_HDR_SIZE + ns_len + key_len + value_len;
+}
+
+static enum zdb_kv_rec_check zdb_kv_record_check(const uint8_t *buf, size_t len,
+						 const char *namespace_name,
+						 const char *key, size_t *out_value_off)
+{
+	size_t ns_len;
+	size_t key_len;
+
+	if ((len < ZDB_KV_REC_HDR_SIZE) || (buf[0] != (uint8_t)ZDB_KV_REC_TAG)) {
+		return ZDB_KV_REC_FOREIGN;
+	}
+
+	ns_len = (size_t)buf[1];
+	key_len = (size_t)buf[2];
+	if (len < (ZDB_KV_REC_HDR_SIZE + ns_len + key_len)) {
+		return ZDB_KV_REC_FOREIGN;
+	}
+
+	if ((ns_len != strlen(namespace_name)) || (key_len != strlen(key)) ||
+	    (memcmp(&buf[ZDB_KV_REC_HDR_SIZE], namespace_name, ns_len) != 0) ||
+	    (memcmp(&buf[ZDB_KV_REC_HDR_SIZE + ns_len], key, key_len) != 0)) {
+		return ZDB_KV_REC_MISMATCH;
+	}
+
+	if (out_value_off != NULL) {
+		*out_value_off = ZDB_KV_REC_HDR_SIZE + ns_len + key_len;
+	}
+
+	return ZDB_KV_REC_MATCH;
+}
 
 static void *zdb_kv_backend_fs_from_db(zdb_t *db)
 {
@@ -179,26 +261,6 @@ static void zdb_kv_ctx_track_delete(zdb_t *db, const char *namespace_name, const
 	(void)memset(&ctx->entries[ctx->entry_count], 0, sizeof(ctx->entries[ctx->entry_count]));
 }
 
-static uint32_t zdb_kv_key_to_id(const char *key);
-
-static uint16_t __unused zdb_fnv1a16(const char *s)
-{
-	uint32_t hash = 0x811C9DC5u;
-
-	while ((*s) != '\0') {
-		hash ^= (uint8_t)(*s);
-		hash *= 0x01000193u;
-		s++;
-	}
-
-	/* Avoid returning 0 which can be reserved by some backends. */
-	hash = (hash & 0xFFFFu);
-	if (hash == 0U) {
-		hash = 1U;
-	}
-
-	return (uint16_t)hash;
-}
 static ssize_t zdb_kv_backend_write(zdb_t *db, uint32_t id, const void *value, size_t value_len)
 {
 #if defined(CONFIG_ZDB_KV_BACKEND_NVS) && (CONFIG_ZDB_KV_BACKEND_NVS)
@@ -320,15 +382,17 @@ zdb_status_t zdb_kv_close(zdb_kv_t *kv)
 zdb_status_t zdb_kv_set(zdb_kv_t *kv, const char *key, const void *value, size_t value_len)
 {
 	uint32_t id;
-	ssize_t wr;
+	ssize_t wr = 0;
+	ssize_t rd;
 	zdb_status_t lock_rc;
 	zdb_status_t status;
 	uint8_t *io_buf;
-	size_t key_len;
+	size_t block_size;
 	size_t total_len;
+	bool slot_matched = false;
 
-	if ((kv == NULL) || (kv->db == NULL) || (value == NULL) || (value_len == 0U) ||
-	    !zdb_key_valid(key)) {
+	if ((kv == NULL) || (kv->db == NULL) || (kv->namespace_name == NULL) ||
+	    (value == NULL) || (value_len == 0U) || !zdb_key_valid(key)) {
 		return ZDB_ERR_INVAL;
 	}
 
@@ -340,10 +404,11 @@ zdb_status_t zdb_kv_set(zdb_kv_t *kv, const char *key, const void *value, size_t
 		return ZDB_ERR_INVAL;
 	}
 
-	key_len = strlen(key);
-	total_len = 1U + key_len + value_len;
+	block_size = kv->db->kv_io_slab->info.block_size;
+	total_len = ZDB_KV_REC_HDR_SIZE + strlen(kv->namespace_name) + strlen(key) +
+		    value_len;
 
-	if (total_len > kv->db->kv_io_slab->info.block_size) {
+	if (total_len > block_size) {
 		return ZDB_ERR_NOMEM;
 	}
 
@@ -351,33 +416,61 @@ zdb_status_t zdb_kv_set(zdb_kv_t *kv, const char *key, const void *value, size_t
 		return ZDB_ERR_NOMEM;
 	}
 
-	/* Build wrapped entry: [key_len][key][value] */
-	io_buf[0] = (uint8_t)key_len;
-	(void)memcpy(&io_buf[1], key, key_len);
-	(void)memcpy(&io_buf[1 + key_len], value, value_len);
-
-	id = zdb_kv_key_to_id(key);
+	id = zdb_kv_record_id(kv->namespace_name, key);
 	lock_rc = zdb_lock_write(kv->db);
 	if (lock_rc != ZDB_OK) {
 		k_mem_slab_free(kv->db->kv_io_slab, io_buf);
 		return lock_rc;
 	}
 
+	/*
+	 * Pre-read the slot: a valid record for a different (namespace, key)
+	 * means an ID collision, which must not overwrite the stored record.
+	 * Anything else (empty slot, old-format record, garbage) is claimed.
+	 */
+	rd = zdb_kv_backend_read(kv->db, id, io_buf, block_size);
+	if (rd >= 0) {
+		size_t usable = ((size_t)rd < block_size) ? (size_t)rd : block_size;
+
+		switch (zdb_kv_record_check(io_buf, usable, kv->namespace_name, key,
+					    NULL)) {
+		case ZDB_KV_REC_MISMATCH:
+			zdb_unlock_write(kv->db);
+			k_mem_slab_free(kv->db->kv_io_slab, io_buf);
+			status = ZDB_ERR_COLLISION;
+			goto emit;
+		case ZDB_KV_REC_MATCH:
+			slot_matched = true;
+			break;
+		case ZDB_KV_REC_FOREIGN:
+		default:
+			break;
+		}
+	}
+
+	(void)zdb_kv_record_build(io_buf, kv->namespace_name, key, value, value_len);
+
 	wr = zdb_kv_backend_write(kv->db, id, io_buf, total_len);
-	if ((wr >= 0) && ((size_t)wr == total_len)) {
+	if (wr < 0) {
+		status = zdb_status_from_errno((int)wr);
+	} else if (((size_t)wr == total_len) || ((wr == 0) && slot_matched)) {
+		/*
+		 * Backends report 0 written when the stored bytes are already
+		 * identical (no flash write needed); with a matching pre-read
+		 * that is a successful set.
+		 */
+		status = ZDB_OK;
+	} else {
+		status = ZDB_ERR_IO;
+	}
+
+	if (status == ZDB_OK) {
 		zdb_kv_ctx_track_set(kv->db, kv->namespace_name, key, id);
 	}
 	zdb_unlock_write(kv->db);
 	k_mem_slab_free(kv->db->kv_io_slab, io_buf);
 
-	if (wr < 0) {
-		status = zdb_status_from_errno((int)wr);
-	} else if ((size_t)wr != total_len) {
-		status = ZDB_ERR_IO;
-	} else {
-		status = ZDB_OK;
-	}
-
+emit:
 #if defined(CONFIG_ZDB_EVENTING) && (CONFIG_ZDB_EVENTING)
 	zdb_emit_kv_event(kv->db, ZDB_EVENT_KV_SET, kv->namespace_name, key, value_len, status);
 #endif
@@ -392,11 +485,13 @@ zdb_status_t zdb_kv_get(zdb_kv_t *kv, const char *key, void *out_value,
 	ssize_t rd;
 	zdb_status_t lock_rc;
 	uint8_t *io_buf;
-	size_t key_len;
-	size_t stored_key_len;
+	size_t block_size;
+	size_t usable;
+	size_t value_off = 0U;
 	size_t value_len;
 
-	if ((kv == NULL) || (kv->db == NULL) || (out_len == NULL) || !zdb_key_valid(key)) {
+	if ((kv == NULL) || (kv->db == NULL) || (kv->namespace_name == NULL) ||
+	    (out_len == NULL) || !zdb_key_valid(key)) {
 		return ZDB_ERR_INVAL;
 	}
 
@@ -412,18 +507,20 @@ zdb_status_t zdb_kv_get(zdb_kv_t *kv, const char *key, void *out_value,
 		return ZDB_ERR_INVAL;
 	}
 
+	block_size = kv->db->kv_io_slab->info.block_size;
+
 	if (k_mem_slab_alloc(kv->db->kv_io_slab, (void **)&io_buf, K_NO_WAIT) != 0) {
 		return ZDB_ERR_NOMEM;
 	}
 
-	id = zdb_kv_key_to_id(key);
+	id = zdb_kv_record_id(kv->namespace_name, key);
 	lock_rc = zdb_lock_read(kv->db);
 	if (lock_rc != ZDB_OK) {
 		k_mem_slab_free(kv->db->kv_io_slab, io_buf);
 		return lock_rc;
 	}
 
-	rd = zdb_kv_backend_read(kv->db, id, io_buf, kv->db->kv_io_slab->info.block_size);
+	rd = zdb_kv_backend_read(kv->db, id, io_buf, block_size);
 	zdb_unlock_read(kv->db);
 
 	if (rd < 0) {
@@ -432,36 +529,28 @@ zdb_status_t zdb_kv_get(zdb_kv_t *kv, const char *key, void *out_value,
 		return zdb_status_from_errno((int)rd);
 	}
 
-	/* Verify key prefix: [key_len:1][key:key_len][value:...] */
-	if ((size_t)rd < 1U) {
-		k_mem_slab_free(kv->db->kv_io_slab, io_buf);
-		*out_len = 0U;
-		return ZDB_ERR_CORRUPT;
-	}
+	usable = ((size_t)rd < block_size) ? (size_t)rd : block_size;
 
-	stored_key_len = (size_t)io_buf[0];
-	key_len = strlen(key);
-
-	if (stored_key_len != key_len || (size_t)rd < (1U + stored_key_len)) {
+	if (zdb_kv_record_check(io_buf, usable, kv->namespace_name, key,
+				&value_off) != ZDB_KV_REC_MATCH) {
+		/* ID alias of another record, or an old-format record. */
 		k_mem_slab_free(kv->db->kv_io_slab, io_buf);
 		*out_len = 0U;
 		return ZDB_ERR_NOT_FOUND;
 	}
 
-	if (memcmp(&io_buf[1], key, key_len) != 0) {
-		/* Hash collision: stored key does not match requested key */
-		k_mem_slab_free(kv->db->kv_io_slab, io_buf);
-		*out_len = 0U;
-		return ZDB_ERR_NOT_FOUND;
-	}
-
-	value_len = (size_t)rd - 1U - stored_key_len;
+	/* Backends report the full stored length even beyond our buffer. */
+	value_len = (size_t)rd - value_off;
 	*out_len = value_len;
 
 	if ((out_value != NULL) && (out_capacity > 0U)) {
+		size_t available = usable - value_off;
 		size_t copy_len = (value_len < out_capacity) ? value_len : out_capacity;
 
-		(void)memcpy(out_value, &io_buf[1 + stored_key_len], copy_len);
+		if (copy_len > available) {
+			copy_len = available;
+		}
+		(void)memcpy(out_value, &io_buf[value_off], copy_len);
 	}
 
 	k_mem_slab_free(kv->db->kv_io_slab, io_buf);
@@ -476,11 +565,12 @@ zdb_status_t zdb_kv_delete(zdb_kv_t *kv, const char *key)
 	zdb_status_t lock_rc;
 	zdb_status_t status;
 	uint8_t *io_buf = NULL;
-	size_t key_len;
-	size_t stored_key_len;
+	size_t block_size;
+	size_t usable;
 	bool lock_held = false;
 
-	if ((kv == NULL) || (kv->db == NULL) || !zdb_key_valid(key)) {
+	if ((kv == NULL) || (kv->db == NULL) || (kv->namespace_name == NULL) ||
+	    !zdb_key_valid(key)) {
 		return ZDB_ERR_INVAL;
 	}
 
@@ -492,13 +582,14 @@ zdb_status_t zdb_kv_delete(zdb_kv_t *kv, const char *key)
 		return ZDB_ERR_INVAL;
 	}
 
+	block_size = kv->db->kv_io_slab->info.block_size;
+
 	if (k_mem_slab_alloc(kv->db->kv_io_slab, (void **)&io_buf, K_NO_WAIT) != 0) {
 		status = ZDB_ERR_NOMEM;
 		goto out;
 	}
 
-	id = zdb_kv_key_to_id(key);
-	key_len = strlen(key);
+	id = zdb_kv_record_id(kv->namespace_name, key);
 	lock_rc = zdb_lock_write(kv->db);
 	if (lock_rc != ZDB_OK) {
 		status = lock_rc;
@@ -506,16 +597,17 @@ zdb_status_t zdb_kv_delete(zdb_kv_t *kv, const char *key)
 	}
 	lock_held = true;
 
-	/* Read existing entry to verify key matches before deleting */
-	rd = zdb_kv_backend_read(kv->db, id, io_buf, kv->db->kv_io_slab->info.block_size);
+	/* Only delete a slot that verifiably belongs to this (namespace, key). */
+	rd = zdb_kv_backend_read(kv->db, id, io_buf, block_size);
 	if (rd < 0) {
 		status = zdb_status_from_errno((int)rd);
 		goto out;
 	}
 
-	stored_key_len = (size_t)io_buf[0];
-	if ((size_t)rd < (1U + stored_key_len) || stored_key_len != key_len ||
-	    memcmp(&io_buf[1], key, key_len) != 0) {
+	usable = ((size_t)rd < block_size) ? (size_t)rd : block_size;
+
+	if (zdb_kv_record_check(io_buf, usable, kv->namespace_name, key,
+				NULL) != ZDB_KV_REC_MATCH) {
 		status = ZDB_ERR_NOT_FOUND;
 		goto out;
 	}
@@ -542,29 +634,6 @@ out:
 
 	return status;
 }
-
-static uint32_t zdb_kv_key_to_id(const char *key)
-{
-	uint32_t id;
-
-	if (key == NULL) {
-		return 1U;
-	}
-
-#if defined(CONFIG_ZDB_KV_BACKEND_ZMS) && (CONFIG_ZDB_KV_BACKEND_ZMS)
-	id = zdb_fnv1a32(key);
-#else
-	id = (uint32_t)zdb_fnv1a16(key);
-#endif
-
-	if (id == 0U) {
-		id = 1U;
-	}
-
-	return id;
-}
-
-
 
 zdb_status_t zdb_kv_iter_open(zdb_kv_t *kv, zdb_kv_iter_t *out_iter)
 {
