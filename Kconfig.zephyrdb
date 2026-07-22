@@ -1,13 +1,16 @@
-# ZephyrDB Kconfig (first pass)
-# Scope: Core + KV + TS modules.
-# Document/FlatBuffers module knobs are intentionally deferred.
+# ZephyrDB Kconfig
+# Scope: Core, KV (NVS/ZMS), TS (LittleFS/FCB), DOC (LittleFS),
+# eventing (+zbus), stats, shell, and FlatBuffers helpers.
+# Every symbol here is consumed by code; planned features live in
+# docs/roadmap.md, not in Kconfig.
 
 menuconfig ZEPHYRDB
 	bool "ZephyrDB embedded multi-model database"
 	depends on FLASH || BOARD_NATIVE_SIM
 	help
 	  Enable ZephyrDB core services for memory-constrained systems.
-	  First pass includes Core, KV (NVS) and TS (LittleFS).
+	  Provides KV (NVS/ZMS), time-series (LittleFS/FCB), and document
+	  (LittleFS) data models.
 
 if ZEPHYRDB
 
@@ -84,13 +87,6 @@ config ZDB_MAX_KEY_LEN
 	help
 	  Upper bound for user-facing keys (excluding trailing NUL).
 
-config ZDB_MAX_OPEN_CURSORS
-	int "Maximum open cursors"
-	range 1 64
-	default 4
-	help
-	  Limits concurrent iterators across all enabled modules.
-
 config ZDB_SCAN_YIELD_EVERY_N
 	int "Yield after N scan iterations"
 	range 1 4096
@@ -151,12 +147,6 @@ config ZDB_TS_INGEST_BUFFER_BYTES
 	help
 	  Upper bound for RAM staging prior to sequential flush.
 
-config ZDB_TS_FLUSH_QUEUE_DEPTH
-	int "TS flush queue depth"
-	range 1 128
-	default 8
-	depends on ZDB_TS_BACKEND_LITTLEFS
-
 config ZDB_TS_MAX_AGG_POINTS
 	int "TS aggregation max points"
 	range 1 1048576
@@ -206,48 +196,18 @@ config ZDB_TS_FCB_SECTOR_COUNT
 	help
 	  Number of sectors provided to the FCB instance.
 
-config ZDB_TS_MULTISTREAM
-	bool "Enable multi-stream time-series support (Stage 2.5)"
-	default n
-	depends on ZDB_TS
-	help
-	  If enabled, allows managing multiple independent time-series streams
-	  simultaneously with cross-stream operations (batch flush, unified stats,
-	  aggregation across streams).
-
-config ZDB_TS_MAX_CONCURRENT_STREAMS
-	int "Maximum concurrent TS streams"
-	range 2 32
-	default 8
-	depends on ZDB_TS_MULTISTREAM
-	help
-	  Upper bound for simultaneously open streams in multi-stream mode.
-
-config ZDB_TS_MAX_DISCOVERABLE_STREAMS
-	int "Maximum streams during enumeration"
-	range 1 128
-	default 16
-	depends on ZDB_TS_MULTISTREAM
-	help
-	  Limits the number of streams discovered and returned when
-	  enumerating available streams.
-
 endmenu
 
 menu "Storage Integration"
-
-config ZDB_USE_DT_CHOSEN_STORAGE
-	bool "Discover storage from zephyr,storage chosen node"
-	default y
-	help
-	  If enabled, ZephyrDB resolves storage layout from the
-	  zephyr,storage chosen node at runtime/init.
 
 config ZDB_LFS_MOUNT_POINT
 	string "LittleFS mount point"
 	default "/lfs"
 	help
-	  Mount path used by TS module for append-log files.
+	  Convenience default for applications: pass it as
+	  zdb_cfg_t.lfs_mount_point at init. The library never reads this
+	  symbol directly; the path must match a filesystem mounted by the
+	  application or an fstab automount entry.
 
 config ZDB_TS_DIRNAME
 	string "TS stream directory name"
@@ -284,10 +244,6 @@ config ZDB_STATS
 	bool "Enable ZephyrDB statistics counters"
 	default n
 
-config ZDB_DEBUG
-	bool "Enable ZephyrDB debug checks"
-	default n
-
 endmenu
 
 config ZDB_SHELL
@@ -311,42 +267,12 @@ config ZDB_FLATBUFFERS
 config ZDB_DOC
 	bool "Enable document model (Stage 3)"
 	default n
-	depends on ZDB_CORE && (FILE_SYSTEM || NVS || ZMS)
+	depends on ZDB_CORE && FILE_SYSTEM
 	help
-	  Enables semi-structured document APIs with typed fields, queries,
-	  and optional FlatBuffers export. Can use LittleFS, NVS, or ZMS
-	  as backend. Does not require TS module.
-
-choice ZDB_DOC_BACKEND
-	prompt "Document storage backend"
-	default ZDB_DOC_BACKEND_LITTLEFS
-	depends on ZDB_DOC
-
-config ZDB_DOC_BACKEND_LITTLEFS
-	bool "LittleFS (filesystem-based)"
-	depends on FILE_SYSTEM
-	help
-	  Store documents as individual files in a LittleFS filesystem.
-	  Offers native directory structure and efficient queries via directory scanning.
-	  Requires sufficient flash or external storage for filesystem overhead.
-
-config ZDB_DOC_BACKEND_NVS
-	bool "NVS (flash key-value)"
-	depends on NVS
-	help
-	  Store documents as serialized blobs in NVS entries.
-	  Enables document storage on boards with limited flash (no filesystem).
-	  Queries require full scan and deserialization of all entries.
-
-config ZDB_DOC_BACKEND_ZMS
-	bool "ZMS (Zephyr Memory Storage)"
-	depends on ZMS
-	help
-	  Store documents as serialized blobs in ZMS entries.
-	  Better wear-leveling and larger ID space than NVS.
-	  Queries require full scan and deserialization of all entries.
-
-endchoice
+	  Enables semi-structured document APIs with typed fields and
+	  queries. Documents are stored as individual files on a mounted
+	  filesystem (e.g. LittleFS) under the configured mount point.
+	  Does not require the TS module.
 
 menu "Document Model (Stage 3)"
 	depends on ZDB_DOC
@@ -378,42 +304,6 @@ config ZDB_DOC_MAX_FIELD_COUNT
 	default 32
 	help
 	  Upper bound for number of fields in a single document.
-
-config ZDB_DOC_MAX_NESTED_DEPTH
-	int "Max nesting depth for document objects"
-	range 1 16
-	default 4
-	help
-	  Maximum depth for nested object hierarchies.
-
-config ZDB_DOC_SLAB_BLOCK_SIZE
-	int "Document field slab block size (bytes)"
-	range 64 2048
-	default 256
-
-config ZDB_DOC_SLAB_BLOCK_COUNT
-	int "Document field slab block count"
-	range 1 256
-	default 16
-
-config ZDB_DOC_MAX_SERIALIZED_SIZE
-	int "Max serialized document size (bytes)"
-	range 256 65536
-	default 1024
-	depends on (ZDB_DOC_BACKEND_NVS || ZDB_DOC_BACKEND_ZMS)
-	help
-	  Maximum size for a serialized document blob when using NVS or ZMS backend.
-	  Larger documents are rejected at save time to prevent entry overhead.
-	  For LittleFS backend, this limit is not enforced (filesystem handles arbitrary sizes).
-
-config ZDB_DOC_MANIFEST_MAX_ENTRIES
-	int "Max documents in manifest cache"
-	range 8 1024
-	default 64
-	depends on (ZDB_DOC_BACKEND_NVS || ZDB_DOC_BACKEND_ZMS)
-	help
-	  Maximum number of (collection, document_id) pairs cached in RAM
-	  when using NVS or ZMS backend. Queries enumerate manifest to discover documents.
 
 endmenu
 

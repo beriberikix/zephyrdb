@@ -1,5 +1,5 @@
 name: zephyrdb
-description: Embedded multi-model database for Zephyr RTOS with Core, KV (NVS-backed), and TS (LittleFS-backed) modules
+description: Embedded multi-model database for Zephyr RTOS - KV (NVS/ZMS), time-series (LittleFS/FCB), and document (LittleFS) models with eventing, stats, and shell support
 
 type: module
 build:

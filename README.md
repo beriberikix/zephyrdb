@@ -4,10 +4,12 @@ Embedded multi-model database for Zephyr RTOS, designed for memory-constrained s
 
 ## What Is Implemented
 
-- Zero-malloc static-slab memory model
-- Key-value model with NVS or ZMS backends
+- Static-slab IO buffers for KV/TS data paths (the KV session index and
+  document fields use the kernel heap)
+- Key-value model with NVS or ZMS backends, namespaced records with
+  collision rejection
 - Time-series model with LittleFS or FCB backends
-- Document model with typed fields and query APIs
+- Document model with typed fields and query APIs (filesystem-backed)
 - Durability helpers: integrity checks, recovery, stats export
 - Optional FlatBuffers export helper for TS samples
 - Optional KV event emitter/listener hooks
