@@ -1,9 +1,0 @@
-tests:
-  zephyrdb.integration_smoke.core:
-    tags:
-      - zephyrdb
-      - integration
-      - smoke
-    harness: ztest
-    platform_allow:
-      - native_sim

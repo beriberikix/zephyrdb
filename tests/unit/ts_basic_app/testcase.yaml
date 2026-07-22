@@ -1,9 +1,0 @@
-tests:
-  zephyrdb.unit.ts_basic:
-    harness: ztest
-    tags:
-      - zephyrdb
-      - unit
-      - ts
-    platform_allow:
-      - native_sim

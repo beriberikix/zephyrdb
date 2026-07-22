@@ -7,7 +7,7 @@
 #include <string.h>
 
 #if defined(CONFIG_ZDB_KV_BACKEND_NVS) && (CONFIG_ZDB_KV_BACKEND_NVS)
-#include <zephyr/fs/nvs.h>
+#include <zephyr/kvss/nvs.h>
 #endif
 #if defined(CONFIG_ZDB_KV_BACKEND_ZMS) && (CONFIG_ZDB_KV_BACKEND_ZMS)
 #include <zephyr/kvss/zms.h>

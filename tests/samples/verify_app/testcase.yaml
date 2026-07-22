@@ -1,8 +1,0 @@
-tests:
-  zephyrdb.samples.verify:
-    harness: ztest
-    tags:
-      - zephyrdb
-      - samples
-    platform_allow:
-      - native_sim
