@@ -1,0 +1,24 @@
+/*
+ * LittleFS on the slot1 partition for ZephyrDB hardware tests.
+ *
+ * These tests do not use MCUboot, so image-1 (slot1_partition,
+ * 472 KB at 0x82000) is free and serves as the LittleFS area.
+ * NVS uses the standard storage_partition at 0xf8000.
+ */
+
+/ {
+	fstab {
+		compatible = "zephyr,fstab";
+		lfs: lfs {
+			compatible = "zephyr,fstab,littlefs";
+			read-size = <16>;
+			prog-size = <16>;
+			cache-size = <64>;
+			lookahead-size = <32>;
+			block-cycles = <512>;
+			partition = <&slot1_partition>;
+			mount-point = "/lfs";
+			automount;
+		};
+	};
+};

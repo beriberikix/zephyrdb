@@ -1,0 +1,544 @@
+/*
+ * Copyright (c) 2026 ZephyrDB Contributors
+ * SPDX-License-Identifier: Apache-2.0
+ *
+ * KV unit tests against a real backend (ZMS or NVS, selected by the
+ * enclosing test application's prj.conf) mounted on the native_sim
+ * flash simulator's storage_partition.
+ *
+ * Shared by tests/unit/kv_zms and tests/unit/kv_nvs.
+ */
+
+#include <zephyr/kernel.h>
+#include <zephyr/ztest.h>
+#include <zephyr/device.h>
+#include <zephyr/drivers/flash.h>
+#include <zephyr/storage/flash_map.h>
+#include <string.h>
+
+#include "zephyrdb.h"
+
+#if defined(CONFIG_ZDB_KV_BACKEND_ZMS)
+#include <zephyr/kvss/zms.h>
+static struct zms_fs g_backend;
+#elif defined(CONFIG_ZDB_KV_BACKEND_NVS)
+#include <zephyr/kvss/nvs.h>
+static struct nvs_fs g_backend;
+#else
+#error "kv_suite requires CONFIG_ZDB_KV_BACKEND_ZMS or CONFIG_ZDB_KV_BACKEND_NVS"
+#endif
+
+static zdb_cfg_t g_cfg = {
+	.kv_backend_fs = NULL,
+	.lfs_mount_point = NULL,
+	.work_q = &k_sys_work_q,
+};
+
+ZDB_DEFINE_STATIC(g_db, g_cfg);
+
+#define KV_TEST_PARTITION storage_partition
+
+static void kv_backend_mount(void)
+{
+	struct flash_pages_info info;
+	int rc;
+
+	g_backend.flash_device = PARTITION_DEVICE(KV_TEST_PARTITION);
+	zassert_true(device_is_ready(g_backend.flash_device),
+		     "storage device not ready");
+
+	g_backend.offset = PARTITION_OFFSET(KV_TEST_PARTITION);
+	rc = flash_get_page_info_by_offs(g_backend.flash_device, g_backend.offset, &info);
+	zassert_equal(rc, 0, "flash page info failed: %d", rc);
+
+	g_backend.sector_size = info.size;
+	g_backend.sector_count = 3U;
+
+#if defined(CONFIG_ZDB_KV_BACKEND_ZMS)
+	rc = zms_mount(&g_backend);
+	zassert_equal(rc, 0, "zms mount failed: %d", rc);
+#else
+	rc = nvs_mount(&g_backend);
+	zassert_equal(rc, 0, "nvs mount failed: %d", rc);
+#endif
+}
+
+static void *kv_suite_setup(void)
+{
+	zdb_status_t rc;
+
+	kv_backend_mount();
+	g_cfg.kv_backend_fs = &g_backend;
+
+	rc = zdb_init(&g_db, &g_cfg);
+	zassert_equal(rc, ZDB_OK, "zdb_init failed: %d", rc);
+
+	return NULL;
+}
+
+ZTEST_SUITE(kv_suite, NULL, kv_suite_setup, NULL, NULL, NULL);
+
+ZTEST(kv_suite, test_kv_open_close_success)
+{
+	zdb_kv_t kv;
+	zdb_status_t rc = zdb_kv_open(&g_db, "test_ns", &kv);
+
+	zassert_equal(rc, ZDB_OK, "open failed: %d", rc);
+	rc = zdb_kv_close(&kv);
+	zassert_equal(rc, ZDB_OK, "close failed: %d", rc);
+}
+
+ZTEST(kv_suite, test_kv_open_invalid_args)
+{
+	zdb_kv_t kv;
+
+	zassert_equal(zdb_kv_open(NULL, "ns", &kv), ZDB_ERR_INVAL);
+	zassert_equal(zdb_kv_open(&g_db, NULL, &kv), ZDB_ERR_INVAL);
+	zassert_equal(zdb_kv_open(&g_db, "ns", NULL), ZDB_ERR_INVAL);
+	zassert_equal(zdb_kv_open(&g_db, "", &kv), ZDB_ERR_INVAL);
+}
+
+ZTEST(kv_suite, test_kv_set_get_roundtrip)
+{
+	zdb_kv_t kv;
+	uint32_t set_value = 42U;
+	uint32_t get_value = 0U;
+	size_t out_len = 0U;
+	zdb_status_t rc = zdb_kv_open(&g_db, "test_ns", &kv);
+
+	zassert_equal(rc, ZDB_OK, "open failed: %d", rc);
+
+	rc = zdb_kv_set(&kv, "rt_counter", &set_value, sizeof(set_value));
+	zassert_equal(rc, ZDB_OK, "set failed: %d", rc);
+
+	rc = zdb_kv_get(&kv, "rt_counter", &get_value, sizeof(get_value), &out_len);
+	zassert_equal(rc, ZDB_OK, "get failed: %d", rc);
+	zassert_equal(out_len, sizeof(set_value), "length mismatch: %zu", out_len);
+	zassert_equal(get_value, set_value, "value mismatch: %u != %u", get_value, set_value);
+
+	zdb_kv_close(&kv);
+}
+
+ZTEST(kv_suite, test_kv_get_not_found)
+{
+	zdb_kv_t kv;
+	uint8_t buffer[32];
+	size_t out_len = 0U;
+	zdb_status_t rc = zdb_kv_open(&g_db, "test_ns", &kv);
+
+	zassert_equal(rc, ZDB_OK, "open failed: %d", rc);
+
+	rc = zdb_kv_get(&kv, "nonexistent", buffer, sizeof(buffer), &out_len);
+	zassert_equal(rc, ZDB_ERR_NOT_FOUND, "expected NOT_FOUND, got %d", rc);
+
+	zdb_kv_close(&kv);
+}
+
+ZTEST(kv_suite, test_kv_set_overwrite)
+{
+	zdb_kv_t kv;
+	uint32_t value1 = 10U;
+	uint32_t value2 = 20U;
+	uint32_t readback = 0U;
+	size_t out_len = 0U;
+	zdb_status_t rc = zdb_kv_open(&g_db, "test_ns", &kv);
+
+	zassert_equal(rc, ZDB_OK, "open failed: %d", rc);
+
+	rc = zdb_kv_set(&kv, "ow_counter", &value1, sizeof(value1));
+	zassert_equal(rc, ZDB_OK, "first set failed: %d", rc);
+
+	rc = zdb_kv_set(&kv, "ow_counter", &value2, sizeof(value2));
+	zassert_equal(rc, ZDB_OK, "second set failed: %d", rc);
+
+	rc = zdb_kv_get(&kv, "ow_counter", &readback, sizeof(readback), &out_len);
+	zassert_equal(rc, ZDB_OK, "get failed: %d", rc);
+	zassert_equal(readback, value2, "not overwritten: %u != %u", readback, value2);
+
+	zdb_kv_close(&kv);
+}
+
+ZTEST(kv_suite, test_kv_set_same_value_twice)
+{
+	zdb_kv_t kv;
+	uint32_t value = 0xCAFEF00DU;
+	uint32_t readback = 0U;
+	size_t out_len = 0U;
+	zdb_status_t rc = zdb_kv_open(&g_db, "test_ns", &kv);
+
+	zassert_equal(rc, ZDB_OK, "open failed: %d", rc);
+
+	rc = zdb_kv_set(&kv, "sv_key", &value, sizeof(value));
+	zassert_equal(rc, ZDB_OK, "first set failed: %d", rc);
+
+	rc = zdb_kv_set(&kv, "sv_key", &value, sizeof(value));
+#if defined(CONFIG_ZDB_KV_BACKEND_NVS)
+	/*
+	 * FIXME(characterization): nvs_write() returns 0 when the stored data
+	 * is byte-identical (nothing rewritten), which zdb_kv_set currently
+	 * misreports as ZDB_ERR_IO.  Flipped to ZDB_OK by the KV v2 fix.
+	 */
+	zassert_equal(rc, ZDB_ERR_IO, "expected current IO misreport, got %d", rc);
+#else
+	zassert_equal(rc, ZDB_OK, "identical rewrite failed: %d", rc);
+#endif
+
+	rc = zdb_kv_get(&kv, "sv_key", &readback, sizeof(readback), &out_len);
+	zassert_equal(rc, ZDB_OK, "get failed: %d", rc);
+	zassert_equal(readback, value, "value corrupted by identical rewrite");
+
+	zdb_kv_close(&kv);
+}
+
+ZTEST(kv_suite, test_kv_delete_success)
+{
+	zdb_kv_t kv;
+	uint32_t value = 42U;
+	uint8_t buffer[32];
+	size_t out_len = 0U;
+	zdb_status_t rc = zdb_kv_open(&g_db, "test_ns", &kv);
+
+	zassert_equal(rc, ZDB_OK, "open failed: %d", rc);
+
+	rc = zdb_kv_set(&kv, "del_counter", &value, sizeof(value));
+	zassert_equal(rc, ZDB_OK, "set failed: %d", rc);
+
+	rc = zdb_kv_delete(&kv, "del_counter");
+	zassert_equal(rc, ZDB_OK, "delete failed: %d", rc);
+
+	rc = zdb_kv_get(&kv, "del_counter", buffer, sizeof(buffer), &out_len);
+	zassert_equal(rc, ZDB_ERR_NOT_FOUND, "expected NOT_FOUND after delete, got %d", rc);
+
+	zdb_kv_close(&kv);
+}
+
+ZTEST(kv_suite, test_kv_delete_not_found)
+{
+	zdb_kv_t kv;
+	zdb_status_t rc = zdb_kv_open(&g_db, "test_ns", &kv);
+
+	zassert_equal(rc, ZDB_OK, "open failed: %d", rc);
+
+	rc = zdb_kv_delete(&kv, "never_existed");
+	zassert_equal(rc, ZDB_ERR_NOT_FOUND, "expected NOT_FOUND, got %d", rc);
+
+	zdb_kv_close(&kv);
+}
+
+ZTEST(kv_suite, test_kv_value_max_length)
+{
+	zdb_kv_t kv;
+	uint8_t large_value[CONFIG_ZDB_KV_IO_SLAB_BLOCK_SIZE];
+	zdb_status_t rc = zdb_kv_open(&g_db, "test_ns", &kv);
+
+	zassert_equal(rc, ZDB_OK, "open failed: %d", rc);
+
+	(void)memset(large_value, 0xAA, sizeof(large_value));
+
+	/* Well under the record overhead: must fit. */
+	rc = zdb_kv_set(&kv, "large_key", large_value, 100U);
+	zassert_equal(rc, ZDB_OK, "100-byte value failed: %d", rc);
+
+	/* A value the size of the whole IO block can never fit with headers. */
+	rc = zdb_kv_set(&kv, "large_key", large_value, sizeof(large_value));
+	zassert_equal(rc, ZDB_ERR_NOMEM, "oversized value should be NOMEM, got %d", rc);
+
+	zdb_kv_close(&kv);
+}
+
+ZTEST(kv_suite, test_kv_key_max_length)
+{
+	zdb_kv_t kv;
+	char max_key[CONFIG_ZDB_MAX_KEY_LEN + 1U];
+	char oversized_key[CONFIG_ZDB_MAX_KEY_LEN + 16U];
+	uint32_t value = 123U;
+	zdb_status_t rc = zdb_kv_open(&g_db, "test_ns", &kv);
+
+	zassert_equal(rc, ZDB_OK, "open failed: %d", rc);
+
+	(void)memset(max_key, 'X', CONFIG_ZDB_MAX_KEY_LEN);
+	max_key[CONFIG_ZDB_MAX_KEY_LEN] = '\0';
+	rc = zdb_kv_set(&kv, max_key, &value, sizeof(value));
+	zassert_equal(rc, ZDB_OK, "max-length key failed: %d", rc);
+
+	(void)memset(oversized_key, 'Y', sizeof(oversized_key) - 1U);
+	oversized_key[sizeof(oversized_key) - 1U] = '\0';
+	rc = zdb_kv_set(&kv, oversized_key, &value, sizeof(value));
+	zassert_equal(rc, ZDB_ERR_INVAL, "oversized key should be INVAL, got %d", rc);
+
+	zdb_kv_close(&kv);
+}
+
+ZTEST(kv_suite, test_kv_namespace_isolation)
+{
+	zdb_kv_t kv_a;
+	zdb_kv_t kv_b;
+	uint32_t value_a = 111U;
+	uint32_t value_b = 222U;
+	uint32_t readback = 0U;
+	size_t out_len = 0U;
+	zdb_status_t rc;
+
+	rc = zdb_kv_open(&g_db, "iso_ns_a", &kv_a);
+	zassert_equal(rc, ZDB_OK, "open ns_a failed: %d", rc);
+	rc = zdb_kv_open(&g_db, "iso_ns_b", &kv_b);
+	zassert_equal(rc, ZDB_OK, "open ns_b failed: %d", rc);
+
+	rc = zdb_kv_set(&kv_a, "shared_key", &value_a, sizeof(value_a));
+	zassert_equal(rc, ZDB_OK, "set ns_a failed: %d", rc);
+	rc = zdb_kv_set(&kv_b, "shared_key", &value_b, sizeof(value_b));
+	zassert_equal(rc, ZDB_OK, "set ns_b failed: %d", rc);
+
+	/*
+	 * FIXME(characterization): the backend record ID is derived from the
+	 * key alone, so the two namespaces share one storage slot and the
+	 * second write overwrites the first.  Both reads currently return
+	 * value_b.  Flipped to true isolation by the KV v2 fix.
+	 */
+	rc = zdb_kv_get(&kv_a, "shared_key", &readback, sizeof(readback), &out_len);
+	zassert_equal(rc, ZDB_OK, "get ns_a failed: %d", rc);
+	zassert_equal(readback, value_b,
+		      "characterization: ns_a expected aliased value_b, got %u", readback);
+
+	rc = zdb_kv_get(&kv_b, "shared_key", &readback, sizeof(readback), &out_len);
+	zassert_equal(rc, ZDB_OK, "get ns_b failed: %d", rc);
+	zassert_equal(readback, value_b, "get ns_b value mismatch: %u", readback);
+
+	zdb_kv_close(&kv_b);
+	zdb_kv_close(&kv_a);
+}
+
+ZTEST(kv_suite, test_kv_ops_require_io_slab)
+{
+	zdb_kv_t kv;
+	uint8_t out_buf[8];
+	uint32_t value = 0x12345678U;
+	size_t out_len = 0U;
+	struct k_mem_slab *saved_slab = g_db.kv_io_slab;
+	zdb_status_t rc = zdb_kv_open(&g_db, "test_ns", &kv);
+
+	zassert_equal(rc, ZDB_OK, "open failed: %d", rc);
+	g_db.kv_io_slab = NULL;
+
+	rc = zdb_kv_set(&kv, "k", &value, sizeof(value));
+	zassert_equal(rc, ZDB_ERR_INVAL, "set without slab should be INVAL, got %d", rc);
+
+	rc = zdb_kv_get(&kv, "k", out_buf, sizeof(out_buf), &out_len);
+	zassert_equal(rc, ZDB_ERR_INVAL, "get without slab should be INVAL, got %d", rc);
+
+	rc = zdb_kv_delete(&kv, "k");
+	zassert_equal(rc, ZDB_ERR_INVAL, "delete without slab should be INVAL, got %d", rc);
+
+	g_db.kv_io_slab = saved_slab;
+	zdb_kv_close(&kv);
+}
+
+ZTEST(kv_suite, test_kv_iter_lists_namespace_entries)
+{
+	zdb_kv_t kv_ns1;
+	zdb_kv_t kv_ns2;
+	zdb_kv_iter_t iter;
+	uint32_t value_a = 11U;
+	uint32_t value_b = 22U;
+	uint32_t value_other = 99U;
+	char key[CONFIG_ZDB_MAX_KEY_LEN + 1U];
+	uint32_t out_value = 0U;
+	size_t key_len = 0U;
+	size_t out_len = 0U;
+	bool saw_alpha = false;
+	bool saw_beta = false;
+	zdb_status_t rc;
+
+	rc = zdb_kv_open(&g_db, "iter_ns1", &kv_ns1);
+	zassert_equal(rc, ZDB_OK, "open ns1 failed: %d", rc);
+	rc = zdb_kv_open(&g_db, "iter_ns2", &kv_ns2);
+	zassert_equal(rc, ZDB_OK, "open ns2 failed: %d", rc);
+
+	rc = zdb_kv_set(&kv_ns1, "alpha", &value_a, sizeof(value_a));
+	zassert_equal(rc, ZDB_OK, "set alpha failed: %d", rc);
+	rc = zdb_kv_set(&kv_ns1, "beta", &value_b, sizeof(value_b));
+	zassert_equal(rc, ZDB_OK, "set beta failed: %d", rc);
+	rc = zdb_kv_set(&kv_ns2, "other", &value_other, sizeof(value_other));
+	zassert_equal(rc, ZDB_OK, "set other failed: %d", rc);
+
+	rc = zdb_kv_iter_open(&kv_ns1, &iter);
+	zassert_equal(rc, ZDB_OK, "iter open failed: %d", rc);
+
+	while ((rc = zdb_kv_iter_next(&iter, key, sizeof(key), &key_len,
+				      &out_value, sizeof(out_value), &out_len)) == ZDB_OK) {
+		zassert_equal(out_len, sizeof(uint32_t), "unexpected iter value length");
+		zassert_true(key_len > 0U, "iterator key length should be > 0");
+		if (strcmp(key, "alpha") == 0) {
+			saw_alpha = true;
+			zassert_equal(out_value, value_a, "alpha value mismatch");
+		} else if (strcmp(key, "beta") == 0) {
+			saw_beta = true;
+			zassert_equal(out_value, value_b, "beta value mismatch");
+		} else {
+			zassert_unreachable("iterator returned foreign key: %s", key);
+		}
+	}
+
+	zassert_equal(rc, ZDB_ERR_NOT_FOUND, "iterator should end with NOT_FOUND");
+	zassert_true(saw_alpha, "iterator did not return alpha");
+	zassert_true(saw_beta, "iterator did not return beta");
+
+	rc = zdb_kv_iter_close(&iter);
+	zassert_equal(rc, ZDB_OK, "iter close failed: %d", rc);
+	zdb_kv_close(&kv_ns2);
+	zdb_kv_close(&kv_ns1);
+}
+
+ZTEST(kv_suite, test_kv_iter_skips_deleted_entries)
+{
+	zdb_kv_t kv;
+	zdb_kv_iter_t iter;
+	uint32_t keep_val = 1U;
+	uint32_t delete_val = 2U;
+	char key[CONFIG_ZDB_MAX_KEY_LEN + 1U];
+	uint32_t out_value = 0U;
+	size_t key_len = 0U;
+	size_t out_len = 0U;
+	unsigned int found = 0U;
+	zdb_status_t rc;
+
+	rc = zdb_kv_open(&g_db, "iterdel_ns", &kv);
+	zassert_equal(rc, ZDB_OK, "open failed: %d", rc);
+
+	rc = zdb_kv_set(&kv, "keep", &keep_val, sizeof(keep_val));
+	zassert_equal(rc, ZDB_OK, "set keep failed: %d", rc);
+	rc = zdb_kv_set(&kv, "gone", &delete_val, sizeof(delete_val));
+	zassert_equal(rc, ZDB_OK, "set gone failed: %d", rc);
+	rc = zdb_kv_delete(&kv, "gone");
+	zassert_equal(rc, ZDB_OK, "delete failed: %d", rc);
+
+	rc = zdb_kv_iter_open(&kv, &iter);
+	zassert_equal(rc, ZDB_OK, "iter open failed: %d", rc);
+
+	while ((rc = zdb_kv_iter_next(&iter, key, sizeof(key), &key_len,
+				      &out_value, sizeof(out_value), &out_len)) == ZDB_OK) {
+		found++;
+		zassert_equal(strcmp(key, "keep"), 0, "deleted key appeared: %s", key);
+		zassert_equal(out_value, keep_val, "unexpected iterator value");
+	}
+
+	zassert_equal(rc, ZDB_ERR_NOT_FOUND, "iterator should end with NOT_FOUND");
+	zassert_equal(found, 1U, "expected exactly one iterated key, got %u", found);
+
+	rc = zdb_kv_iter_close(&iter);
+	zassert_equal(rc, ZDB_OK, "iter close failed: %d", rc);
+	zdb_kv_close(&kv);
+}
+
+#if defined(CONFIG_ZDB_KV_BACKEND_NVS)
+/*
+ * Deterministic 16-bit record-ID collision search.
+ *
+ * Mirrors the production ID derivation so the found pair collides at the
+ * backend level: FNV-1a over the key, folded to 16 bits, 0 remapped to 1.
+ */
+static uint16_t test_record_id16(const char *key)
+{
+	uint32_t hash = 0x811C9DC5u;
+	const char *s = key;
+
+	while ((*s) != '\0') {
+		hash ^= (uint8_t)(*s);
+		hash *= 0x01000193u;
+		s++;
+	}
+
+	hash &= 0xFFFFu;
+	if (hash == 0U) {
+		hash = 1U;
+	}
+
+	return (uint16_t)hash;
+}
+
+static void test_key_from_index(uint32_t idx, char out_key[5])
+{
+	/* 17 symbols -> 17^4 inputs (> 2^16), guarantees at least one collision. */
+	static const char alphabet[] = "abcdefghijklmnopq";
+	const uint32_t base = (uint32_t)(sizeof(alphabet) - 1U);
+
+	out_key[0] = alphabet[idx % base];
+	idx /= base;
+	out_key[1] = alphabet[idx % base];
+	idx /= base;
+	out_key[2] = alphabet[idx % base];
+	idx /= base;
+	out_key[3] = alphabet[idx % base];
+	out_key[4] = '\0';
+}
+
+static bool test_find_id16_collision(char key_a[5], char key_b[5])
+{
+	static uint32_t first_idx[65536];
+	uint32_t i;
+	const uint32_t total = 17U * 17U * 17U * 17U;
+
+	for (i = 0U; i < ARRAY_SIZE(first_idx); i++) {
+		first_idx[i] = UINT32_MAX;
+	}
+
+	for (i = 0U; i < total; i++) {
+		char key[5];
+		uint16_t h;
+
+		test_key_from_index(i, key);
+		h = test_record_id16(key);
+
+		if (first_idx[h] != UINT32_MAX) {
+			test_key_from_index(first_idx[h], key_a);
+			(void)strcpy(key_b, key);
+			if (strcmp(key_a, key_b) != 0) {
+				return true;
+			}
+		} else {
+			first_idx[h] = i;
+		}
+	}
+
+	return false;
+}
+
+ZTEST(kv_suite, test_kv_hash_collision)
+{
+	zdb_kv_t kv;
+	char key_a[5];
+	char key_b[5];
+	uint32_t value_a = 0xAAAAAAAAU;
+	uint32_t value_b = 0xBBBBBBBBU;
+	uint32_t out_val = 0U;
+	size_t out_len = 0U;
+	zdb_status_t rc = zdb_kv_open(&g_db, "collision_ns", &kv);
+
+	zassert_equal(rc, ZDB_OK, "open failed: %d", rc);
+
+	zassert_true(test_find_id16_collision(key_a, key_b),
+		     "failed to find deterministic 16-bit ID collision");
+
+	rc = zdb_kv_set(&kv, key_a, &value_a, sizeof(value_a));
+	zassert_equal(rc, ZDB_OK, "set key_a failed: %d", rc);
+
+	/*
+	 * FIXME(characterization): a colliding second set currently
+	 * overwrites the first record, losing key_a's data.  Flipped by the
+	 * KV v2 fix to reject the write with ZDB_ERR_COLLISION and keep
+	 * key_a intact.
+	 */
+	rc = zdb_kv_set(&kv, key_b, &value_b, sizeof(value_b));
+	zassert_equal(rc, ZDB_OK, "characterization: colliding set overwrites: %d", rc);
+
+	rc = zdb_kv_get(&kv, key_a, &out_val, sizeof(out_val), &out_len);
+	zassert_equal(rc, ZDB_ERR_NOT_FOUND,
+		      "characterization: key_a lost to collision, got %d", rc);
+
+	rc = zdb_kv_get(&kv, key_b, &out_val, sizeof(out_val), &out_len);
+	zassert_equal(rc, ZDB_OK, "get key_b failed: %d", rc);
+	zassert_equal(out_val, value_b, "collision returned wrong payload");
+
+	zdb_kv_close(&kv);
+}
+#endif /* CONFIG_ZDB_KV_BACKEND_NVS */

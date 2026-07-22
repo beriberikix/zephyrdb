@@ -2,14 +2,18 @@
 
 ZephyrDB supports multiple backend/storage combinations, so test coverage depends on board capabilities.
 
+The automated test suite lives in [`tests/`](../tests/README.md); run it with
+Twister (`twister -T tests -p native_sim`). This guide covers manual,
+board-level validation of samples and applications.
+
 ## Board Selection
 
 Use the board based on what you want to validate.
 
 | Goal | Recommended Board | Notes |
 |---|---|---|
-| Fast compile verification | `native_sim` | Validates build integration and API usage patterns |
-| Backend behavior and persistence | `nrf52840dk` | Validates NVS/ZMS/FCB/LittleFS behavior on flash-capable target |
+| Automated behavioral tests | `native_sim` | Runs the full KV/TS/DOC suite against the flash simulator and LittleFS |
+| Backend behavior on real flash | `nrf52840dk` | Validates NVS/ZMS/FCB/LittleFS wear, timing, and persistence on hardware |
 | Final application validation | Production hardware | Validates board-specific runtime behavior |
 
 ## Compatibility Matrix
@@ -17,15 +21,17 @@ Use the board based on what you want to validate.
 | Capability | native_sim | nrf52840dk |
 |---|---|---|
 | Build and link validation | Yes | Yes |
-| NVS backend runtime behavior | Limited | Yes |
-| ZMS backend runtime behavior | Limited | Yes |
+| NVS backend runtime behavior | Yes (flash simulator) | Yes |
+| ZMS backend runtime behavior | Yes (flash simulator) | Yes |
 | FCB backend runtime behavior | Limited | Yes |
-| LittleFS-backed TS or DOC validation | Limited | Yes |
+| LittleFS-backed TS or DOC validation | Yes (flash simulator) | Yes |
 | SD card overlays | No | Yes |
+| Power-loss / reboot persistence | No | Yes (manual two-run check) |
 
-## Why native_sim is limited for storage
-
-`native_sim` is useful for compile-time and API checks but does not represent real flash persistence for backend validation.
+native_sim runs the storage backends against the flash simulator, which
+exercises real backend code paths but not flash wear, timing, or
+power-loss behavior — validate those on hardware. native_sim itself only
+builds on Linux hosts.
 
 ## Build Examples
 

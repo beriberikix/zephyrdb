@@ -1,0 +1,8 @@
+tests:
+  zephyrdb.integration.workflows:
+    harness: ztest
+    tags:
+      - zephyrdb
+      - integration
+    platform_allow:
+      - native_sim
