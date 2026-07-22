@@ -139,7 +139,8 @@ static zdb_status_t zdb_doc_open_impl(zdb_t *db, const char *collection_name,
 	struct zdb_doc_hdr_v1 hdr;
 	struct zdb_doc_field_hdr_v1 field_hdr;
 	zdb_status_t lock_rc = ZDB_OK;
-	uint64_t saved_created_ms, saved_updated_ms;
+	uint64_t saved_created_ms = 0U;
+	uint64_t saved_updated_ms = 0U;
 	int rc = 0;
 	size_t i;
 	bool lock_held = false;

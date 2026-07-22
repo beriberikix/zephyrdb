@@ -10,11 +10,14 @@ manifest:
   projects:
     - name: zephyr
       remote: zephyrproject
-      revision: main
+      # Pinned release: first tag family shipping <zephyr/kvss/zms.h> (v4.4.x)
+      revision: v4.4.1
       path: tools/zephyr
       import: true
-    
+
     - name: flatcc-zephyr
       remote: beriberikix
-      revision: main
+      revision: 4075daed73e62011f3c8a01243af03cfaf5f115a
       path: modules/lib/flatcc-zephyr
+      # Pull the upstream dvidelabs/flatcc sources the module wraps.
+      submodules: true

@@ -14,13 +14,26 @@ else()
     "${ZEPHYRDB_LOCAL_MODULE_DIR} or ${ZEPHYRDB_REPO_MODULE_DIR}")
 endif()
 
-set(FLATCC_ZEPHYR_MODULE_DIR ${CMAKE_CURRENT_LIST_DIR}/../../../flatcc-zephyr/modules/lib/flatcc-zephyr)
-if(EXISTS ${FLATCC_ZEPHYR_MODULE_DIR}/zephyr/module.yml)
+# flatcc-zephyr nests its Zephyr module.yml under modules/lib/flatcc-zephyr.
+# Look in the west workspace layout (<topdir>/modules/lib/flatcc-zephyr)
+# first, then a checkout next to this repo.
+set(FLATCC_ZEPHYR_CANDIDATES
+    ${CMAKE_CURRENT_LIST_DIR}/../../../../modules/lib/flatcc-zephyr/modules/lib/flatcc-zephyr
+    ${CMAKE_CURRENT_LIST_DIR}/../../../modules/lib/flatcc-zephyr/modules/lib/flatcc-zephyr
+    ${CMAKE_CURRENT_LIST_DIR}/../../../flatcc-zephyr/modules/lib/flatcc-zephyr)
+set(FLATCC_ZEPHYR_MODULE_DIR "")
+foreach(candidate ${FLATCC_ZEPHYR_CANDIDATES})
+  if(EXISTS ${candidate}/zephyr/module.yml)
+    set(FLATCC_ZEPHYR_MODULE_DIR ${candidate})
+    break()
+  endif()
+endforeach()
+if(FLATCC_ZEPHYR_MODULE_DIR)
   list(APPEND EXTRA_ZEPHYR_MODULES ${FLATCC_ZEPHYR_MODULE_DIR})
 else()
   message(FATAL_ERROR
-    "doc_basic: flatcc-zephyr module not found at ${FLATCC_ZEPHYR_MODULE_DIR}. "
-    "Clone beriberikix/flatcc-zephyr next to zephyrdb.")
+    "doc_basic: flatcc-zephyr module not found. Searched: ${FLATCC_ZEPHYR_CANDIDATES}. "
+    "Run 'west update' (flatcc-zephyr is in west.yml) or clone beriberikix/flatcc-zephyr next to zephyrdb.")
 endif()
 
 find_package(Zephyr REQUIRED HINTS $ENV{ZEPHYR_BASE})

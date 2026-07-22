@@ -1,0 +1,38 @@
+/*
+ * LittleFS partition and fstab automount for native_sim.
+ *
+ * The base native_sim DTS provides a 2 MB simulated flash with partitions
+ * up to 0x100000.  This overlay adds a 256 KB LittleFS partition in the
+ * remaining space and an fstab entry so the filesystem is mounted
+ * automatically at boot.
+ */
+
+&flash0 {
+	partitions {
+		compatible = "fixed-partitions";
+		#address-cells = <1>;
+		#size-cells = <1>;
+
+		lfs_partition: partition@100000 {
+			label = "lfs";
+			reg = <0x100000 0x40000>;
+		};
+	};
+};
+
+/ {
+	fstab {
+		compatible = "zephyr,fstab";
+		lfs: lfs {
+			compatible = "zephyr,fstab,littlefs";
+			read-size = <16>;
+			prog-size = <16>;
+			cache-size = <64>;
+			lookahead-size = <32>;
+			block-cycles = <512>;
+			partition = <&lfs_partition>;
+			mount-point = "/lfs";
+			automount;
+		};
+	};
+};

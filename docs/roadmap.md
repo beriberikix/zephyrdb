@@ -20,8 +20,16 @@ Unimplemented enhancements under consideration. Items are removed as they ship.
 - Multi-stream time-series coordination APIs
 - Compression and long-window compaction for TS data
 
+### DOC Enhancements
+
+- **NVS/ZMS document backends** — Store documents as serialized blobs for boards without a filesystem (with a RAM manifest for query enumeration).
+- **Nested object/array fields** — `ZDB_DOC_FIELD_OBJECT`/`ARRAY` exist in the type enum but serialization is unimplemented.
+- **FlatBuffers document export** — `zdb_doc_export_flatbuffer()` is a stub returning `ZDB_ERR_UNSUPPORTED`.
+- **Atomic document saves** — write-to-temp-then-rename so a power loss mid-save cannot corrupt an existing document; extend the CRC to cover field payloads.
+
 ### Other
 
+- **Persistent KV iteration** — the v2 record format stores the namespace on disk; a backend scan could rebuild the key index across reboots (today iteration covers only keys touched this session).
 - **Runtime sector/partition size control** — Allow tuning storage sector size per database instance at runtime to control max record size vs. storage efficiency tradeoffs.
 - Extended document schema evolution support
 - Additional security hardening for data at rest

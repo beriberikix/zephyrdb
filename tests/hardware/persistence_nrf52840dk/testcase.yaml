@@ -1,0 +1,9 @@
+tests:
+  zephyrdb.hardware.persistence:
+    build_only: true
+    harness: ztest
+    tags:
+      - zephyrdb
+      - hardware
+    platform_allow:
+      - nrf52840dk/nrf52840

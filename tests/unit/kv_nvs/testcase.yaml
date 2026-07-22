@@ -1,0 +1,9 @@
+tests:
+  zephyrdb.unit.kv.nvs:
+    harness: ztest
+    tags:
+      - zephyrdb
+      - unit
+      - kv
+    platform_allow:
+      - native_sim

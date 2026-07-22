@@ -1,31 +1,57 @@
 # API Reference
 
-This page summarizes the currently implemented ZephyrDB public APIs.
+This page summarizes the ZephyrDB public API. For exact signatures and
+compile-time guards, see [../zephyrdb.h](../zephyrdb.h) — the header is the
+source of truth.
 
 ## Build-Time Guards
 
 - Core APIs are available when `CONFIG_ZEPHYRDB=y`.
 - KV APIs are available when `CONFIG_ZDB_KV=y`.
 - TS APIs are available when `CONFIG_ZDB_TS=y`.
-- Document APIs are available when `CONFIG_ZDB_DOC=y`. Requires `ZDB_CORE` and a storage backend (`FILE_SYSTEM`, `NVS`, or `ZMS`).
+- Document APIs are available when `CONFIG_ZDB_DOC=y` (requires a mounted
+  filesystem, e.g. LittleFS).
 - FlatBuffers export helper requires `CONFIG_ZDB_FLATBUFFERS=y` and `CONFIG_FLATCC=y`.
 - Eventing APIs are available when `CONFIG_ZDB_EVENTING=y`.
 - zbus adapter APIs are available when `CONFIG_ZDB_EVENTING_ZBUS=y`.
+- Shell commands are available when `CONFIG_ZDB_SHELL=y`.
+
+## Status Codes
+
+All APIs return `zdb_status_t`: `ZDB_OK`, `ZDB_ERR_INVAL`, `ZDB_ERR_NOMEM`,
+`ZDB_ERR_NOT_FOUND`, `ZDB_ERR_IO`, `ZDB_ERR_BUSY`, `ZDB_ERR_TIMEOUT`,
+`ZDB_ERR_UNSUPPORTED`, `ZDB_ERR_CORRUPT`, `ZDB_ERR_INTERNAL`,
+`ZDB_ERR_COLLISION`. `zdb_status_str(status)` returns a short printable name.
+
+## Instance Setup
+
+- `ZDB_DEFINE_STATIC(db_name, cfg_name)` — declares the Kconfig-sized memory
+  slabs (core, cursor, and the KV/TS IO slabs for enabled modules) and a
+  `static zdb_t db_name` wired to them. The `cfg_name` argument is currently
+  unused by the macro; pass the same `zdb_cfg_t` to `zdb_init()`.
+- Lower-level slab macros: `ZDB_MEM_SLAB_DEFINE`, `ZDB_DEFINE_CORE_SLAB`,
+  `ZDB_DEFINE_CURSOR_SLAB`, `ZDB_DEFINE_KV_IO_SLAB`, `ZDB_DEFINE_TS_INGEST_SLAB`.
 
 ## Core
 
-- `zdb_init(db, cfg)`
-- `zdb_deinit(db)`
-- `zdb_health(db)`
-- `zdb_ts_stats_get(db, out)`
-- `zdb_ts_stats_reset(db)`
-- `zdb_ts_stats_export(db, out_export)`
-- `zdb_ts_stats_export_validate(export)`
+- `zdb_init(db, cfg)` / `zdb_deinit(db)`
+- `zdb_health(db)` — returns `zdb_health_t` (`OK`/`DEGRADED`/`READONLY`/`FAULT`)
+- `zdb_status_str(status)` — printable status name
+- `zdb_ts_stats_get(db, out)` / `zdb_ts_stats_reset(db)`
+- `zdb_ts_stats_export(db, out_export)` — fills a packed, CRC-protected
+  telemetry record; the CRC covers every byte except the crc field itself
+- `zdb_ts_stats_export_validate(export)` — `ZDB_ERR_CORRUPT` on CRC mismatch,
+  `ZDB_ERR_UNSUPPORTED` on unknown version
+
+### Cursors (core framework, currently used by TS)
+
+- `zdb_cursor_next(cursor, out_record)` — declared with the TS module today
+- `zdb_cursor_reset(cursor)`
+- `zdb_cursor_close(cursor)`
 
 ## Key-Value
 
-- `zdb_kv_open(db, namespace_name, kv)`
-- `zdb_kv_close(kv)`
+- `zdb_kv_open(db, namespace_name, kv)` / `zdb_kv_close(kv)`
 - `zdb_kv_set(kv, key, value, value_len)`
 - `zdb_kv_get(kv, key, out_value, out_capacity, out_len)`
 - `zdb_kv_delete(kv, key)`
@@ -33,99 +59,130 @@ This page summarizes the currently implemented ZephyrDB public APIs.
 - `zdb_kv_iter_next(iter, out_key, out_key_capacity, out_key_len, out_value, out_value_capacity, out_value_len)`
 - `zdb_kv_iter_close(iter)`
 
+Storage format (v2): each record is stored as
+`[0xDB tag][ns_len][key_len][namespace][key][value]` under a backend record
+ID hashed from the namespace and key together, so namespaces are isolated in
+storage and reads verify the full identity of the stored record.
+
 Notes:
 
-- The iterator tracks keys set/deleted during the current session. Cross-session iteration from persisted data requires namespace metadata in the on-disk format (not yet implemented).
+- `zdb_kv_set` returns `ZDB_ERR_COLLISION` when the key's backend record ID
+  is already occupied by a **different** (namespace, key); the stored record
+  is untouched. The remedy is choosing a different key name. With the NVS
+  backend the ID space is 16-bit, so collisions are rare but reachable.
+- The maximum value size is
+  `CONFIG_ZDB_KV_IO_SLAB_BLOCK_SIZE - 3 - strlen(namespace) - strlen(key)`;
+  larger values fail with `ZDB_ERR_NOMEM`.
+- `zdb_kv_get` never fails on a too-small output buffer: it copies up to
+  `out_capacity` bytes and reports the full stored length in `*out_len`.
+  Compare `*out_len` against your capacity to detect truncation.
+- Records written by pre-v2 builds are treated as absent (reads and deletes
+  report `ZDB_ERR_NOT_FOUND`); a set reclaims the slot.
+- The iterator walks keys set/deleted during the current session (RAM index,
+  128 entries). Cross-session iteration from persisted data is not yet
+  implemented, although the v2 format now persists the namespace needed for it.
 
 ## Eventing
 
-- `zdb_event_type_t`
-- `zdb_kv_event_t`
-- `zdb_event_listener_fn_t`
-- `zdb_event_listener_t`
-- `zdb_ts_event_type_t`
-- `zdb_ts_event_t`
-- `zdb_ts_event_listener_fn_t`
-- `zdb_ts_event_listener_t`
-- `zdb_doc_event_type_t`
-- `zdb_doc_event_t`
-- `zdb_doc_event_listener_fn_t`
-- `zdb_doc_event_listener_t`
+Listener types (each embeds a `notify` function pointer and `user_ctx`):
 
-Configuration fields in `zdb_cfg_t` when eventing is enabled:
+- `zdb_event_listener_t` for `zdb_kv_event_t` (types `ZDB_EVENT_KV_SET`/`ZDB_EVENT_KV_DELETE`)
+- `zdb_ts_event_listener_t` for `zdb_ts_event_t` (append/flush/recover)
+- `zdb_doc_event_listener_t` for `zdb_doc_event_t` (create/save/delete)
 
-- `event_listeners`
-- `event_listener_count`
-- `ts_event_listeners`
-- `ts_event_listener_count`
-- `doc_event_listeners`
-- `doc_event_listener_count`
+Register listener arrays through `zdb_cfg_t` before `zdb_init()`:
+
+```c
+static void on_kv_event(const zdb_kv_event_t *event, void *user_ctx)
+{
+    printk("kv %s/%s -> %s\n", event->namespace_name, event->key,
+           zdb_status_str(event->status));
+}
+
+static const zdb_event_listener_t listeners[] = {
+    { .notify = on_kv_event, .user_ctx = NULL },
+};
+
+static const zdb_cfg_t cfg = {
+    /* ... */
+    .event_listeners = listeners,
+    .event_listener_count = ARRAY_SIZE(listeners),
+};
+```
+
+Events fire after each operation with its real status (including failures
+and `ZDB_ERR_COLLISION`); entries with a NULL `notify` are skipped.
+Corresponding `ts_event_listeners`/`doc_event_listeners` fields exist when
+TS/DOC are enabled.
 
 ## zbus Adapter
 
-Header:
+Header: `zephyrdb_eventing_zbus.h`
 
-- `zephyrdb_eventing_zbus.h`
+- Channels: `zdb_kv_event_chan`, `zdb_ts_event_chan`, `zdb_doc_event_chan`
+  (payloads `zdb_kv_event_t`/`zdb_ts_event_t`/`zdb_doc_event_t`)
+- `zdb_eventing_zbus_publish(event)` / `_publish_ts(event)` / `_publish_doc(event)`
 
-Symbols:
-
-- `ZBUS_CHAN_DECLARE(zdb_kv_event_chan)`
-- `ZBUS_CHAN_DECLARE(zdb_ts_event_chan)`
-- `ZBUS_CHAN_DECLARE(zdb_doc_event_chan)`
-- `zdb_eventing_zbus_publish(const zdb_kv_event_t *event)`
-- `zdb_eventing_zbus_publish_ts(const zdb_ts_event_t *event)`
-- `zdb_eventing_zbus_publish_doc(const zdb_doc_event_t *event)`
-
-Channel payload types:
-
-- `zdb_kv_event_t`
-- `zdb_ts_event_t`
-- `zdb_doc_event_t`
+Publication is best-effort and never changes operation return values.
 
 ## Time-Series
 
-- `zdb_ts_open(db, stream_name, ts)`
-- `zdb_ts_close(ts)`
-- `zdb_ts_append_i64(ts, sample)`
-- `zdb_ts_append_batch_i64(ts, samples, sample_count)`
-- `zdb_ts_flush_async(ts)`
-- `zdb_ts_flush_sync(ts, timeout)`
-- `zdb_ts_query_aggregate(ts, window, agg, out_result)`
+- `zdb_ts_open(db, stream_name, ts)` / `zdb_ts_close(ts)`
+- `zdb_ts_append_i64(ts, sample)` / `zdb_ts_append_batch_i64(ts, samples, sample_count)`
+- `zdb_ts_flush_async(ts)` / `zdb_ts_flush_sync(ts, timeout)`
+- `zdb_ts_query_aggregate(ts, window, agg, out_result)` — MIN/MAX/AVG/SUM/COUNT
 - `zdb_ts_recover_stream(ts, out_truncated_bytes)`
 - `zdb_ts_cursor_open(ts, window, predicate, predicate_ctx, out_cursor)`
-- `zdb_cursor_next(cursor, out_record)`
-- `zdb_cursor_reset(cursor)`
-- `zdb_cursor_close(cursor)`
+
+Helpers: `ZDB_TS_WINDOW_ALL` — a `zdb_ts_window_t` covering all timestamps.
 
 Notes:
 
-- `zdb_ts_query_aggregate()` is backend-dependent and may return `ZDB_ERR_UNSUPPORTED` on non-aggregate-capable backends.
+- One instance handles **one active stream** at a time: opening a second,
+  different stream returns `ZDB_ERR_BUSY` until `zdb_deinit()`. Re-opening
+  the active stream is allowed.
+- Cursors iterate flushed records from storage plus samples still in the
+  RAM ingest buffer.
+- Backend differences (FCB): appends are written through synchronously, so
+  `flush_*` are no-ops returning `ZDB_OK`; `zdb_ts_query_aggregate` returns
+  `ZDB_ERR_UNSUPPORTED`; `zdb_ts_recover_stream` is a no-op reporting zero
+  truncated bytes.
 
 ## FlatBuffers Export Helper
 
-- `zdb_ts_sample_i64_export_flatbuffer(sample, out_buf, out_capacity, out_len)`
+- `zdb_ts_sample_i64_export_flatbuffer(sample, out_buf, out_capacity, out_len)` —
+  implemented when `CONFIG_ZDB_FLATBUFFERS=y` and `CONFIG_FLATCC=y`, otherwise
+  returns `ZDB_ERR_UNSUPPORTED`.
 
 ## Document Model
 
 - `zdb_doc_create(db, collection_name, document_id, out_doc)`
 - `zdb_doc_open(db, collection_name, document_id, out_doc)`
-- `zdb_doc_save(doc)`
-- `zdb_doc_delete(db, collection_name, document_id)`
-- `zdb_doc_close(doc)`
-- `zdb_doc_field_set_i64(doc, field_name, value)`
-- `zdb_doc_field_set_f64(doc, field_name, value)`
-- `zdb_doc_field_set_string(doc, field_name, value)`
-- `zdb_doc_field_set_bool(doc, field_name, value)`
-- `zdb_doc_field_set_bytes(doc, field_name, value, len)`
-- `zdb_doc_field_get_i64(doc, field_name, out_value)`
-- `zdb_doc_field_get_f64(doc, field_name, out_value)`
-- `zdb_doc_field_get_string(doc, field_name, out_value)`
-- `zdb_doc_field_get_bool(doc, field_name, out_value)`
-- `zdb_doc_field_get_bytes(doc, field_name, out_value)`
+- `zdb_doc_save(doc)` / `zdb_doc_delete(db, collection_name, document_id)` / `zdb_doc_close(doc)`
+- Field setters/getters for `i64`, `f64`, `string`, `bool`, `bytes`
+  (`zdb_doc_field_set_*` / `zdb_doc_field_get_*`)
 - `zdb_doc_query(db, query, out_metadata, out_count)`
 - `zdb_doc_metadata_free(metadata, count)`
-- `zdb_doc_export_flatbuffer(doc, out_buf, out_capacity, out_len)`
+- `zdb_doc_export_flatbuffer(doc, out_buf, out_capacity, out_len)` — **stub**:
+  always returns `ZDB_ERR_UNSUPPORTED`; document persistence uses ZephyrDB's
+  own binary format, not FlatBuffers.
 
-## Source of Truth
+Notes:
 
-For exact signatures and compile-time guards, see [../zephyrdb.h](../zephyrdb.h).
+- Implemented field types are `INT64`, `DOUBLE`, `STRING`, `BOOL`, `BYTES`.
+  `NULL`, `OBJECT`, and `ARRAY` appear in the enum but are not implemented;
+  saving or loading them returns `ZDB_ERR_UNSUPPORTED`.
+- `zdb_doc_query`: filters are AND-combined equality matches; `*out_count`
+  is the output array capacity on input and the result count on output.
+  Passing `out_metadata = NULL` returns the total match count. The query
+  scans all collections; there is no collection filter field.
+- Query time windows (`from_ms`/`to_ms`) filter on `updated_ms`, which is
+  milliseconds since boot (`k_uptime_get()`), not wall-clock time.
+- `zdb_doc_save` rewrites the document file in place (not atomically);
+  only the header is CRC-protected.
+
+## Shell
+
+- `zdb_shell_register(db)` — registers the `zdb` command tree
+  (`zdb health`, `zdb stats`, `zdb kv set|get|delete|list`,
+  `zdb ts append|query|flush`, `zdb doc open`). One instance at a time.

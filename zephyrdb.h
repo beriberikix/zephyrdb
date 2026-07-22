@@ -66,6 +66,7 @@ extern "C"
 		ZDB_ERR_UNSUPPORTED,
 		ZDB_ERR_CORRUPT,
 		ZDB_ERR_INTERNAL,
+		ZDB_ERR_COLLISION,
 	} zdb_status_t;
 
 	typedef enum

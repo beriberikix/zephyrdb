@@ -61,6 +61,8 @@ const char *zdb_status_str(zdb_status_t status)
 		return "CORRUPT";
 	case ZDB_ERR_INTERNAL:
 		return "INTERNAL";
+	case ZDB_ERR_COLLISION:
+		return "COLLISION";
 	default:
 		return "UNKNOWN";
 	}
@@ -325,10 +327,24 @@ void zdb_ts_stats_reset(zdb_t *db)
 	(void)memset(&db->ts_stats, 0, sizeof(db->ts_stats));
 }
 
-zdb_status_t zdb_ts_stats_export(const zdb_t *db, zdb_ts_stats_export_t *out_export)
+/*
+ * CRC over every byte of the export except the crc field itself, which
+ * sits mid-struct: hash the bytes before it, then the bytes after it.
+ */
+static uint32_t zdb_ts_stats_export_crc(const zdb_ts_stats_export_t *export_data)
 {
+	const uint8_t *bytes = (const uint8_t *)export_data;
+	const size_t crc_off = offsetof(zdb_ts_stats_export_t, crc);
+	const size_t tail_off = crc_off + sizeof(export_data->crc);
 	uint32_t crc;
 
+	crc = crc32_ieee_update(0x0U, bytes, crc_off);
+	return crc32_ieee_update(crc, &bytes[tail_off],
+				 sizeof(*export_data) - tail_off);
+}
+
+zdb_status_t zdb_ts_stats_export(const zdb_t *db, zdb_ts_stats_export_t *out_export)
+{
 	if ((db == NULL) || (out_export == NULL)) {
 		return ZDB_ERR_INVAL;
 	}
@@ -342,10 +358,7 @@ zdb_status_t zdb_ts_stats_export(const zdb_t *db, zdb_ts_stats_export_t *out_exp
 	out_export->corrupt_records = db->ts_stats.corrupt_records;
 	out_export->unsupported_versions = db->ts_stats.unsupported_versions;
 
-	/* Compute CRC over all fields except the crc field itself */
-	crc = crc32_ieee((const uint8_t *)out_export,
-			 offsetof(zdb_ts_stats_export_t, crc));
-	out_export->crc = crc;
+	out_export->crc = zdb_ts_stats_export_crc(out_export);
 
 	return ZDB_OK;
 }
@@ -359,9 +372,7 @@ zdb_status_t zdb_ts_stats_export_validate(const zdb_ts_stats_export_t *export)
 		return ZDB_ERR_INVAL;
 	}
 
-	/* Recompute CRC over all fields except the crc field itself */
-	expect_crc = crc32_ieee((const uint8_t *)export,
-			       offsetof(zdb_ts_stats_export_t, crc));
+	expect_crc = zdb_ts_stats_export_crc(export);
 	got_crc = export->crc;
 
 	if (got_crc != expect_crc) {
