@@ -6,25 +6,22 @@ on:
   pull_request:
     branches: [ main, develop ]
   workflow_dispatch:
-    inputs:
-      run_hardware_tests:
-        description: 'Run hardware tests on nRF52840dk'
-        required: false
-        default: 'false'
+
+env:
+  # Keep in sync with west.yml.
+  ZEPHYR_REVISION: v4.4.1
 
 jobs:
-  unit_and_integration_tests:
-    name: Unit & Integration Tests (native_sim)
+  native_sim_tests:
+    name: Test suites (native_sim)
     runs-on: ubuntu-latest
     env:
       ZEPHYR_TOOLCHAIN_VARIANT: host
-    
+
     steps:
     - name: Checkout repository
       uses: actions/checkout@v4
-      with:
-        fetch-depth: 0
-    
+
     - name: Set up Zephyr workspace
       run: |
         sudo apt-get update
@@ -34,26 +31,23 @@ jobs:
         python3 -m pip install --user west
         echo "$HOME/.local/bin" >> "$GITHUB_PATH"
 
-        west init -m https://github.com/zephyrproject-rtos/zephyr --mr main .west-zephyr
+        west init -m https://github.com/zephyrproject-rtos/zephyr \
+          --mr "$ZEPHYR_REVISION" .west-zephyr
         cd .west-zephyr
         west update --narrow -o=--depth=1
         west zephyr-export
         python3 -m pip install --user -r zephyr/scripts/requirements.txt
 
         echo "ZEPHYR_BASE=$GITHUB_WORKSPACE/.west-zephyr/zephyr" >> "$GITHUB_ENV"
-    
-    - name: Run unit tests (native_sim)
+
+    - name: Run test suites (native_sim)
       run: |
-        python3 "$ZEPHYR_BASE/scripts/twister" -T tests/unit/ -p native_sim -v
-    
-    - name: Run integration tests (native_sim)
+        python3 "$ZEPHYR_BASE/scripts/twister" -T tests -p native_sim -v --inline-logs
+
+    - name: Build and run samples (native_sim)
       run: |
-        python3 "$ZEPHYR_BASE/scripts/twister" -T tests/integration/ -p native_sim -v
-    
-    - name: Run sample validation tests (native_sim)
-      run: |
-        python3 "$ZEPHYR_BASE/scripts/twister" -T tests/samples/ -p native_sim -v
-    
+        python3 "$ZEPHYR_BASE/scripts/twister" -T samples -p native_sim -v --inline-logs
+
     - name: Upload test results
       if: always()
       uses: actions/upload-artifact@v4
@@ -62,72 +56,58 @@ jobs:
         path: twister-out/
         retention-days: 14
 
-  hardware_tests:
-    name: Hardware Tests (nRF52840 DK)
+  hardware_build:
+    name: Hardware build gate (nRF52840 DK)
     runs-on: ubuntu-latest
-    env:
-      ZEPHYR_TOOLCHAIN_VARIANT: host
-    if: |
-      github.event_name == 'push' ||
-      github.event_name == 'workflow_dispatch' ||
-      contains(github.event.pull_request.labels.*.name, 'hw-test')
-    
+
     steps:
     - name: Checkout repository
       uses: actions/checkout@v4
-      with:
-        fetch-depth: 0
-    
+
     - name: Set up Zephyr workspace
       run: |
-        sudo apt-get update
-        sudo apt-get install -y gcc-multilib g++-multilib libc6-dev-i386
-
         python3 -m pip install --user --upgrade pip
         python3 -m pip install --user west
         echo "$HOME/.local/bin" >> "$GITHUB_PATH"
 
-        west init -m https://github.com/zephyrproject-rtos/zephyr --mr main .west-zephyr
+        west init -m https://github.com/zephyrproject-rtos/zephyr \
+          --mr "$ZEPHYR_REVISION" .west-zephyr
         cd .west-zephyr
         west update --narrow -o=--depth=1
         west zephyr-export
         python3 -m pip install --user -r zephyr/scripts/requirements.txt
 
         echo "ZEPHYR_BASE=$GITHUB_WORKSPACE/.west-zephyr/zephyr" >> "$GITHUB_ENV"
-    
+
+    - name: Install Zephyr SDK (arm-zephyr-eabi)
+      run: |
+        cd "$GITHUB_WORKSPACE/.west-zephyr"
+        west sdk install -t arm-zephyr-eabi
+
     - name: Build hardware tests for nRF52840dk
       run: |
-        python3 "$ZEPHYR_BASE/scripts/twister" -T tests/hardware/ -p nrf52840dk_nrf52840 \
-          --build-only -v || echo "Build check complete"
-    
-    - name: Note on hardware tests
+        python3 "$ZEPHYR_BASE/scripts/twister" -T tests/hardware \
+          -p nrf52840dk/nrf52840 -v --inline-logs
+
+    - name: How to run on real hardware
       run: |
-        echo "## Hardware Test Status"
-        echo "Hardware tests (NVS, LittleFS persistence) require physical nRF52840 DK board."
-        echo "This job performs build verification only."
-        echo "For actual hardware testing:"
-        echo "```bash"
-        echo "west twister -S tests/hardware/ -p nrf52840dk_nrf52840 --device-serial /dev/ttyACM0"
-        echo "```"
+        echo "The hardware suite is build-only in CI. To execute on a board:"
+        echo "  twister -T tests/hardware -p nrf52840dk/nrf52840 \\"
+        echo "          --device-testing --device-serial /dev/ttyACM0"
 
   test_summary:
     name: Test Summary
     runs-on: ubuntu-latest
-    needs: [unit_and_integration_tests]
+    needs: [native_sim_tests, hardware_build]
     if: always()
-    
+
     steps:
     - name: Check test status
       run: |
-        echo "## Test Execution Summary"
-        echo "✓ Unit tests (KV, TS, DOC): ~30 tests"
-        echo "✓ Integration tests: 8 tests"
-        echo "✓ Sample validation tests: 3 tests"
-        echo ""
-        if [ "${{ needs.unit_and_integration_tests.result }}" == "success" ]; then
-          echo "### Result: **ALL TESTS PASSED** ✓"
-          exit 0
-        else
-          echo "### Result: **TESTS FAILED** ✗"
+        echo "native_sim suites: ${{ needs.native_sim_tests.result }}"
+        echo "hardware build:    ${{ needs.hardware_build.result }}"
+        echo "Details: see the twister-out artifact on the native_sim job."
+        if [ "${{ needs.native_sim_tests.result }}" != "success" ] || \
+           [ "${{ needs.hardware_build.result }}" != "success" ]; then
           exit 1
         fi
