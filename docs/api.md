@@ -2,7 +2,8 @@
 
 This page summarizes the ZephyrDB public API. For exact signatures and
 compile-time guards, see [../zephyrdb.h](../zephyrdb.h) — the header is the
-source of truth.
+source of truth. A browsable Doxygen reference generated from the headers
+is hosted at <https://beriberikix.github.io/zephyrdb/>.
 
 ## Build-Time Guards
 

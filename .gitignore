@@ -14,6 +14,9 @@ tools/edtt/
 tools/net-tools/
 samples/*/modules/
 
+# Generated API documentation
+doxygen/
+
 # Build output
 build/
 build_*/
