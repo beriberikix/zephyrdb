@@ -17,13 +17,14 @@ else()
 endif()
 
 # Stage 2 path needs flatcc-zephyr overlay module.
-# flatcc-zephyr nests its Zephyr module.yml under modules/lib/flatcc-zephyr.
-# Look in the west workspace layout (<topdir>/modules/lib/flatcc-zephyr)
-# first, then a checkout next to this repo.
+# flatcc-zephyr carries a repo-root zephyr/module.yml. Look in the west
+# workspace layout (<topdir>/modules/lib/flatcc-zephyr) first, then a
+# checkout next to this repo. West workspaces auto-discover the same
+# path; registering it again here is harmless and covers standalone use.
 set(FLATCC_ZEPHYR_CANDIDATES
-    ${CMAKE_CURRENT_LIST_DIR}/../../../../modules/lib/flatcc-zephyr/modules/lib/flatcc-zephyr
-    ${CMAKE_CURRENT_LIST_DIR}/../../../modules/lib/flatcc-zephyr/modules/lib/flatcc-zephyr
-    ${CMAKE_CURRENT_LIST_DIR}/../../../flatcc-zephyr/modules/lib/flatcc-zephyr)
+    ${CMAKE_CURRENT_LIST_DIR}/../../../../modules/lib/flatcc-zephyr
+    ${CMAKE_CURRENT_LIST_DIR}/../../../modules/lib/flatcc-zephyr
+    ${CMAKE_CURRENT_LIST_DIR}/../../../flatcc-zephyr)
 set(FLATCC_ZEPHYR_MODULE_DIR "")
 foreach(candidate ${FLATCC_ZEPHYR_CANDIDATES})
   if(EXISTS ${candidate}/zephyr/module.yml)

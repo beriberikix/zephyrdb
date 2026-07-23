@@ -17,7 +17,7 @@ manifest:
 
     - name: flatcc-zephyr
       remote: beriberikix
-      revision: 4075daed73e62011f3c8a01243af03cfaf5f115a
+      revision: 915021822eb3f80091b75b3662c1576d1f0fadae
       path: modules/lib/flatcc-zephyr
       # Pull the upstream dvidelabs/flatcc sources the module wraps.
       submodules: true
