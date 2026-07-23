@@ -2,6 +2,11 @@
 
 This directory contains organized project documentation for ZephyrDB.
 
+The generated API reference (Doxygen, built from the public headers) is
+hosted at <https://beriberikix.github.io/zephyrdb/> — that site is the
+canonical API documentation. Build it locally with `doxygen` from the
+repository root (output in `doxygen/html`).
+
 ## Sections
 
 - [API Reference](api.md)

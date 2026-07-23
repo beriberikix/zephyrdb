@@ -1,5 +1,8 @@
 # ZephyrDB
 
+[![docs](https://img.shields.io/github/actions/workflow/status/beriberikix/zephyrdb/docs.yml?branch=main&label=docs)](https://beriberikix.github.io/zephyrdb/)
+[![tests](https://img.shields.io/github/actions/workflow/status/beriberikix/zephyrdb/test.yml?branch=main&label=tests)](https://github.com/beriberikix/zephyrdb/actions/workflows/test.yml)
+
 Embedded multi-model database for Zephyr RTOS, designed for memory-constrained systems.
 
 ## What Is Implemented

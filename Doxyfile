@@ -1,0 +1,37 @@
+# Doxygen configuration for ZephyrDB API documentation.
+# Only overrides are listed; everything else uses Doxygen defaults.
+# Build locally with `doxygen` (output in doxygen/html); CI builds and
+# publishes it to GitHub Pages via .github/workflows/docs.yml.
+
+PROJECT_NAME           = ZephyrDB
+PROJECT_BRIEF          = "Embedded database for Zephyr RTOS: KV, time-series, and document models"
+OUTPUT_DIRECTORY       = doxygen
+
+INPUT                  = zephyrdb.h \
+                         zephyrdb_eventing_zbus.h \
+                         README.md \
+                         docs \
+                         tests/README.md
+USE_MDFILE_AS_MAINPAGE = README.md
+
+# The header hides modules behind Kconfig guards; document everything.
+ENABLE_PREPROCESSING   = YES
+MACRO_EXPANSION        = YES
+EXPAND_ONLY_PREDEF     = YES
+PREDEFINED             = CONFIG_ZDB_KV=1 \
+                         CONFIG_ZDB_TS=1 \
+                         CONFIG_ZDB_DOC=1 \
+                         CONFIG_ZDB_EVENTING=1 \
+                         CONFIG_ZDB_EVENTING_ZBUS=1 \
+                         CONFIG_ZDB_FLATBUFFERS=1 \
+                         CONFIG_ZDB_SHELL=1 \
+                         __packed= \
+                         "ZBUS_CHAN_DECLARE(chan)="
+
+EXTRACT_ALL            = NO
+WARN_NO_PARAMDOC       = YES
+WARN_AS_ERROR          = FAIL_ON_WARNINGS
+QUIET                  = YES
+
+GENERATE_LATEX         = NO
+GENERATE_TREEVIEW      = YES
