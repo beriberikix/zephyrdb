@@ -76,6 +76,15 @@ void zdb_unlock_read(zdb_t *db);
 void zdb_unlock_write(zdb_t *db);
 zdb_status_t zdb_cursor_reset(zdb_cursor_t *cursor);
 
+#if defined(CONFIG_ZDB_KV) && (CONFIG_ZDB_KV)
+/*
+ * Write missing defaults for one namespace, or every namespace in the table
+ * when namespace_filter is NULL. Lives in the KV module so the core does not
+ * need to know about backends; zdb_init() calls it through this hook.
+ */
+zdb_status_t zdb_kv_defaults_apply_ns(zdb_t *db, const char *namespace_filter);
+#endif
+
 #if defined(CONFIG_ZDB_TS) && (CONFIG_ZDB_TS)
 
 #if ZDB_TS_USE_LITTLEFS

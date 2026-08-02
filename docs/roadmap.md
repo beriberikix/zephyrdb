@@ -7,15 +7,6 @@ inline. Shipped since the last revision and therefore removed: cursor-based TS
 time-range iteration (`zdb_ts_cursor_open()` + `zdb_ts_window_t`), except
 reverse traversal, which remains below.
 
-## Now — correctness fixes and low-effort, high-value
-
-- **KV default values with auto-init and incremental upgrade** — Accept a
-  default KV table in `zdb_cfg_t`; on every init, write any default whose key
-  is absent. Because the pass is write-if-missing, it doubles as the
-  post-firmware-update merge: new defaults appear, user-modified values
-  survive. (Handling removed/renamed/retyped keys would additionally need a
-  defaults-schema version; defer until needed.)
-
 ## Next — structural features
 
 - **Persistent KV iteration** — The v2 record format already stores the

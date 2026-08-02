@@ -56,6 +56,7 @@ All APIs return `zdb_status_t`: `ZDB_OK`, `ZDB_ERR_INVAL`, `ZDB_ERR_NOMEM`,
 - `zdb_kv_set(kv, key, value, value_len)`
 - `zdb_kv_get(kv, key, out_value, out_capacity, out_len)`
 - `zdb_kv_set_str(kv, key, value)` / `zdb_kv_get_str(kv, key, out_str, out_capacity, out_len)`
+- `zdb_kv_defaults_apply(db)`
 - `zdb_kv_delete(kv, key)`
 - `zdb_kv_iter_open(kv, out_iter)`
 - `zdb_kv_iter_next(iter, out_key, out_key_capacity, out_key_len, out_value, out_value_capacity, out_value_len)`
@@ -79,6 +80,15 @@ Notes:
   `out_capacity` bytes and reports the full stored length in `*out_len`.
   Compare `*out_len` against your capacity to detect truncation.
 - A zero-length value is valid; `value` may be NULL when `value_len` is 0.
+- Setting `cfg.kv_defaults` / `cfg.kv_default_count` makes `zdb_init` seed any
+  key in the table that is **absent**, leaving existing keys untouched. That
+  covers first boot (everything is written) and a firmware update that adds
+  entries (only the new keys are written, so values the user changed survive).
+  `zdb_kv_defaults_apply` runs the same pass on demand. Every entry is
+  attempted even if one fails, and the first failing status is returned — so
+  `zdb_init` can now report backend errors when a defaults table is
+  configured. A key the application deleted is indistinguishable from one never
+  written, so it is re-seeded on the next pass.
 - The string helpers wrap the byte API for the common case: `zdb_kv_set_str`
   stores `strlen(value) + 1` bytes so the terminator is part of the value, and
   `zdb_kv_get_str` always terminates its output, copying at most

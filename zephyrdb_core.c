@@ -256,6 +256,22 @@ zdb_status_t zdb_init(zdb_t *db, const zdb_cfg_t *cfg)
 #endif
 #endif
 
+#if defined(CONFIG_ZDB_KV) && (CONFIG_ZDB_KV)
+	/*
+	 * Seed any configured defaults before the instance is handed back, so
+	 * the first read already sees them. Only touches keys that are absent,
+	 * making this both first-boot initialization and post-update merge.
+	 */
+	if ((cfg->kv_defaults != NULL) && (cfg->kv_default_count > 0U) &&
+	    (cfg->kv_backend_fs != NULL)) {
+		zdb_status_t defaults_rc = zdb_kv_defaults_apply_ns(db, NULL);
+
+		if (defaults_rc != ZDB_OK) {
+			return defaults_rc;
+		}
+	}
+#endif
+
 	return ZDB_OK;
 }
 

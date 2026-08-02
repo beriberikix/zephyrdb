@@ -752,6 +752,74 @@ zdb_status_t zdb_kv_iter_close(zdb_kv_iter_t *iter)
 	return ZDB_OK;
 }
 
+zdb_status_t zdb_kv_defaults_apply_ns(zdb_t *db, const char *namespace_filter)
+{
+	zdb_status_t first_error = ZDB_OK;
+	size_t i;
+
+	if ((db == NULL) || (db->cfg == NULL)) {
+		return ZDB_ERR_INVAL;
+	}
+
+	if ((db->cfg->kv_defaults == NULL) || (db->cfg->kv_default_count == 0U)) {
+		return ZDB_OK;
+	}
+
+	if (zdb_kv_backend_fs_from_db(db) == NULL) {
+		return ZDB_ERR_INVAL;
+	}
+
+	for (i = 0U; i < db->cfg->kv_default_count; i++) {
+		const zdb_kv_default_t *def = &db->cfg->kv_defaults[i];
+		zdb_kv_t kv;
+		zdb_status_t rc;
+		size_t existing_len = 0U;
+
+		if ((def->namespace_name == NULL) || (def->key == NULL)) {
+			if (first_error == ZDB_OK) {
+				first_error = ZDB_ERR_INVAL;
+			}
+			continue;
+		}
+
+		if ((namespace_filter != NULL) &&
+		    (strcmp(def->namespace_name, namespace_filter) != 0)) {
+			continue;
+		}
+
+		rc = zdb_kv_open(db, def->namespace_name, &kv);
+		if (rc != ZDB_OK) {
+			if (first_error == ZDB_OK) {
+				first_error = rc;
+			}
+			continue;
+		}
+
+		/*
+		 * Write-if-missing. A key that is already present keeps whatever
+		 * value it holds, which is what makes this safe to re-run after a
+		 * firmware update: new entries appear, changed values survive.
+		 */
+		rc = zdb_kv_get(&kv, def->key, NULL, 0U, &existing_len);
+		if (rc == ZDB_ERR_NOT_FOUND) {
+			rc = zdb_kv_set(&kv, def->key, def->value, def->value_len);
+		}
+
+		if ((rc != ZDB_OK) && (first_error == ZDB_OK)) {
+			first_error = rc;
+		}
+
+		(void)zdb_kv_close(&kv);
+	}
+
+	return first_error;
+}
+
+zdb_status_t zdb_kv_defaults_apply(zdb_t *db)
+{
+	return zdb_kv_defaults_apply_ns(db, NULL);
+}
+
 zdb_status_t zdb_kv_set_str(zdb_kv_t *kv, const char *key, const char *value)
 {
 	if (value == NULL) {

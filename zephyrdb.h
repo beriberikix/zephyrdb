@@ -310,11 +310,28 @@ extern "C"
  * @{
  */
 
+#if defined(CONFIG_ZDB_KV) && (CONFIG_ZDB_KV)
+	/**
+	 * @brief One entry in a key-value defaults table.
+	 *
+	 * Describes a key that should exist with a known value after
+	 * zdb_init(). See @ref zdb_cfg_t::kv_defaults.
+	 */
+	typedef struct
+	{
+		const char *namespace_name; /**< Target namespace. */
+		const char *key;            /**< Key to seed. */
+		const void *value;          /**< Default value bytes (may be NULL when @ref value_len is 0). */
+		size_t value_len;           /**< Length of @ref value in bytes. */
+	} zdb_kv_default_t;
+#endif
+
 	/**
 	 * @brief Instance configuration passed to zdb_init().
 	 *
-	 * The structure (and any listener arrays it references) must outlive
-	 * the instance; ZephyrDB keeps the pointer, it does not copy.
+	 * The structure (and any listener or defaults arrays it references)
+	 * must outlive the instance; ZephyrDB keeps the pointer, it does not
+	 * copy.
 	 */
 	typedef struct
 	{
@@ -322,6 +339,10 @@ extern "C"
 		const char *lfs_mount_point;   /**< Mount point for file-backed modules (TS/DOC), e.g. "/lfs"; NULL uses @c CONFIG_ZDB_LFS_MOUNT_POINT. */
 		struct k_work_q *work_q;       /**< Work queue for async flushes; NULL uses the system work queue. */
 		uint16_t scan_yield_every_n;   /**< Cooperative-scan yield interval in records; 0 disables yielding. */
+#if defined(CONFIG_ZDB_KV) && (CONFIG_ZDB_KV)
+		const zdb_kv_default_t *kv_defaults; /**< Defaults applied write-if-missing by zdb_init() (may be NULL). */
+		size_t kv_default_count;             /**< Entries in @ref kv_defaults. */
+#endif
 #if defined(CONFIG_ZDB_EVENTING) && (CONFIG_ZDB_EVENTING)
 		const zdb_event_listener_t *event_listeners; /**< KV event listener array (may be NULL). */
 		size_t event_listener_count;                 /**< Entries in @ref event_listeners. */
@@ -653,6 +674,36 @@ extern "C"
 	 * @retval ZDB_ERR_IO         Backend write failure.
 	 */
 	zdb_status_t zdb_kv_set_str(zdb_kv_t *kv, const char *key, const char *value);
+
+	/**
+	 * @brief Write any missing entries of the configured defaults table.
+	 *
+	 * For each entry in @ref zdb_cfg_t::kv_defaults, writes the default
+	 * value only when the key is absent. Existing keys are left alone, so
+	 * values the user or application changed survive.
+	 *
+	 * zdb_init() runs this automatically when a defaults table is
+	 * configured, which covers both first boot (nothing is stored, so
+	 * everything is seeded) and a firmware update that adds new entries
+	 * (only the new keys are written). Call it directly only to re-run the
+	 * pass without re-initializing.
+	 *
+	 * A key deleted by the application is indistinguishable from one that
+	 * was never written, so it is re-seeded on the next pass. Use
+	 * zdb_kv_set() with an explicit value if a key must stay absent.
+	 *
+	 * Every entry is attempted even if one fails; the first failing status
+	 * is returned.
+	 *
+	 * @param db Initialized instance with a KV backend configured.
+	 * @retval ZDB_OK            All entries present or written.
+	 * @retval ZDB_ERR_INVAL     @p db is NULL, has no KV backend, or the table
+	 *                           holds an invalid namespace or key.
+	 * @retval ZDB_ERR_NOMEM     A default exceeds the KV IO slab block size.
+	 * @retval ZDB_ERR_COLLISION A default's record ID slot holds a different key.
+	 * @retval ZDB_ERR_IO        Backend read or write failure.
+	 */
+	zdb_status_t zdb_kv_defaults_apply(zdb_t *db);
 
 	/**
 	 * @brief Read a value as a NUL-terminated string.
