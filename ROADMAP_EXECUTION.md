@@ -60,7 +60,7 @@ under Notes with its reason, keeps its roadmap bullet, and the loop moves on.
 - [x] 8. TS reverse cursor traversal (§5.8, M) — `66115d6`; folded fix `0a49511` (cursor reset rewind)
 - [x] 9. TS consumed watermark (§5.9, S/M) — `4ddd0cb`
 - [x] 10. TS multiple concurrent streams (§5.10, L) — `0bb9d14`, PR from feature/ts-multi-stream
-- [ ] 11. TS rollover / circular buffer mode (§5.11, L) — topic branch
+- [x] 11. TS rollover / circular buffer mode (§5.11, L) — `108e2bd`, PR from feature/ts-rollover; folded fix `753fb6d` (append BUSY)
 - [ ] 12. FlatBuffers document export (§5.12, M)
 - [ ] 13. Sample: doc_cbor_nested + final cleanup (§5.13, S)
 
