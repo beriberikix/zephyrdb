@@ -1178,17 +1178,24 @@ extern "C"
  */
 #if defined(CONFIG_ZDB_DOC) && (CONFIG_ZDB_DOC)
 
-	/** @brief Document field types. */
+	/**
+	 * @brief Document field types.
+	 *
+	 * Documents carry scalar, string, and raw-byte fields. Values marked
+	 * reserved are held for future use; storing one reports
+	 * ::ZDB_ERR_UNSUPPORTED. To keep structured data in a field today,
+	 * serialize it into ::ZDB_DOC_FIELD_BYTES.
+	 */
 	typedef enum
 	{
-		ZDB_DOC_FIELD_NULL = 0, /**< Reserved; not implemented. */
+		ZDB_DOC_FIELD_NULL = 0, /**< Reserved. */
 		ZDB_DOC_FIELD_INT64,    /**< int64_t value. */
 		ZDB_DOC_FIELD_DOUBLE,   /**< double value. */
 		ZDB_DOC_FIELD_STRING,   /**< NUL-terminated string value. */
 		ZDB_DOC_FIELD_BOOL,     /**< bool value. */
 		ZDB_DOC_FIELD_BYTES,    /**< Raw byte span value. */
-		ZDB_DOC_FIELD_OBJECT,   /**< Reserved; not implemented. */
-		ZDB_DOC_FIELD_ARRAY,    /**< Reserved; not implemented. */
+		ZDB_DOC_FIELD_OBJECT,   /**< Reserved. */
+		ZDB_DOC_FIELD_ARRAY,    /**< Reserved. */
 	} zdb_doc_field_type_t;
 
 	struct zdb_doc;
@@ -1510,16 +1517,20 @@ extern "C"
 	zdb_status_t zdb_doc_metadata_free(zdb_doc_metadata_t *metadata, size_t count);
 
 	/**
-	 * @brief Serialize a document as a FlatBuffer — currently a stub.
+	 * @brief Reserved: serialize a document as a FlatBuffer for transport.
 	 *
-	 * Document persistence uses ZephyrDB's own binary format, not
-	 * FlatBuffers; this always returns ::ZDB_ERR_UNSUPPORTED today.
+	 * Documents are stored in ZephyrDB's own binary format. This entry point
+	 * is reserved for producing a FlatBuffer copy to send off-device and
+	 * reports ::ZDB_ERR_UNSUPPORTED.
+	 *
+	 * To export time-series samples as FlatBuffers today, see
+	 * zdb_ts_sample_i64_export_flatbuffer().
 	 *
 	 * @param doc          Open document handle.
 	 * @param out_buf      Destination buffer.
 	 * @param out_capacity Capacity of @p out_buf in bytes.
 	 * @param out_len      Set to the serialized size.
-	 * @retval ZDB_ERR_UNSUPPORTED Always (not implemented).
+	 * @retval ZDB_ERR_UNSUPPORTED Always.
 	 */
 	zdb_status_t zdb_doc_export_flatbuffer(zdb_doc_t *doc, uint8_t *out_buf,
 										   size_t out_capacity, size_t *out_len);

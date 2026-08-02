@@ -107,8 +107,8 @@ Notes:
   written before this boot. The index is held in RAM and, with
   `CONFIG_ZDB_KV_PERSIST_INDEX=y` (the default), mirrored into a reserved
   backend record so it can be rebuilt after a restart. Rebuilding reads one
-  record per tracked key on first use; set `CONFIG_ZDB_KV_PERSIST_INDEX=n` to
-  keep iteration session-only and skip the extra write when a key is created or
+  record per tracked key on first use. Set `CONFIG_ZDB_KV_PERSIST_INDEX=n` for
+  session-only iteration, which skips the extra write when a key is created or
   deleted.
 - The index holds at most `CONFIG_ZDB_KV_INDEX_MAX_ENTRIES` keys (default 128).
   Keys beyond that are **stored and readable but not enumerable**, so raise the
@@ -225,15 +225,17 @@ Notes:
   (`zdb_doc_field_set_*` / `zdb_doc_field_get_*`)
 - `zdb_doc_query(db, query, out_metadata, out_count)`
 - `zdb_doc_metadata_free(metadata, count)`
-- `zdb_doc_export_flatbuffer(doc, out_buf, out_capacity, out_len)` — **stub**:
-  always returns `ZDB_ERR_UNSUPPORTED`; document persistence uses ZephyrDB's
-  own binary format, not FlatBuffers.
+- `zdb_doc_export_flatbuffer(doc, out_buf, out_capacity, out_len)` — reserved
+  for exporting a document for transport; reports `ZDB_ERR_UNSUPPORTED`.
+  Documents are stored in ZephyrDB's own binary format. To export time-series
+  samples as FlatBuffers, use `zdb_ts_sample_i64_export_flatbuffer`.
 
 Notes:
 
-- Implemented field types are `INT64`, `DOUBLE`, `STRING`, `BOOL`, `BYTES`.
-  `NULL`, `OBJECT`, and `ARRAY` appear in the enum but are not implemented;
-  saving or loading them returns `ZDB_ERR_UNSUPPORTED`.
+- Fields hold `INT64`, `DOUBLE`, `STRING`, `BOOL`, or `BYTES` values. The
+  `NULL`, `OBJECT`, and `ARRAY` enum values are reserved for future use and
+  report `ZDB_ERR_UNSUPPORTED`; to store structured data today, serialize it
+  into a `BYTES` field.
 - `zdb_doc_query`: filters are AND-combined equality matches; `*out_count`
   is the output array capacity on input and the result count on output.
   Passing `out_metadata = NULL` returns the total match count. The query
@@ -247,8 +249,7 @@ Notes:
   discarded by the next save or delete.
 - The stored CRC covers the header **and** every field payload, so payload
   corruption or a truncated file is reported as `ZDB_ERR_CORRUPT` on open.
-  Documents written before this change (format v1, header-only CRC) are still
-  readable; every save writes v2.
+  Both the current format and the earlier header-only-CRC format are readable.
 
 ## Shell
 
