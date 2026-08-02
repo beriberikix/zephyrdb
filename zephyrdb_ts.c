@@ -591,7 +591,8 @@ static struct zdb_ts_core_ctx *zdb_ts_ctx_get_or_alloc(zdb_t *db)
 	}
 
 	(void)memset(ctx, 0, sizeof(*ctx));
-	ctx->work_q = db->cfg->work_q;
+	/* A NULL cfg.work_q means "use the system work queue", as documented. */
+	ctx->work_q = (db->cfg->work_q != NULL) ? db->cfg->work_q : &k_sys_work_q;
 	ctx->db = db;
 
 #if ZDB_TS_USE_LITTLEFS
@@ -949,8 +950,8 @@ zdb_status_t zdb_ts_flush_async(zdb_ts_t *ts)
 	int rc;
 
 	ctx = zdb_ts_ctx_get_or_alloc(ts->db);
-	if ((ctx == NULL) || (ctx->work_q == NULL)) {
-		return ZDB_ERR_UNSUPPORTED;
+	if (ctx == NULL) {
+		return ZDB_ERR_NOMEM;
 	}
 
 	lock_rc = zdb_lock_write(ts->db);

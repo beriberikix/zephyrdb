@@ -53,6 +53,40 @@ static void ts_append_fixed(zdb_ts_t *ts, const int64_t *values, size_t count,
 	}
 }
 
+/*
+ * cfg.work_q == NULL is documented to mean "use the system work queue"; async
+ * flush used to reject it with ZDB_ERR_UNSUPPORTED instead.
+ */
+ZTEST(ts_suite, test_ts_flush_async_without_configured_work_q)
+{
+	static const zdb_cfg_t no_wq_cfg = {
+		.kv_backend_fs = NULL,
+		.lfs_mount_point = "/lfs",
+		.work_q = NULL,
+	};
+	ZDB_DEFINE_STATIC(no_wq_db, no_wq_cfg);
+	zdb_ts_t ts;
+	int64_t values[] = {7, 8, 9};
+	zdb_status_t rc;
+
+	/* This suite's fixture already initialized g_db; use a separate instance. */
+	zassert_equal(zdb_init(&no_wq_db, &no_wq_cfg), ZDB_OK, "init failed");
+
+	rc = zdb_ts_open(&no_wq_db, "t_nowq", &ts);
+	zassert_equal(rc, ZDB_OK, "open failed: %d", rc);
+
+	ts_append_fixed(&ts, values, ARRAY_SIZE(values), 1000U);
+
+	rc = zdb_ts_flush_async(&ts);
+	zassert_equal(rc, ZDB_OK, "async flush rejected without cfg.work_q: %d", rc);
+
+	rc = zdb_ts_flush_sync(&ts, K_SECONDS(2));
+	zassert_equal(rc, ZDB_OK, "sync flush failed: %d", rc);
+
+	(void)zdb_ts_close(&ts);
+	(void)zdb_deinit(&no_wq_db);
+}
+
 ZTEST(ts_suite, test_ts_open_close_success)
 {
 	zdb_ts_t ts;
