@@ -2,16 +2,7 @@
 
 Unimplemented enhancements under consideration. Items are removed as they ship.
 
-Tiers reflect a value-vs-effort assessment (2026-08). Dependencies are noted
-inline. Shipped since the last revision and therefore removed: cursor-based TS
-time-range iteration (`zdb_ts_cursor_open()` + `zdb_ts_window_t`), except
-reverse traversal, which remains below.
-
-## Next — structural features
-
-- **FlatBuffers document export** — `zdb_doc_export_flatbuffer()` is a stub
-  returning `ZDB_ERR_UNSUPPORTED`; the flatcc dependency is already available
-  as a sibling Zephyr module (`flatcc-zephyr`).
+Tiers reflect a value-vs-effort assessment (2026-08).
 
 ## Later — larger or niche
 

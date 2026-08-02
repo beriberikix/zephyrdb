@@ -223,11 +223,20 @@ Notes:
   truncated bytes; `zdb_ts_cursor_open_desc` and the watermark calls return
   `ZDB_ERR_UNSUPPORTED`.
 
-## FlatBuffers Export Helper
+## FlatBuffers Export
 
-- `zdb_ts_sample_i64_export_flatbuffer(sample, out_buf, out_capacity, out_len)` —
-  implemented when `CONFIG_ZDB_FLATBUFFERS=y` and `CONFIG_FLATCC=y`, otherwise
-  returns `ZDB_ERR_UNSUPPORTED`.
+Serialize records for transport off-device. Stored data stays in ZephyrDB's own
+format; these produce a copy. Both require `CONFIG_ZDB_FLATBUFFERS=y` and
+`CONFIG_FLATCC=y`, which bring in the flatcc runtime.
+
+- `zdb_ts_sample_i64_export_flatbuffer(sample, out_buf, out_capacity, out_len)`
+- `zdb_doc_export_flatbuffer(doc, out_buf, out_capacity, out_len)` — carries the
+  collection name, document ID, timestamps, and every field with its name,
+  type, and value. The wire layout is documented as a schema in
+  `zephyrdb_doc.c`, so a host can generate a matching reader.
+
+Passing `out_buf = NULL` reports the required size in `*out_len` without
+serializing into a buffer.
 
 ## Document Model
 
@@ -238,10 +247,9 @@ Notes:
   (`zdb_doc_field_set_*` / `zdb_doc_field_get_*`)
 - `zdb_doc_query(db, query, out_metadata, out_count)`
 - `zdb_doc_metadata_free(metadata, count)`
-- `zdb_doc_export_flatbuffer(doc, out_buf, out_capacity, out_len)` — reserved
-  for exporting a document for transport; reports `ZDB_ERR_UNSUPPORTED`.
-  Documents are stored in ZephyrDB's own binary format. To export time-series
-  samples as FlatBuffers, use `zdb_ts_sample_i64_export_flatbuffer`.
+- `zdb_doc_export_flatbuffer(doc, out_buf, out_capacity, out_len)` — produces a
+  FlatBuffer copy of a document for sending off-device; pass `out_buf = NULL`
+  to ask how large a buffer it needs. Requires `CONFIG_ZDB_FLATBUFFERS`.
 
 Notes:
 

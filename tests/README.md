@@ -17,7 +17,7 @@ the real Kconfig — no source-inclusion or fake `CONFIG_*` definitions.
 | `unit/ts_agg` | `zephyrdb.unit.ts_agg` | LittleFS | Aggregate queries with `CONFIG_ZDB_TS_MAX_AGG_POINTS=8`: uncapped COUNT (fast path and windowed scan), unflushed samples counted, empty-window semantics per aggregate, truncation reporting |
 | `unit/ts_multistream` | `zephyrdb.unit.ts_multistream` | LittleFS | Four concurrent streams: interleaved appends stay separate, one flush covers every stream, slot exhaustion reports BUSY, close releases and flushes, shared handles, independent cursors, per-stream watermarks |
 | `unit/ts_rollover` | `zephyrdb.unit.ts_rollover` | LittleFS | Bounded streams with 10-record segments: stays bounded and keeps the newest samples, cursors span segments in both directions, COUNT agrees with a walk, segment window survives restart, single-file streams adopted, watermark outlives discarded data |
-| `unit/doc_basic` | `zephyrdb.unit.doc_basic` | LittleFS | Field CRUD for all implemented types, save/open persistence, delete, query filters (count-only, materialized, AND, limit), path-traversal rejection, header- and payload-CRC corruption, truncated files, staged-save recovery, v1 format compatibility |
+| `unit/doc_basic` | `zephyrdb.unit.doc_basic` | LittleFS | Field CRUD for all implemented types, save/open persistence, delete, query filters (count-only, materialized, AND, limit), path-traversal rejection, header- and payload-CRC corruption, truncated files, staged-save recovery, v1 format compatibility, FlatBuffers export (round-trip, size query, short buffer) when built with flatcc |
 | `integration/workflows` | `zephyrdb.integration.workflows` | ZMS + LittleFS | KV/TS/DOC on one instance, single-stream semantics, independent cursors, health, stats export/validate |
 | `samples/verify` | `zephyrdb.samples.verify` | ZMS + LittleFS | The critical path of each sample (kv_basic, ts_basic, doc_basic) |
 | `hardware/persistence_nrf52840dk` | `zephyrdb.hardware.persistence` | NVS + LittleFS on real flash | KV close/reopen persistence, TS append-log growth, recovery, multi-field DOC persistence. `build_only` in CI. |
@@ -63,6 +63,12 @@ anywhere the Zephyr SDK runs.
 
 - The FCB TS backend has no dedicated suite (aggregation and recovery are
   unsupported/no-op there; see `docs/api.md`).
-- FlatBuffers export tests are guarded by `CONFIG_ZDB_FLATBUFFERS` and off
-  by default because CI's workspace does not fetch the flatcc-zephyr module.
+- FlatBuffers export tests are guarded by `CONFIG_ZDB_FLATBUFFERS` and off by
+  default because CI's workspace does not fetch the flatcc-zephyr module. To
+  run them from a workspace that has it:
+
+  ```bash
+  python3 $ZEPHYR_BASE/scripts/twister -T tests/unit/doc_basic -p native_sim \
+          --extra-args=CONFIG_FLATCC=y --extra-args=CONFIG_ZDB_FLATBUFFERS=y
+  ```
 - Reboot-persistence and concurrent multi-thread access are not simulated.

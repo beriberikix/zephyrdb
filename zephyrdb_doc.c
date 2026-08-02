@@ -14,6 +14,11 @@
 #include <zephyr/sys/crc.h>
 #include <zephyr/kernel.h>
 
+#if defined(CONFIG_ZDB_FLATBUFFERS) && (CONFIG_ZDB_FLATBUFFERS) && \
+	defined(CONFIG_FLATCC) && (CONFIG_FLATCC)
+#include <flatcc/flatcc_builder.h>
+#endif
+
 struct zdb_doc_hdr_v1 {
 	uint32_t magic_le;
 	uint16_t version_le;
@@ -1595,6 +1600,169 @@ zdb_status_t zdb_doc_metadata_free(zdb_doc_metadata_t *metadata, size_t count)
 	return ZDB_OK;
 }
 
+#if defined(CONFIG_ZDB_FLATBUFFERS) && (CONFIG_ZDB_FLATBUFFERS) && \
+	defined(CONFIG_FLATCC) && (CONFIG_FLATCC)
+/*
+ * Wire layout produced below, as a schema a host can generate readers from:
+ *
+ *   enum ZdbFieldType : ubyte {
+ *       NUL = 0, INT64 = 1, DOUBLE = 2, STRING = 3, BOOL = 4, BYTES = 5
+ *   }
+ *
+ *   table ZdbField {
+ *       name:  string;         // id 0
+ *       type:  ZdbFieldType;   // id 1
+ *       i64:   long;           // id 2, set for INT64
+ *       f64:   double;         // id 3, set for DOUBLE
+ *       b:     bool;           // id 4, set for BOOL
+ *       str:   string;         // id 5, set for STRING
+ *       bytes: [ubyte];        // id 6, set for BYTES
+ *   }
+ *
+ *   table ZdbDocument {
+ *       collection:  string;      // id 0
+ *       document_id: string;      // id 1
+ *       created_ms:  ulong;       // id 2
+ *       updated_ms:  ulong;       // id 3
+ *       fields:      [ZdbField];  // id 4
+ *   }
+ *   root_type ZdbDocument;
+ *
+ * Only the members carrying a value for a field's type are emitted, so a
+ * reader should branch on `type` rather than probing every slot.
+ */
+#define ZDB_FB_FIELD_NAME  0
+#define ZDB_FB_FIELD_TYPE  1
+#define ZDB_FB_FIELD_I64   2
+#define ZDB_FB_FIELD_F64   3
+#define ZDB_FB_FIELD_BOOL  4
+#define ZDB_FB_FIELD_STR   5
+#define ZDB_FB_FIELD_BYTES 6
+
+#define ZDB_FB_DOC_COLLECTION 0
+#define ZDB_FB_DOC_ID         1
+#define ZDB_FB_DOC_CREATED    2
+#define ZDB_FB_DOC_UPDATED    3
+#define ZDB_FB_DOC_FIELDS     4
+
+/* Build one ZdbField table; returns 0 on failure, as flatcc refs do. */
+static flatcc_builder_ref_t zdb_doc_fb_build_field(flatcc_builder_t *builder,
+						   const zdb_doc_field_t *field)
+{
+	flatcc_builder_ref_t name_ref;
+	flatcc_builder_ref_t str_ref = 0;
+	uint8_t type_val = (uint8_t)field->type;
+
+	name_ref = flatcc_builder_create_string_str(builder, field->name);
+	if (name_ref == 0) {
+		return 0;
+	}
+
+	if (field->type == ZDB_DOC_FIELD_STRING) {
+		const char *str = (field->value.str != NULL) ? field->value.str : "";
+
+		str_ref = flatcc_builder_create_string_str(builder, str);
+		if (str_ref == 0) {
+			return 0;
+		}
+	}
+
+	if (flatcc_builder_start_table(builder, 7) != 0) {
+		return 0;
+	}
+
+	{
+		flatcc_builder_ref_t *slot =
+			flatcc_builder_table_add_offset(builder, ZDB_FB_FIELD_NAME);
+
+		if (slot == NULL) {
+			return 0;
+		}
+		*slot = name_ref;
+	}
+
+	{
+		void *slot = flatcc_builder_table_add(builder, ZDB_FB_FIELD_TYPE,
+						      sizeof(type_val), sizeof(type_val));
+
+		if (slot == NULL) {
+			return 0;
+		}
+		(void)memcpy(slot, &type_val, sizeof(type_val));
+	}
+
+	switch (field->type) {
+	case ZDB_DOC_FIELD_INT64: {
+		uint64_t v = sys_cpu_to_le64((uint64_t)field->value.i64);
+		void *slot = flatcc_builder_table_add(builder, ZDB_FB_FIELD_I64, sizeof(v),
+						      sizeof(v));
+
+		if (slot == NULL) {
+			return 0;
+		}
+		(void)memcpy(slot, &v, sizeof(v));
+		break;
+	}
+	case ZDB_DOC_FIELD_DOUBLE: {
+		uint64_t v;
+		void *slot;
+
+		(void)memcpy(&v, &field->value.f64, sizeof(v));
+		v = sys_cpu_to_le64(v);
+		slot = flatcc_builder_table_add(builder, ZDB_FB_FIELD_F64, sizeof(v), sizeof(v));
+		if (slot == NULL) {
+			return 0;
+		}
+		(void)memcpy(slot, &v, sizeof(v));
+		break;
+	}
+	case ZDB_DOC_FIELD_BOOL: {
+		uint8_t v = field->value.b ? 1U : 0U;
+		void *slot = flatcc_builder_table_add(builder, ZDB_FB_FIELD_BOOL, sizeof(v),
+						      sizeof(v));
+
+		if (slot == NULL) {
+			return 0;
+		}
+		(void)memcpy(slot, &v, sizeof(v));
+		break;
+	}
+	case ZDB_DOC_FIELD_STRING: {
+		flatcc_builder_ref_t *slot =
+			flatcc_builder_table_add_offset(builder, ZDB_FB_FIELD_STR);
+
+		if (slot == NULL) {
+			return 0;
+		}
+		*slot = str_ref;
+		break;
+	}
+	case ZDB_DOC_FIELD_BYTES: {
+		flatcc_builder_ref_t vec_ref;
+		flatcc_builder_ref_t *slot;
+
+		vec_ref = flatcc_builder_create_vector(builder, field->value.bytes.data,
+						       field->value.bytes.len, 1U, 1U,
+						       FLATBUFFERS_COUNT_MAX(1));
+		if (vec_ref == 0) {
+			return 0;
+		}
+		slot = flatcc_builder_table_add_offset(builder, ZDB_FB_FIELD_BYTES);
+		if (slot == NULL) {
+			return 0;
+		}
+		*slot = vec_ref;
+		break;
+	}
+	default:
+		/* Reserved types carry no value to emit. */
+		return 0;
+	}
+
+	return flatcc_builder_end_table(builder);
+}
+#endif /* CONFIG_ZDB_FLATBUFFERS && CONFIG_FLATCC */
+
 zdb_status_t zdb_doc_export_flatbuffer(zdb_doc_t *doc, uint8_t *out_buf,
 				       size_t out_capacity, size_t *out_len)
 {
@@ -1606,11 +1774,158 @@ zdb_status_t zdb_doc_export_flatbuffer(zdb_doc_t *doc, uint8_t *out_buf,
 		return ZDB_ERR_INVAL;
 	}
 
-	/* Stage 3: FlatBuffer export not yet implemented */
+#if defined(CONFIG_ZDB_FLATBUFFERS) && (CONFIG_ZDB_FLATBUFFERS) && \
+	defined(CONFIG_FLATCC) && (CONFIG_FLATCC)
+	{
+		flatcc_builder_t builder;
+		flatcc_builder_ref_t collection_ref;
+		flatcc_builder_ref_t id_ref;
+		flatcc_builder_ref_t fields_vec = 0;
+		flatcc_builder_ref_t root;
+		void *direct_buf;
+		size_t direct_size = 0U;
+		size_t i;
+		int rc;
+
+		rc = flatcc_builder_init(&builder);
+		if (rc != 0) {
+			*out_len = 0U;
+			return ZDB_ERR_NOMEM;
+		}
+
+		if (flatcc_builder_start_buffer(&builder, 0, 0, 0) != 0) {
+			goto io_error;
+		}
+
+		collection_ref = flatcc_builder_create_string_str(&builder, doc->collection_name);
+		id_ref = flatcc_builder_create_string_str(&builder, doc->document_id);
+		if ((collection_ref == 0) || (id_ref == 0)) {
+			goto io_error;
+		}
+
+		/* Build each field table, then gather them into one vector. */
+		if (doc->field_count > 0U) {
+			if (flatcc_builder_start_offset_vector(&builder) != 0) {
+				goto io_error;
+			}
+
+			for (i = 0U; i < doc->field_count; i++) {
+				flatcc_builder_ref_t field_ref;
+				flatcc_builder_ref_t *slot;
+
+				field_ref = zdb_doc_fb_build_field(&builder, &doc->fields[i]);
+				if (field_ref == 0) {
+					flatcc_builder_clear(&builder);
+					*out_len = 0U;
+					return ZDB_ERR_UNSUPPORTED;
+				}
+
+				slot = flatcc_builder_extend_offset_vector(&builder, 1U);
+				if (slot == NULL) {
+					goto io_error;
+				}
+				*slot = field_ref;
+			}
+
+			fields_vec = flatcc_builder_end_offset_vector(&builder);
+			if (fields_vec == 0) {
+				goto io_error;
+			}
+		}
+
+		if (flatcc_builder_start_table(&builder, 5) != 0) {
+			goto io_error;
+		}
+
+		{
+			flatcc_builder_ref_t *slot =
+				flatcc_builder_table_add_offset(&builder, ZDB_FB_DOC_COLLECTION);
+
+			if (slot == NULL) {
+				goto io_error;
+			}
+			*slot = collection_ref;
+		}
+		{
+			flatcc_builder_ref_t *slot =
+				flatcc_builder_table_add_offset(&builder, ZDB_FB_DOC_ID);
+
+			if (slot == NULL) {
+				goto io_error;
+			}
+			*slot = id_ref;
+		}
+		{
+			uint64_t created = sys_cpu_to_le64(doc->created_ms);
+			uint64_t updated = sys_cpu_to_le64(doc->updated_ms);
+			void *slot;
+
+			slot = flatcc_builder_table_add(&builder, ZDB_FB_DOC_CREATED,
+							sizeof(created), sizeof(created));
+			if (slot == NULL) {
+				goto io_error;
+			}
+			(void)memcpy(slot, &created, sizeof(created));
+
+			slot = flatcc_builder_table_add(&builder, ZDB_FB_DOC_UPDATED,
+							sizeof(updated), sizeof(updated));
+			if (slot == NULL) {
+				goto io_error;
+			}
+			(void)memcpy(slot, &updated, sizeof(updated));
+		}
+		if (fields_vec != 0) {
+			flatcc_builder_ref_t *slot =
+				flatcc_builder_table_add_offset(&builder, ZDB_FB_DOC_FIELDS);
+
+			if (slot == NULL) {
+				goto io_error;
+			}
+			*slot = fields_vec;
+		}
+
+		root = flatcc_builder_end_table(&builder);
+		if (root == 0) {
+			goto io_error;
+		}
+
+		if (flatcc_builder_end_buffer(&builder, root) == 0) {
+			goto io_error;
+		}
+
+		direct_buf = flatcc_builder_get_direct_buffer(&builder, &direct_size);
+		if ((direct_buf == NULL) || (direct_size == 0U)) {
+			goto io_error;
+		}
+
+		*out_len = direct_size;
+
+		/* Size query: report what a buffer would need to hold. */
+		if (out_buf == NULL) {
+			flatcc_builder_clear(&builder);
+			return ZDB_OK;
+		}
+
+		if (out_capacity < direct_size) {
+			flatcc_builder_clear(&builder);
+			return ZDB_ERR_NOMEM;
+		}
+
+		(void)memcpy(out_buf, direct_buf, direct_size);
+		flatcc_builder_clear(&builder);
+		return ZDB_OK;
+
+io_error:
+		flatcc_builder_clear(&builder);
+		*out_len = 0U;
+		return ZDB_ERR_IO;
+	}
+#else
 	ARG_UNUSED(out_buf);
 	ARG_UNUSED(out_capacity);
 	*out_len = 0U;
 	return ZDB_ERR_UNSUPPORTED;
+#endif
 }
 
 #endif /* CONFIG_ZDB_DOC */

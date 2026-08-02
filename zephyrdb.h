@@ -1529,20 +1529,31 @@ extern "C"
 	zdb_status_t zdb_doc_metadata_free(zdb_doc_metadata_t *metadata, size_t count);
 
 	/**
-	 * @brief Reserved: serialize a document as a FlatBuffer for transport.
+	 * @brief Serialize a document as a FlatBuffer for transport.
 	 *
-	 * Documents are stored in ZephyrDB's own binary format. This entry point
-	 * is reserved for producing a FlatBuffer copy to send off-device and
-	 * reports ::ZDB_ERR_UNSUPPORTED.
+	 * Documents are stored in ZephyrDB's own binary format; this produces a
+	 * FlatBuffer copy to send off-device, leaving stored data untouched. The
+	 * buffer carries the collection name, document ID, timestamps, and every
+	 * field with its name, type, and value. The layout is documented as a
+	 * schema in the implementation, so a host can generate a reader for it.
 	 *
-	 * To export time-series samples as FlatBuffers today, see
-	 * zdb_ts_sample_i64_export_flatbuffer().
+	 * Passing NULL for @p out_buf reports the size the buffer needs in
+	 * @p out_len without producing one.
+	 *
+	 * Requires a build with @c CONFIG_ZDB_FLATBUFFERS and @c CONFIG_FLATCC,
+	 * which bring in the flatcc runtime.
 	 *
 	 * @param doc          Open document handle.
-	 * @param out_buf      Destination buffer.
+	 * @param out_buf      Destination buffer, or NULL to query the size.
 	 * @param out_capacity Capacity of @p out_buf in bytes.
 	 * @param out_len      Set to the serialized size.
-	 * @retval ZDB_ERR_UNSUPPORTED Always.
+	 * @retval ZDB_OK              Success, or size reported for a NULL buffer.
+	 * @retval ZDB_ERR_INVAL       NULL argument or a closed document.
+	 * @retval ZDB_ERR_NOMEM       @p out_capacity is smaller than @p out_len,
+	 *                             or the builder ran out of memory.
+	 * @retval ZDB_ERR_UNSUPPORTED Built without FlatBuffers support, or a
+	 *                             field uses a reserved type.
+	 * @retval ZDB_ERR_IO          Serialization failure.
 	 */
 	zdb_status_t zdb_doc_export_flatbuffer(zdb_doc_t *doc, uint8_t *out_buf,
 										   size_t out_capacity, size_t *out_len);

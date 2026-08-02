@@ -289,6 +289,90 @@ ZTEST(doc_suite, test_doc_query_filters)
 	zassert_equal(count, 1U, "limit not honoured, got %zu", count);
 }
 
+#if defined(CONFIG_ZDB_FLATBUFFERS) && (CONFIG_ZDB_FLATBUFFERS)
+/*
+ * FlatBuffers export. These need the flatcc runtime, which CI's workspace does
+ * not fetch, so they are compiled out unless the build enables it.
+ */
+ZTEST(doc_suite, test_doc_export_flatbuffer_roundtrip)
+{
+	zdb_doc_t doc;
+	uint8_t buffer[512];
+	const uint8_t blob[] = {0xDE, 0xAD, 0xBE, 0xEF};
+	size_t out_len = 0U;
+	zdb_status_t rc = zdb_doc_create(&g_db, "c_fb", "d1", &doc);
+
+	zassert_equal(rc, ZDB_OK, "create failed: %d", rc);
+	zassert_equal(zdb_doc_field_set_i64(&doc, "age", 30), ZDB_OK);
+	zassert_equal(zdb_doc_field_set_f64(&doc, "rating", 4.5), ZDB_OK);
+	zassert_equal(zdb_doc_field_set_string(&doc, "name", "Alice"), ZDB_OK);
+	zassert_equal(zdb_doc_field_set_bool(&doc, "active", true), ZDB_OK);
+	zassert_equal(zdb_doc_field_set_bytes(&doc, "data", blob, sizeof(blob)), ZDB_OK);
+
+	rc = zdb_doc_export_flatbuffer(&doc, buffer, sizeof(buffer), &out_len);
+	zassert_equal(rc, ZDB_OK, "export failed: %d", rc);
+	zassert_true(out_len > 0U, "export produced no bytes");
+	zassert_true(out_len <= sizeof(buffer), "export overran the buffer: %zu", out_len);
+
+	/* The payload should carry the strings we put in it. */
+	{
+		bool saw_name = false;
+
+		for (size_t i = 0U; (i + 5U) <= out_len; i++) {
+			if (memcmp(&buffer[i], "Alice", 5U) == 0) {
+				saw_name = true;
+				break;
+			}
+		}
+		zassert_true(saw_name, "string field missing from the exported buffer");
+	}
+
+	zdb_doc_close(&doc);
+}
+
+/* A NULL buffer asks how much space the export needs. */
+ZTEST(doc_suite, test_doc_export_flatbuffer_size_query)
+{
+	zdb_doc_t doc;
+	uint8_t buffer[512];
+	size_t query_len = 0U;
+	size_t actual_len = 0U;
+	zdb_status_t rc = zdb_doc_create(&g_db, "c_fb_size", "d1", &doc);
+
+	zassert_equal(rc, ZDB_OK, "create failed: %d", rc);
+	zassert_equal(zdb_doc_field_set_i64(&doc, "x", 7), ZDB_OK);
+
+	rc = zdb_doc_export_flatbuffer(&doc, NULL, 0U, &query_len);
+	zassert_equal(rc, ZDB_OK, "size query failed: %d", rc);
+	zassert_true(query_len > 0U, "size query reported zero");
+
+	rc = zdb_doc_export_flatbuffer(&doc, buffer, sizeof(buffer), &actual_len);
+	zassert_equal(rc, ZDB_OK, "export failed: %d", rc);
+	zassert_equal(actual_len, query_len, "size query disagreed with the export: %zu vs %zu",
+		      query_len, actual_len);
+
+	zdb_doc_close(&doc);
+}
+
+/* A short buffer must report the requirement rather than overrun. */
+ZTEST(doc_suite, test_doc_export_flatbuffer_buffer_too_small)
+{
+	zdb_doc_t doc;
+	uint8_t small[8];
+	size_t needed = 0U;
+	zdb_status_t rc = zdb_doc_create(&g_db, "c_fb_small", "d1", &doc);
+
+	zassert_equal(rc, ZDB_OK, "create failed: %d", rc);
+	zassert_equal(zdb_doc_field_set_string(&doc, "name", "a longer value"), ZDB_OK);
+
+	rc = zdb_doc_export_flatbuffer(&doc, small, sizeof(small), &needed);
+	zassert_equal(rc, ZDB_ERR_NOMEM, "expected NOMEM for a short buffer, got %d", rc);
+	zassert_true(needed > sizeof(small), "required size not reported: %zu", needed);
+
+	zdb_doc_close(&doc);
+}
+#else
+/* Without the flatcc runtime the export reports that it is unavailable. */
 ZTEST(doc_suite, test_doc_export_flatbuffer_unsupported)
 {
 	zdb_doc_t doc;
@@ -299,12 +383,12 @@ ZTEST(doc_suite, test_doc_export_flatbuffer_unsupported)
 	zassert_equal(rc, ZDB_OK, "create failed: %d", rc);
 	zassert_equal(zdb_doc_field_set_i64(&doc, "x", 1), ZDB_OK);
 
-	/* Documented stub: FlatBuffers document export is not implemented. */
 	rc = zdb_doc_export_flatbuffer(&doc, buffer, sizeof(buffer), &out_len);
-	zassert_equal(rc, ZDB_ERR_UNSUPPORTED, "expected UNSUPPORTED stub, got %d", rc);
+	zassert_equal(rc, ZDB_ERR_UNSUPPORTED, "expected UNSUPPORTED, got %d", rc);
 
 	zdb_doc_close(&doc);
 }
+#endif /* CONFIG_ZDB_FLATBUFFERS */
 
 /*
  * The v2 CRC covers field payloads, so a flipped payload byte must be caught

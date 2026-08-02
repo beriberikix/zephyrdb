@@ -110,8 +110,9 @@ This page covers the complete option surface, grouped as in the Kconfig menus.
 
 ## Stage 2 (Experimental)
 
-- `CONFIG_ZDB_FLATBUFFERS`: TS sample FlatBuffers export helper (requires
-  `CONFIG_FLATCC` from the flatcc-zephyr module)
+- `CONFIG_ZDB_FLATBUFFERS`: FlatBuffers export for time-series samples and
+  documents (requires `CONFIG_FLATCC` from the flatcc-zephyr module). Available
+  whenever TS or DOC is enabled.
 - `CONFIG_ZDB_DOC`: document model (requires `FILE_SYSTEM`; documents are
   stored as files on the mounted filesystem)
 - `CONFIG_ZDB_DOC_MAX_FIELD_NAME_LEN` (default 32)

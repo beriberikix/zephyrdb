@@ -338,12 +338,13 @@ config ZDB_SHELL
 menu "Stage 2 (Experimental)"
 
 config ZDB_FLATBUFFERS
-	bool "Enable FlatBuffers helper APIs"
+	bool "Export records and documents as FlatBuffers"
 	default n
-	depends on ZDB_TS && FLATCC
+	depends on (ZDB_TS || ZDB_DOC) && FLATCC
 	help
-	  Enables Stage 2 bootstrap helpers that export TS samples using
-	  FlatCC runtime primitives. Requires flatcc-zephyr module with
+	  Adds helpers that serialize time-series samples and documents into
+	  FlatBuffers for sending off-device, leaving stored data in
+	  ZephyrDB's own format. Requires the flatcc-zephyr module with
 	  CONFIG_FLATCC enabled.
 
 config ZDB_DOC
