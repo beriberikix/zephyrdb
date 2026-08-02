@@ -14,7 +14,7 @@ ZephyrDB relies on static `k_mem_slab` pools for internal objects:
 - Core slab — time-series core context
 - Cursor slab — cursor state
 - KV IO slab — per-call key-value record buffers
-- TS ingest slab — the time-series ingest buffer
+- TS ingest slab — one ingest buffer per open time-series stream
 
 The `ZDB_DEFINE_STATIC` helper wires these slabs into a `zdb_t` instance. Slab
 blocks are the only allocation on the append, flush, and cursor paths.

@@ -289,8 +289,11 @@ zdb_status_t zdb_deinit(zdb_t *db)
 	if ((db->core_slab != NULL) && (db->ts_ctx != NULL)) {
 		struct zdb_ts_core_ctx *ctx = (struct zdb_ts_core_ctx *)db->ts_ctx;
 
-		if ((db->ts_ingest_slab != NULL) && (ctx->ingest_buf != NULL)) {
-			k_mem_slab_free(db->ts_ingest_slab, ctx->ingest_buf);
+		/* Return every open stream's ingest buffer. */
+		for (size_t i = 0U; i < ARRAY_SIZE(ctx->streams); i++) {
+			if ((db->ts_ingest_slab != NULL) && (ctx->streams[i].ingest_buf != NULL)) {
+				k_mem_slab_free(db->ts_ingest_slab, ctx->streams[i].ingest_buf);
+			}
 		}
 		k_mem_slab_free(db->core_slab, ctx);
 	}

@@ -55,6 +55,11 @@ This page covers the complete option surface, grouped as in the Kconfig menus.
 ## TS Boundaries
 
 - `CONFIG_ZDB_TS_STREAM_NAME_MAX_LEN` (default 24)
+- `CONFIG_ZDB_TS_MAX_STREAMS` (range 1–16, default 1): streams open at once.
+  Each open stream takes one ingest slab block and a slot in the core context,
+  so raising this needs `CONFIG_ZDB_TS_INGEST_SLAB_BLOCK_COUNT` at least as
+  large and usually a bigger `CONFIG_ZDB_CORE_SLAB_BLOCK_SIZE`; the build
+  asserts both.
 - `CONFIG_ZDB_TS_INGEST_BUFFER_BYTES` (default 1024, LittleFS): RAM staging
   before flush
 - `CONFIG_ZDB_TS_MAX_AGG_POINTS` (default 4096, LittleFS): scan cap for

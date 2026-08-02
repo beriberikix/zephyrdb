@@ -13,11 +13,6 @@ reverse traversal, which remains below.
   overwrite-oldest-when-full option. FCB nearly provides it via sector
   rotation; the LittleFS backend needs segmented files with oldest-segment
   deletion. Highest-value TS feature; medium effort.
-- **TS multiple concurrent streams** — Lift the one-stream-per-instance limit
-  (second `zdb_ts_open()` returns `ZDB_ERR_BUSY` today); N streams, each with
-  its own file/FCB region, slab-sized via Kconfig. Subsumes the earlier
-  "multi-stream coordination APIs" item — coordination can follow if a
-  concrete need appears.
 - **FlatBuffers document export** — `zdb_doc_export_flatbuffer()` is a stub
   returning `ZDB_ERR_UNSUPPORTED`; the flatcc dependency is already available
   as a sibling Zephyr module (`flatcc-zephyr`).

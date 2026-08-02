@@ -157,15 +157,36 @@ struct zdb_ts_cursor_ctx {
 #endif
 };
 
+#ifndef CONFIG_ZDB_TS_MAX_STREAMS
+#define CONFIG_ZDB_TS_MAX_STREAMS 1
+#endif
+
+/*
+ * One open stream.
+ *
+ * The name is copied rather than referenced: a caller's zdb_ts_t may live on
+ * the stack, while the slot outlives it until the stream is closed.
+ */
+struct zdb_ts_stream_ctx {
+	char name[CONFIG_ZDB_TS_STREAM_NAME_MAX_LEN + 1U];
+	uint8_t *ingest_buf;
+	size_t ingest_capacity;
+	size_t ingest_used;
+	/*
+	 * Open handles referring to this stream. Re-opening a stream is
+	 * allowed, so the slot is only released once every handle is closed —
+	 * otherwise closing one would pull the buffer out from under another.
+	 */
+	uint8_t open_count;
+	bool in_use;
+};
+
 struct zdb_ts_core_ctx {
 	struct k_work flush_work;
 	struct k_sem flush_done;
 	struct k_work_q *work_q;
 	zdb_t *db;
-	uint8_t *ingest_buf;
-	size_t ingest_capacity;
-	size_t ingest_used;
-	const char *active_stream;
+	struct zdb_ts_stream_ctx streams[CONFIG_ZDB_TS_MAX_STREAMS];
 	bool flush_pending;
 	bool ts_dir_ready;
 #if ZDB_TS_USE_FCB
@@ -189,6 +210,12 @@ BUILD_ASSERT(sizeof(struct zdb_ts_core_ctx) <= CONFIG_ZDB_CORE_SLAB_BLOCK_SIZE,
 #if defined(CONFIG_ZDB_CURSOR_SLAB_BLOCK_SIZE)
 BUILD_ASSERT(sizeof(struct zdb_ts_cursor_ctx) <= CONFIG_ZDB_CURSOR_SLAB_BLOCK_SIZE,
 	     "CONFIG_ZDB_CURSOR_SLAB_BLOCK_SIZE is too small for struct zdb_ts_cursor_ctx");
+#endif
+
+#if ZDB_TS_USE_LITTLEFS && defined(CONFIG_ZDB_TS_INGEST_SLAB_BLOCK_COUNT)
+/* Each open stream holds one ingest block for as long as it is open. */
+BUILD_ASSERT(CONFIG_ZDB_TS_INGEST_SLAB_BLOCK_COUNT >= CONFIG_ZDB_TS_MAX_STREAMS,
+	     "CONFIG_ZDB_TS_INGEST_SLAB_BLOCK_COUNT must cover CONFIG_ZDB_TS_MAX_STREAMS");
 #endif
 
 #endif /* CONFIG_ZDB_TS */

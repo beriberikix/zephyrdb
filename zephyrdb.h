@@ -889,7 +889,16 @@ extern "C"
 	} zdb_ts_agg_result_t;
 
 	/**
-	 * @brief Open (or re-open) the instance's active stream.
+	 * @brief Open a stream for appending and reading.
+	 *
+	 * An instance holds up to @c CONFIG_ZDB_TS_MAX_STREAMS streams open at
+	 * once, each with its own ingest buffer, so appends to different
+	 * streams stay independent. Opening one more than that reports
+	 * ::ZDB_ERR_BUSY; zdb_ts_close() frees a slot.
+	 *
+	 * Opening a stream that is already open shares its slot, so both
+	 * handles see the same buffered samples. The slot is released once
+	 * every handle is closed.
 	 *
 	 * @param ts          Handle to fill.
 	 * @param db          Initialized instance.
@@ -898,20 +907,23 @@ extern "C"
 	 *                    reference and must outlive @p ts.
 	 * @retval ZDB_OK        Success.
 	 * @retval ZDB_ERR_INVAL NULL argument or over-long stream name.
-	 * @retval ZDB_ERR_BUSY  A different stream is already active on @p db
-	 *                       (until zdb_deinit()).
+	 * @retval ZDB_ERR_NOMEM No core slab block was free.
+	 * @retval ZDB_ERR_BUSY  Every stream slot is taken by another stream.
 	 */
 	zdb_status_t zdb_ts_open(zdb_t *db, const char *stream_name, zdb_ts_t *ts);
 
 	/**
-	 * @brief Close a stream handle.
+	 * @brief Close a stream handle and release its slot.
 	 *
-	 * Note: the instance's active-stream binding persists until
-	 * zdb_deinit(); closing does not allow a different stream to open.
+	 * Samples still buffered for the stream are written out first, so
+	 * closing never discards data. Once the last handle on a stream is
+	 * closed, its slot and ingest buffer become available to another
+	 * stream.
 	 *
 	 * @param ts Open stream handle.
 	 * @retval ZDB_OK        Success.
 	 * @retval ZDB_ERR_INVAL @p ts is NULL or not open.
+	 * @retval ZDB_ERR_IO    Buffered samples could not be written.
 	 */
 	zdb_status_t zdb_ts_close(zdb_ts_t *ts);
 
