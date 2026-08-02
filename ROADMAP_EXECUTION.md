@@ -57,7 +57,7 @@ under Notes with its reason, keeps its roadmap bullet, and the loop moves on.
 - [x] 5. Persistent KV iteration (§5.5, L) — `4bf78e2`, PR from feature/kv-persistent-index
 - [x] 6. KV reset to defaults (§5.6, S/M) — `c97e7f6`
 - [x] 7. Sample: doc_kv_blob (§5.7, S) — `a03012e`
-- [ ] 8. TS reverse cursor traversal (§5.8, M) — folds: cursor_reset rewind fix
+- [x] 8. TS reverse cursor traversal (§5.8, M) — `66115d6`; folded fix `0a49511` (cursor reset rewind)
 - [ ] 9. TS consumed watermark (§5.9, S/M)
 - [ ] 10. TS multiple concurrent streams (§5.10, L) — topic branch
 - [ ] 11. TS rollover / circular buffer mode (§5.11, L) — topic branch
