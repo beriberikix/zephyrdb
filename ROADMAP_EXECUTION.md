@@ -52,7 +52,7 @@ under Notes with its reason, keeps its roadmap bullet, and the loop moves on.
 - [x] 0. Setup: roadmap commit, doc debt, tracker, VM, baseline — `6756b5d`, `a1aa968`
 - [x] 1. Atomic document saves + full-payload CRC (§5.1, M) — `bd5fabf`
 - [x] 2. TS COUNT correctness & cost (§5.2, M) — `8889103`; folded fixes `a063025` (slab asserts), `bbcb5c4` (work_q)
-- [ ] 3. KV string convenience API (§5.3, S) — folds: zero-length value fix
+- [x] 3. KV string convenience API (§5.3, S) — `6b27eed`; folded fix `c4e312d` (zero-length values)
 - [ ] 4. KV defaults with auto-init (§5.4, M) — folds: ZDB_EVENTING dependency fix
 - [ ] 5. Persistent KV iteration (§5.5, L) — topic branch
 - [ ] 6. KV reset to defaults (§5.6, S/M)
