@@ -121,6 +121,29 @@ Notes:
 - Uses ZMS on `storage_partition` for KV backend on `native_sim`.
 - Prints latest zbus events for KV (`zdb_kv_event_chan`), TS (`zdb_ts_event_chan`), and DOC (`zdb_doc_event_chan`).
 
+### doc_kv_blob
+
+Stores a structured record as a single KV value on boards without a
+filesystem: a versioned packed struct, seeded by a defaults table, read back
+with v1→v2 upgrade handling, and cleared with `zdb_kv_reset_namespace()`.
+
+Build:
+
+```bash
+west build -p always -s samples/doc_kv_blob -b native_sim
+west build -t run
+```
+
+Notes:
+
+- Uses ZMS on `storage_partition`; no filesystem required.
+- Shows the interim pattern for the roadmap's "NVS/ZMS document backends"
+  item: fine when the record's shape is known at compile time, whereas the
+  document model suits ad-hoc or queryable fields.
+- The reader keys off the record's leading version field rather than its
+  stored length, so an unknown layout is reported instead of reinterpreted.
+- Prints `doc_kv_blob: PASS` after seeding, upgrading, and factory-resetting.
+
 ### native_sim_harness
 
 Minimal `native_sim` harness that initializes an instance and exercises the time-series FlatBuffers export helper in both size-query and write modes.

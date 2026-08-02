@@ -36,9 +36,10 @@ reverse traversal, which remains below.
   serialization surface that pressures the no-heap design goal. Interim:
   document a CBOR-in-`BYTES` pattern in a sample.
 - **NVS/ZMS document backends** — For boards without a filesystem, with a RAM
-  manifest for query enumeration. Interim: a sample showing serialized
-  documents stored as KV blobs covers most of the need at a fraction of the
-  cost.
+  manifest for query enumeration. The `doc_kv_blob` sample now demonstrates the
+  interim pattern (versioned struct stored as one KV value, seeded by the
+  defaults table, cleared by namespace reset), which covers most of the need at
+  a fraction of the cost.
 - **TS timestamp delta encoding** — Bounded compression (v2 record format
   with delta-encoded timestamps) for 2–3× capacity. Full compression or
   long-window compaction is not worth the CPU/RAM on-device.
