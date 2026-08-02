@@ -9,8 +9,6 @@ reverse traversal, which remains below.
 
 ## Next — structural features
 
-- **KV reset to defaults** — Factory-reset API: enumerate and delete all keys
-  in a namespace, then re-run the defaults pass.
 - **TS rollover / circular buffer mode** — Explicit, backend-agnostic
   overwrite-oldest-when-full option. FCB nearly provides it via sector
   rotation; the LittleFS backend needs segmented files with oldest-segment

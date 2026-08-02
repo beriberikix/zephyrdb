@@ -56,7 +56,7 @@ All APIs return `zdb_status_t`: `ZDB_OK`, `ZDB_ERR_INVAL`, `ZDB_ERR_NOMEM`,
 - `zdb_kv_set(kv, key, value, value_len)`
 - `zdb_kv_get(kv, key, out_value, out_capacity, out_len)`
 - `zdb_kv_set_str(kv, key, value)` / `zdb_kv_get_str(kv, key, out_str, out_capacity, out_len)`
-- `zdb_kv_defaults_apply(db)`
+- `zdb_kv_defaults_apply(db)` / `zdb_kv_reset_namespace(kv)`
 - `zdb_kv_delete(kv, key)`
 - `zdb_kv_iter_open(kv, out_iter)`
 - `zdb_kv_iter_next(iter, out_key, out_key_capacity, out_key_len, out_value, out_value_capacity, out_value_len)`
@@ -89,6 +89,12 @@ Notes:
   `zdb_init` can now report backend errors when a defaults table is
   configured. A key the application deleted is indistinguishable from one never
   written, so it is re-seeded on the next pass.
+- `zdb_kv_reset_namespace` is the factory-reset primitive: it deletes every key
+  the index holds for that namespace, then re-applies the namespace's defaults,
+  leaving it as a first boot would. Other namespaces are untouched and each
+  deletion emits an event. It can only delete what the iterator can see, so the
+  `CONFIG_ZDB_KV_INDEX_MAX_ENTRIES` bound applies, and with
+  `CONFIG_ZDB_KV_PERSIST_INDEX=n` it clears only keys touched this session.
 - The string helpers wrap the byte API for the common case: `zdb_kv_set_str`
   stores `strlen(value) + 1` bytes so the terminator is part of the value, and
   `zdb_kv_get_str` always terminates its output, copying at most

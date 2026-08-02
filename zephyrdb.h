@@ -706,6 +706,32 @@ extern "C"
 	zdb_status_t zdb_kv_defaults_apply(zdb_t *db);
 
 	/**
+	 * @brief Delete every key in a namespace, then re-apply its defaults.
+	 *
+	 * The factory-reset primitive: deletes each key the index holds for
+	 * this namespace, then runs the defaults pass for it, leaving the
+	 * namespace exactly as a first boot would. Other namespaces are
+	 * untouched. Each deletion emits ::ZDB_EVENT_KV_DELETE.
+	 *
+	 * Deletion covers the keys the iterator can see, so the same bound
+	 * applies: keys stored beyond @c CONFIG_ZDB_KV_INDEX_MAX_ENTRIES are
+	 * not enumerable and therefore not deleted. With
+	 * @c CONFIG_ZDB_KV_PERSIST_INDEX disabled, only keys touched in this
+	 * session are removed.
+	 *
+	 * Every key is attempted even if one fails; the first failing status
+	 * is returned, and the defaults pass still runs.
+	 *
+	 * @param kv Open namespace handle.
+	 * @retval ZDB_OK            Namespace cleared and defaults applied.
+	 * @retval ZDB_ERR_INVAL     NULL argument or no KV backend configured.
+	 * @retval ZDB_ERR_NOMEM     The key index could not be allocated.
+	 * @retval ZDB_ERR_COLLISION A default's record ID slot holds a different key.
+	 * @retval ZDB_ERR_IO        Backend delete or write failure.
+	 */
+	zdb_status_t zdb_kv_reset_namespace(zdb_kv_t *kv);
+
+	/**
 	 * @brief Read a value as a NUL-terminated string.
 	 *
 	 * Never fails on a too-small buffer and always terminates @p out_str,

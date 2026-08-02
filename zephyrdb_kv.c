@@ -1020,6 +1020,109 @@ zdb_status_t zdb_kv_defaults_apply(zdb_t *db)
 	return zdb_kv_defaults_apply_ns(db, NULL);
 }
 
+/*
+ * Find the first indexed key of a namespace at or after @p from_pos.
+ *
+ * Copies the key out under the read lock so the caller can delete it without
+ * holding the instance lock (zdb_kv_delete() takes the write lock itself).
+ * Returns the entry position, or -1 when the namespace has no more keys.
+ */
+static int zdb_kv_next_key_in_ns(zdb_t *db, const char *namespace_name, size_t from_pos,
+				 char *out_key, size_t out_key_size)
+{
+	const struct zdb_kv_ctx *ctx;
+	int found = -1;
+	size_t i;
+
+	if (zdb_lock_read(db) != ZDB_OK) {
+		return -1;
+	}
+
+	ctx = (const struct zdb_kv_ctx *)db->kv_ctx;
+	if (ctx != NULL) {
+		for (i = from_pos; i < ctx->entry_count; i++) {
+			if (strcmp(ctx->entries[i].namespace_name, namespace_name) != 0) {
+				continue;
+			}
+
+			(void)strncpy(out_key, ctx->entries[i].key, out_key_size - 1U);
+			out_key[out_key_size - 1U] = '\0';
+			found = (int)i;
+			break;
+		}
+	}
+
+	zdb_unlock_read(db);
+	return found;
+}
+
+zdb_status_t zdb_kv_reset_namespace(zdb_kv_t *kv)
+{
+	char key[CONFIG_ZDB_MAX_KEY_LEN + 1U];
+	zdb_status_t first_error = ZDB_OK;
+	zdb_status_t rc;
+	size_t pos = 0U;
+
+	if ((kv == NULL) || (kv->db == NULL) || (kv->namespace_name == NULL)) {
+		return ZDB_ERR_INVAL;
+	}
+
+	if (zdb_kv_backend_fs_from_db(kv->db) == NULL) {
+		return ZDB_ERR_INVAL;
+	}
+
+	/* Populate the index before walking it, so keys from earlier boots are
+	 * included rather than silently surviving the reset.
+	 */
+	if (zdb_kv_ctx_get_or_alloc(kv->db) == NULL) {
+		return ZDB_ERR_NOMEM;
+	}
+
+	for (;;) {
+		int entry_pos = zdb_kv_next_key_in_ns(kv->db, kv->namespace_name, pos, key,
+						      sizeof(key));
+
+		if (entry_pos < 0) {
+			break;
+		}
+
+		rc = zdb_kv_delete(kv, key);
+		if (rc == ZDB_OK) {
+			/*
+			 * The entry was removed and the index compacted, so the
+			 * next candidate has shifted into this position.
+			 */
+			continue;
+		}
+
+		if (rc == ZDB_ERR_NOT_FOUND) {
+			/*
+			 * The index outlived its record (a crash between the two
+			 * writes). Drop the stale entry so the scan can advance.
+			 */
+			if (zdb_lock_write(kv->db) == ZDB_OK) {
+				zdb_kv_ctx_track_delete(kv->db, kv->namespace_name, key);
+				zdb_unlock_write(kv->db);
+			}
+			continue;
+		}
+
+		/* A real failure: remember it and step over the key. */
+		if (first_error == ZDB_OK) {
+			first_error = rc;
+		}
+		pos = (size_t)entry_pos + 1U;
+	}
+
+	/* Re-seed whatever the defaults table says this namespace should hold. */
+	rc = zdb_kv_defaults_apply_ns(kv->db, kv->namespace_name);
+	if ((rc != ZDB_OK) && (first_error == ZDB_OK)) {
+		first_error = rc;
+	}
+
+	return first_error;
+}
+
 zdb_status_t zdb_kv_set_str(zdb_kv_t *kv, const char *key, const char *value)
 {
 	if (value == NULL) {

@@ -279,3 +279,88 @@ ZTEST(kv_defaults_suite, test_invalid_entry_reported_but_others_applied)
 	zassert_equal(rc, ZDB_OK, "valid entry skipped after an invalid one: %d", rc);
 	zassert_equal(value, good, "value mismatch: %u", value);
 }
+
+/* Factory reset: user values gone, defaults back, other namespaces untouched. */
+ZTEST(kv_defaults_suite, test_reset_restores_defaults)
+{
+	zdb_kv_t kv;
+	zdb_status_t rc;
+	uint32_t value;
+
+	zassert_equal(zdb_init(&g_db, &g_cfg), ZDB_OK, "init failed");
+
+	/* Diverge from the defaults and add a key the table does not mention. */
+	write_u32("cfg", "baud", 9600U);
+	write_u32("cfg", "extra", 1234U);
+
+	/* A neighbouring namespace must survive the reset. */
+	write_u32("keep", "mine", 4321U);
+
+	zassert_equal(zdb_kv_open(&g_db, "cfg", &kv), ZDB_OK, "open failed");
+	zassert_equal(zdb_kv_reset_namespace(&kv), ZDB_OK, "reset failed");
+	(void)zdb_kv_close(&kv);
+
+	value = read_u32("cfg", "baud", &rc);
+	zassert_equal(rc, ZDB_OK, "default not restored: %d", rc);
+	zassert_equal(value, g_default_baud, "baud not reset: %u", value);
+
+	value = read_u32("cfg", "retries", &rc);
+	zassert_equal(rc, ZDB_OK, "second default not restored: %d", rc);
+	zassert_equal(value, g_default_retries, "retries not reset: %u", value);
+
+	(void)read_u32("cfg", "extra", &rc);
+	zassert_equal(rc, ZDB_ERR_NOT_FOUND, "non-default key survived reset: %d", rc);
+
+	value = read_u32("keep", "mine", &rc);
+	zassert_equal(rc, ZDB_OK, "other namespace was cleared: %d", rc);
+	zassert_equal(value, 4321U, "other namespace value changed: %u", value);
+}
+
+/* Resetting a namespace with no stored keys is a no-op that still seeds. */
+ZTEST(kv_defaults_suite, test_reset_empty_namespace)
+{
+	zdb_kv_t kv;
+	zdb_cfg_t cfg = g_cfg;
+	zdb_status_t rc;
+
+	/* No defaults for this namespace, and nothing stored in it. */
+	cfg.kv_defaults = NULL;
+	cfg.kv_default_count = 0U;
+	zassert_equal(zdb_init(&g_db, &cfg), ZDB_OK, "init failed");
+
+	zassert_equal(zdb_kv_open(&g_db, "never_used", &kv), ZDB_OK, "open failed");
+	zassert_equal(zdb_kv_reset_namespace(&kv), ZDB_OK, "reset of empty namespace failed");
+	(void)zdb_kv_close(&kv);
+
+	(void)read_u32("never_used", "anything", &rc);
+	zassert_equal(rc, ZDB_ERR_NOT_FOUND, "reset invented a key: %d", rc);
+}
+
+#if defined(CONFIG_ZDB_KV_PERSIST_INDEX) && (CONFIG_ZDB_KV_PERSIST_INDEX)
+/*
+ * The real integration point with the persisted index: keys written before a
+ * restart must be found and cleared, not silently left behind.
+ *
+ * Only meaningful when the index is persisted; with session-only iteration the
+ * key is deliberately invisible to the reset.
+ */
+ZTEST(kv_defaults_suite, test_reset_clears_keys_from_a_previous_boot)
+{
+	zdb_kv_t kv;
+	zdb_status_t rc;
+
+	zassert_equal(zdb_init(&g_db, &g_cfg), ZDB_OK, "init failed");
+	write_u32("reboot_ns", "stale", 77U);
+
+	/* Drop and rebuild the in-RAM index, as a restart would. */
+	(void)zdb_deinit(&g_db);
+	zassert_equal(zdb_init(&g_db, &g_cfg), ZDB_OK, "re-init failed");
+
+	zassert_equal(zdb_kv_open(&g_db, "reboot_ns", &kv), ZDB_OK, "open failed");
+	zassert_equal(zdb_kv_reset_namespace(&kv), ZDB_OK, "reset failed");
+	(void)zdb_kv_close(&kv);
+
+	(void)read_u32("reboot_ns", "stale", &rc);
+	zassert_equal(rc, ZDB_ERR_NOT_FOUND, "key from a previous boot survived reset: %d", rc);
+}
+#endif /* CONFIG_ZDB_KV_PERSIST_INDEX */
