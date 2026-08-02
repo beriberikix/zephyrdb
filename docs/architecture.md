@@ -21,8 +21,9 @@ blocks are the only allocation on the append, flush, and cursor paths.
 
 Two areas still use the system heap and are sized by Kconfig rather than slabs:
 
-- The key-value session index (`k_calloc` on first use), which holds up to 128
-  entries of two `CONFIG_ZDB_MAX_KEY_LEN`-sized names plus a record ID.
+- The key-value key index (`k_calloc` on first use), which holds up to
+  `CONFIG_ZDB_KV_INDEX_MAX_ENTRIES` entries of two
+  `CONFIG_ZDB_MAX_KEY_LEN`-sized names plus a record ID.
 - The document model, which allocates the field array and every string/bytes
   payload individually. Applications that enable `CONFIG_ZDB_DOC` must size
   `CONFIG_HEAP_MEM_POOL_SIZE` accordingly.
@@ -51,7 +52,8 @@ staging file promotes it if it validates.
 
 ## Storage Isolation
 
-- KV storage is provided through `cfg.kv_backend_fs`
+- KV storage is provided through `cfg.kv_backend_fs`; one reserved record ID
+  per backend holds the key index when `CONFIG_ZDB_KV_PERSIST_INDEX` is enabled
 - TS files are written under `<mount>/<CONFIG_ZDB_TS_DIRNAME>/`
 - DOC files are written under `<mount>/zdb_docs/` (`<id>.zdoc`, with
   `<id>.zdoc.tmp` appearing transiently during a save)

@@ -43,6 +43,14 @@ This page covers the complete option surface, grouped as in the Kconfig menus.
 - `CONFIG_ZDB_KV_IO_SLAB_BLOCK_SIZE` (default 128): KV IO buffer size. The
   maximum stored value is `block_size − 3 − strlen(namespace) − strlen(key)`.
 - `CONFIG_ZDB_KV_IO_SLAB_BLOCK_COUNT` (default 8): concurrent KV operations
+- `CONFIG_ZDB_KV_INDEX_MAX_ENTRIES` (range 8–1024, default 128): keys the
+  iterator can enumerate. Costs about `2 * (ZDB_MAX_KEY_LEN + 1) + 4` bytes of
+  heap per entry, plus 4 bytes of storage per entry when the index is
+  persisted. Keys past this bound stay readable but are not iterable.
+- `CONFIG_ZDB_KV_PERSIST_INDEX` (default y): mirror the key index into a
+  reserved backend record so iteration covers keys written before the current
+  boot. Set to `n` for session-only iteration without the extra write on key
+  creation and deletion.
 
 ## TS Boundaries
 

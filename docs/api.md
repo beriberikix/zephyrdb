@@ -97,9 +97,19 @@ Notes:
   `zdb_kv_set` without a terminator.
 - Records written by pre-v2 builds are treated as absent (reads and deletes
   report `ZDB_ERR_NOT_FOUND`); a set reclaims the slot.
-- The iterator walks keys set/deleted during the current session (RAM index,
-  128 entries). Cross-session iteration from persisted data is not yet
-  implemented, although the v2 format now persists the namespace needed for it.
+- The iterator enumerates every key the index knows about, including keys
+  written before this boot. The index is held in RAM and, with
+  `CONFIG_ZDB_KV_PERSIST_INDEX=y` (the default), mirrored into a reserved
+  backend record so it can be rebuilt after a restart. Rebuilding reads one
+  record per tracked key on first use; set `CONFIG_ZDB_KV_PERSIST_INDEX=n` to
+  keep iteration session-only and skip the extra write when a key is created or
+  deleted.
+- The index holds at most `CONFIG_ZDB_KV_INDEX_MAX_ENTRIES` keys (default 128).
+  Keys beyond that are **stored and readable but not enumerable**, so raise the
+  bound if a deployment relies on iterating everything.
+- A crash between the index write and the data write leaves an index entry with
+  no record. Iteration skips it and the next rebuild removes it; stored data is
+  never affected.
 
 ## Eventing
 
