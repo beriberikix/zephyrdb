@@ -115,6 +115,7 @@ config ZDB_CORE_SLAB_BLOCK_COUNT
 config ZDB_CURSOR_SLAB_BLOCK_SIZE
 	int "Cursor slab block size (bytes)"
 	range 32 2048
+	default 160 if ZDB_TS_ROLLOVER
 	default 128
 	help
 	  Must be large enough to hold a time-series cursor context, which
@@ -197,6 +198,40 @@ config ZDB_TS_MAX_STREAMS
 	  small slot in the core context, so raising this needs
 	  ZDB_TS_INGEST_SLAB_BLOCK_COUNT at least as large, and may need a
 	  bigger ZDB_CORE_SLAB_BLOCK_SIZE. The build asserts both.
+
+config ZDB_TS_ROLLOVER
+	bool "Overwrite the oldest samples when a stream is full"
+	default y if ZDB_TS_BACKEND_FCB
+	default n
+	help
+	  Bound a stream's storage: once it reaches capacity, the oldest
+	  samples are discarded to make room for new ones, so a long-running
+	  logger keeps a recent window instead of filling the partition. With
+	  this disabled a full stream reports an error and stops accepting
+	  appends, preserving everything already stored.
+
+	  The FCB backend rotates by design, so this defaults on there.
+
+config ZDB_TS_ROLLOVER_SEGMENT_BYTES
+	int "Bytes of records per stream segment"
+	range 256 1048576
+	default 4096
+	depends on ZDB_TS_ROLLOVER && ZDB_TS_BACKEND_LITTLEFS
+	help
+	  Records are grouped into segment files so the oldest can be
+	  discarded whole. This is the record payload per segment, excluding
+	  its 16-byte header. Smaller segments discard data in finer steps;
+	  larger ones mean fewer files.
+
+config ZDB_TS_ROLLOVER_MAX_SEGMENTS
+	int "Segments retained per stream"
+	range 2 64
+	default 4
+	depends on ZDB_TS_ROLLOVER && ZDB_TS_BACKEND_LITTLEFS
+	help
+	  How many segments a stream keeps. A stream therefore holds roughly
+	  ZDB_TS_ROLLOVER_SEGMENT_BYTES times this many bytes of records
+	  before the oldest segment is discarded.
 
 config ZDB_TS_INGEST_SLAB_BLOCK_SIZE
 	int "TS ingest slab block size (bytes)"

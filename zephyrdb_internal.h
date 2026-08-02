@@ -50,6 +50,19 @@
 #define ZDB_TS_USE_FCB 0
 #endif
 
+#if defined(CONFIG_ZDB_TS_ROLLOVER) && (CONFIG_ZDB_TS_ROLLOVER)
+#define ZDB_TS_ROLLOVER_ENABLED 1
+#else
+#define ZDB_TS_ROLLOVER_ENABLED 0
+#endif
+
+#ifndef CONFIG_ZDB_TS_ROLLOVER_SEGMENT_BYTES
+#define CONFIG_ZDB_TS_ROLLOVER_SEGMENT_BYTES 4096
+#endif
+#ifndef CONFIG_ZDB_TS_ROLLOVER_MAX_SEGMENTS
+#define CONFIG_ZDB_TS_ROLLOVER_MAX_SEGMENTS 4
+#endif
+
 #if defined(CONFIG_ZDB_STATS) && (CONFIG_ZDB_STATS)
 #define ZDB_STATS_ENABLED 1
 #else
@@ -140,6 +153,15 @@ struct zdb_ts_cursor_ctx {
 	size_t file_offset;
 	size_t ram_offset;
 	bool file_done;
+#if ZDB_TS_USE_LITTLEFS && ZDB_TS_ROLLOVER_ENABLED
+	/*
+	 * Segment being read, and the window snapshotted at open. Segments
+	 * discarded while the cursor is open simply read as absent.
+	 */
+	uint32_t cur_seg;
+	uint32_t seg_lo;
+	uint32_t seg_hi;
+#endif
 	/*
 	 * Direction is held here rather than in zdb_cursor_t::flags, which
 	 * zdb_cursor_reset() clears.
@@ -179,6 +201,17 @@ struct zdb_ts_stream_ctx {
 	 */
 	uint8_t open_count;
 	bool in_use;
+#if ZDB_TS_USE_LITTLEFS && ZDB_TS_ROLLOVER_ENABLED
+	/*
+	 * Segment window. Records live in <stream>.NNNN.zts files so the
+	 * oldest can be discarded whole; these track which files exist and how
+	 * full the newest one is.
+	 */
+	uint32_t oldest_seg;
+	uint32_t cur_seg;
+	size_t cur_seg_bytes;
+	bool segs_scanned;
+#endif
 };
 
 struct zdb_ts_core_ctx {

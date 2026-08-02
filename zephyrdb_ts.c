@@ -39,6 +39,19 @@ static uint32_t zdb_fnv1a32(const char *s)
 
 zdb_status_t zdb_ts_recover_stream(zdb_ts_t *ts, size_t *out_truncated_bytes);
 
+#if ZDB_TS_USE_LITTLEFS
+static zdb_status_t zdb_ts_ensure_header_at(zdb_t *db, const char *stream_name,
+					    const char *path);
+static int zdb_ts_active_path(zdb_t *db, struct zdb_ts_stream_ctx *slot, char *path,
+			      size_t path_len);
+#if ZDB_TS_ROLLOVER_ENABLED
+static int zdb_ts_build_segment_path(const zdb_cfg_t *cfg, const char *stream_name,
+				     uint32_t seq, char *path, size_t path_len);
+static zdb_status_t zdb_ts_scan_segments(zdb_t *db, struct zdb_ts_stream_ctx *slot);
+static int zdb_ts_roll_segment_if_full(zdb_t *db, struct zdb_ts_stream_ctx *slot);
+#endif
+#endif
+
 static bool zdb_ts_stream_name_valid(const char *stream_name)
 {
 	const char *p;
@@ -124,11 +137,17 @@ static int zdb_ts_fcb_append_record(struct zdb_ts_core_ctx *ctx,
 
 	rc = fcb_append(&ctx->ts_fcb, (uint16_t)sizeof(*rec), &loc);
 	if (rc == -ENOSPC) {
+#if ZDB_TS_ROLLOVER_ENABLED
+		/* Discard the oldest sector to make room. */
 		rc = fcb_rotate(&ctx->ts_fcb);
 		if (rc < 0) {
 			return rc;
 		}
 		rc = fcb_append(&ctx->ts_fcb, (uint16_t)sizeof(*rec), &loc);
+#else
+		/* Preserve what is stored and refuse the append. */
+		return -ENOSPC;
+#endif
 	}
 	if (rc < 0) {
 		return rc;
@@ -393,7 +412,7 @@ static int zdb_ts_flush_buffer_locked(struct zdb_ts_core_ctx *ctx,
 		return 0;
 	}
 
-	rc = zdb_ts_build_path(ctx->db->cfg, slot->name, path, sizeof(path));
+	rc = zdb_ts_active_path(ctx->db, slot, path, sizeof(path));
 	if (rc < 0) {
 		return rc;
 	}
@@ -415,7 +434,19 @@ static int zdb_ts_flush_buffer_locked(struct zdb_ts_core_ctx *ctx,
 		return rc;
 	}
 
+#if ZDB_TS_ROLLOVER_ENABLED
+	slot->cur_seg_bytes += slot->ingest_used;
+#endif
 	slot->ingest_used = 0U;
+
+#if ZDB_TS_ROLLOVER_ENABLED
+	/* Roll after writing, so a flush never spans two segments. */
+	rc = zdb_ts_roll_segment_if_full(ctx->db, slot);
+	if (rc < 0) {
+		return rc;
+	}
+#endif
+
 	return 0;
 }
 
@@ -496,6 +527,86 @@ static bool zdb_ts_agg_update(zdb_ts_agg_t agg, double sample, uint32_t *points,
 }
 
 #if ZDB_TS_USE_LITTLEFS
+#if ZDB_TS_USE_LITTLEFS && ZDB_TS_ROLLOVER_ENABLED
+/*
+ * Point the cursor's file handle at one segment, positioned for the walk's
+ * direction. Reports ZDB_ERR_NOT_FOUND when that segment is gone, which is
+ * what a segment discarded mid-walk looks like.
+ */
+static zdb_status_t zdb_ts_cursor_open_segment(struct zdb_ts_cursor_ctx *cctx, uint32_t seq)
+{
+	char path[ZDB_TS_PATH_MAX];
+	int rc;
+
+	if (cctx->file_open) {
+		(void)fs_close(&cctx->file);
+		cctx->file_open = false;
+	}
+
+	rc = zdb_ts_build_segment_path(cctx->db->cfg, cctx->stream_name, seq, path, sizeof(path));
+	if (rc < 0) {
+		return zdb_status_from_errno(rc);
+	}
+
+	fs_file_t_init(&cctx->file);
+	rc = fs_open(&cctx->file, path, FS_O_READ);
+	if (rc < 0) {
+		return (rc == -ENOENT) ? ZDB_ERR_NOT_FOUND : zdb_status_from_errno(rc);
+	}
+	cctx->file_open = true;
+	cctx->cur_seg = seq;
+
+	if (cctx->descending) {
+		off_t end = fs_seek(&cctx->file, 0, FS_SEEK_END);
+
+		if (end < 0) {
+			return zdb_status_from_errno((int)end);
+		}
+		cctx->file_size = (size_t)fs_tell(&cctx->file);
+		cctx->file_offset = cctx->file_size;
+	} else {
+		cctx->file_offset = sizeof(struct zdb_ts_stream_header);
+	}
+
+	rc = fs_seek(&cctx->file, (off_t)cctx->file_offset, FS_SEEK_SET);
+	if (rc < 0) {
+		return zdb_status_from_errno(rc);
+	}
+
+	return ZDB_OK;
+}
+
+/*
+ * Move to the next segment in the walk's direction, skipping any that have
+ * been discarded. Reports ZDB_ERR_NOT_FOUND once the window is exhausted.
+ */
+static zdb_status_t zdb_ts_cursor_next_segment(struct zdb_ts_cursor_ctx *cctx)
+{
+	for (;;) {
+		uint32_t next;
+
+		if (cctx->descending) {
+			if (cctx->cur_seg == cctx->seg_lo) {
+				return ZDB_ERR_NOT_FOUND;
+			}
+			next = cctx->cur_seg - 1U;
+		} else {
+			if (cctx->cur_seg >= cctx->seg_hi) {
+				return ZDB_ERR_NOT_FOUND;
+			}
+			next = cctx->cur_seg + 1U;
+		}
+
+		if (zdb_ts_cursor_open_segment(cctx, next) == ZDB_OK) {
+			return ZDB_OK;
+		}
+
+		/* Segment gone; keep stepping rather than ending the walk. */
+		cctx->cur_seg = next;
+	}
+}
+#endif /* ZDB_TS_USE_LITTLEFS && ZDB_TS_ROLLOVER_ENABLED */
+
 static zdb_status_t zdb_ts_cursor_read_file_record(struct zdb_ts_cursor_ctx *cctx,
 						    zdb_bytes_t *out_record)
 {
@@ -517,6 +628,11 @@ static zdb_status_t zdb_ts_cursor_read_file_record(struct zdb_ts_cursor_ctx *cct
 		 */
 		if (cctx->file_offset < (sizeof(struct zdb_ts_stream_header) +
 					 sizeof(cctx->cache))) {
+#if ZDB_TS_ROLLOVER_ENABLED
+			if (zdb_ts_cursor_next_segment(cctx) == ZDB_OK) {
+				return zdb_ts_cursor_read_file_record(cctx, out_record);
+			}
+#endif
 			return ZDB_ERR_NOT_FOUND;
 		}
 
@@ -529,6 +645,11 @@ static zdb_status_t zdb_ts_cursor_read_file_record(struct zdb_ts_cursor_ctx *cct
 	rd = fs_read(&cctx->file, &cctx->cache, sizeof(cctx->cache));
 
 	if (rd == 0) {
+#if ZDB_TS_ROLLOVER_ENABLED
+		if (zdb_ts_cursor_next_segment(cctx) == ZDB_OK) {
+			return zdb_ts_cursor_read_file_record(cctx, out_record);
+		}
+#endif
 		return ZDB_ERR_NOT_FOUND;
 	}
 	if (rd < 0) {
@@ -551,21 +672,16 @@ static zdb_status_t zdb_ts_cursor_read_file_record(struct zdb_ts_cursor_ctx *cct
 	return ZDB_OK;
 }
 
-static zdb_status_t zdb_ts_ensure_stream_header(zdb_t *db, const char *stream_name)
+static zdb_status_t zdb_ts_ensure_header_at(zdb_t *db, const char *stream_name,
+					    const char *path)
 {
 	struct fs_file_t file;
 	struct zdb_ts_stream_header hdr;
-	char path[ZDB_TS_PATH_MAX];
 	ssize_t rd;
 	int rc;
 
-	if ((db == NULL) || (db->cfg == NULL) || (stream_name == NULL)) {
+	if ((db == NULL) || (db->cfg == NULL) || (stream_name == NULL) || (path == NULL)) {
 		return ZDB_ERR_INVAL;
-	}
-
-	rc = zdb_ts_build_path(db->cfg, stream_name, path, sizeof(path));
-	if (rc < 0) {
-		return zdb_status_from_errno(rc);
 	}
 
 	fs_file_t_init(&file);
@@ -605,6 +721,238 @@ static zdb_status_t zdb_ts_ensure_stream_header(zdb_t *db, const char *stream_na
 
 	(void)fs_close(&file);
 	return zdb_ts_stream_header_decode(db, &hdr, stream_name);
+}
+
+#if ZDB_TS_ROLLOVER_ENABLED
+/*
+ * Path of one segment of a stream.
+ *
+ * Segments are numbered monotonically, so their order is their name order and
+ * discarding the oldest is a single unlink.
+ */
+static int zdb_ts_build_segment_path(const zdb_cfg_t *cfg, const char *stream_name,
+				     uint32_t seq, char *path, size_t path_len)
+{
+	int n;
+
+	if ((cfg == NULL) || (cfg->lfs_mount_point == NULL) || (stream_name == NULL) ||
+	    (path == NULL) || (path_len == 0U)) {
+		return -EINVAL;
+	}
+
+	if (!zdb_ts_stream_name_valid(stream_name)) {
+		return -EINVAL;
+	}
+
+	n = snprintf(path, path_len, "%s/%s/%s.%04u.zts", cfg->lfs_mount_point,
+		     CONFIG_ZDB_TS_DIRNAME, stream_name, (unsigned)seq);
+	if ((n < 0) || ((size_t)n >= path_len)) {
+		return -ENAMETOOLONG;
+	}
+
+	return 0;
+}
+
+/*
+ * Learn a stream's segment window from storage.
+ *
+ * The lowest and highest segment numbers present bound the retained window. A
+ * stream written as a single <stream>.zts by a build without rollover is
+ * adopted as segment 0, so switching the option on does not strand its data.
+ */
+static zdb_status_t zdb_ts_scan_segments(zdb_t *db, struct zdb_ts_stream_ctx *slot)
+{
+	char dir_path[ZDB_TS_PATH_MAX];
+	char seg_path[ZDB_TS_PATH_MAX];
+	struct fs_dir_t dir;
+	struct fs_dirent entry;
+	struct fs_dirent info;
+	size_t name_len;
+	uint32_t lowest = UINT32_MAX;
+	uint32_t highest = 0U;
+	bool found = false;
+	zdb_status_t hdr_rc;
+	int rc;
+	int n;
+
+	if (slot->segs_scanned) {
+		return ZDB_OK;
+	}
+
+	n = snprintf(dir_path, sizeof(dir_path), "%s/%s", db->cfg->lfs_mount_point,
+		     CONFIG_ZDB_TS_DIRNAME);
+	if ((n < 0) || ((size_t)n >= sizeof(dir_path))) {
+		return ZDB_ERR_INVAL;
+	}
+
+	name_len = strlen(slot->name);
+
+	fs_dir_t_init(&dir);
+	rc = fs_opendir(&dir, dir_path);
+	if (rc == 0) {
+		for (;;) {
+			unsigned int seq;
+
+			rc = fs_readdir(&dir, &entry);
+			if ((rc < 0) || (entry.name[0] == '\0')) {
+				break;
+			}
+			if (entry.type != FS_DIR_ENTRY_FILE) {
+				continue;
+			}
+			/* Match "<stream>.NNNN.zts" exactly. */
+			if ((strncmp(entry.name, slot->name, name_len) != 0) ||
+			    (entry.name[name_len] != '.')) {
+				continue;
+			}
+			if (sscanf(&entry.name[name_len + 1U], "%4u.zts", &seq) != 1) {
+				continue;
+			}
+
+			found = true;
+			if ((uint32_t)seq < lowest) {
+				lowest = (uint32_t)seq;
+			}
+			if ((uint32_t)seq > highest) {
+				highest = (uint32_t)seq;
+			}
+		}
+		(void)fs_closedir(&dir);
+	}
+
+	if (!found) {
+		char legacy_path[ZDB_TS_PATH_MAX];
+
+		rc = zdb_ts_build_path(db->cfg, slot->name, legacy_path, sizeof(legacy_path));
+		if (rc < 0) {
+			return zdb_status_from_errno(rc);
+		}
+		rc = zdb_ts_build_segment_path(db->cfg, slot->name, 0U, seg_path,
+					       sizeof(seg_path));
+		if (rc < 0) {
+			return zdb_status_from_errno(rc);
+		}
+
+		if (fs_stat(legacy_path, &info) == 0) {
+			rc = fs_rename(legacy_path, seg_path);
+			if (rc < 0) {
+				return zdb_status_from_errno(rc);
+			}
+		}
+
+		lowest = 0U;
+		highest = 0U;
+	}
+
+	slot->oldest_seg = lowest;
+	slot->cur_seg = highest;
+
+	rc = zdb_ts_build_segment_path(db->cfg, slot->name, slot->cur_seg, seg_path,
+				       sizeof(seg_path));
+	if (rc < 0) {
+		return zdb_status_from_errno(rc);
+	}
+
+	hdr_rc = zdb_ts_ensure_header_at(db, slot->name, seg_path);
+	if (hdr_rc != ZDB_OK) {
+		return hdr_rc;
+	}
+
+	slot->cur_seg_bytes = 0U;
+	if (fs_stat(seg_path, &info) == 0) {
+		if ((size_t)info.size > sizeof(struct zdb_ts_stream_header)) {
+			slot->cur_seg_bytes =
+				(size_t)info.size - sizeof(struct zdb_ts_stream_header);
+		}
+	}
+
+	slot->segs_scanned = true;
+	return ZDB_OK;
+}
+
+/*
+ * Start a new segment once the newest is full, discarding the oldest when the
+ * stream already holds its full complement.
+ *
+ * Called after a write rather than before, so a flush is never split across
+ * two files; a segment therefore overshoots its configured size by at most one
+ * ingest buffer.
+ */
+static int zdb_ts_roll_segment_if_full(zdb_t *db, struct zdb_ts_stream_ctx *slot)
+{
+	char seg_path[ZDB_TS_PATH_MAX];
+	zdb_status_t hdr_rc;
+	int rc;
+
+	if (slot->cur_seg_bytes < (size_t)CONFIG_ZDB_TS_ROLLOVER_SEGMENT_BYTES) {
+		return 0;
+	}
+
+	slot->cur_seg++;
+	slot->cur_seg_bytes = 0U;
+
+	rc = zdb_ts_build_segment_path(db->cfg, slot->name, slot->cur_seg, seg_path,
+				       sizeof(seg_path));
+	if (rc < 0) {
+		return rc;
+	}
+
+	hdr_rc = zdb_ts_ensure_header_at(db, slot->name, seg_path);
+	if (hdr_rc != ZDB_OK) {
+		return -EIO;
+	}
+
+	while ((slot->cur_seg - slot->oldest_seg + 1U) >
+	       (uint32_t)CONFIG_ZDB_TS_ROLLOVER_MAX_SEGMENTS) {
+		rc = zdb_ts_build_segment_path(db->cfg, slot->name, slot->oldest_seg, seg_path,
+					       sizeof(seg_path));
+		if (rc < 0) {
+			return rc;
+		}
+		rc = fs_unlink(seg_path);
+		if ((rc < 0) && (rc != -ENOENT)) {
+			return rc;
+		}
+		slot->oldest_seg++;
+	}
+
+	return 0;
+}
+#endif /* ZDB_TS_ROLLOVER_ENABLED */
+
+/*
+ * Path a stream currently appends to: its newest segment when rollover bounds
+ * the stream, otherwise its single file.
+ */
+static int zdb_ts_active_path(zdb_t *db, struct zdb_ts_stream_ctx *slot, char *path,
+			      size_t path_len)
+{
+#if ZDB_TS_ROLLOVER_ENABLED
+	if (zdb_ts_scan_segments(db, slot) != ZDB_OK) {
+		return -EIO;
+	}
+	return zdb_ts_build_segment_path(db->cfg, slot->name, slot->cur_seg, path, path_len);
+#else
+	return zdb_ts_build_path(db->cfg, slot->name, path, path_len);
+#endif
+}
+
+/* Single-file layout wrapper. */
+static zdb_status_t zdb_ts_ensure_stream_header(zdb_t *db, const char *stream_name)
+{
+	char path[ZDB_TS_PATH_MAX];
+	int rc;
+
+	if ((db == NULL) || (db->cfg == NULL)) {
+		return ZDB_ERR_INVAL;
+	}
+
+	rc = zdb_ts_build_path(db->cfg, stream_name, path, sizeof(path));
+	if (rc < 0) {
+		return zdb_status_from_errno(rc);
+	}
+
+	return zdb_ts_ensure_header_at(db, stream_name, path);
 }
 #endif
 
@@ -1286,14 +1634,46 @@ static zdb_status_t zdb_ts_count_all(zdb_ts_t *ts, uint32_t *out_count)
 	size_t buffered = 0U;
 	int rc;
 
-	rc = zdb_ts_build_path(ts->db->cfg, ts->stream_name, path, sizeof(path));
-	if (rc < 0) {
-		return zdb_status_from_errno(rc);
-	}
-
 	lock_rc = zdb_lock_read(ts->db);
 	if (lock_rc != ZDB_OK) {
 		return lock_rc;
+	}
+
+#if ZDB_TS_ROLLOVER_ENABLED
+	{
+		struct zdb_ts_core_ctx *tctx = (struct zdb_ts_core_ctx *)ts->db->ts_ctx;
+		struct zdb_ts_stream_ctx *seg_slot =
+			(tctx != NULL) ? zdb_ts_slot_find(tctx, ts->stream_name) : NULL;
+		uint32_t seq;
+
+		if (seg_slot == NULL) {
+			zdb_unlock_read(ts->db);
+			return ZDB_ERR_INVAL;
+		}
+
+		/* Every retained segment contributes its whole-record count. */
+		for (seq = seg_slot->oldest_seg; seq <= seg_slot->cur_seg; seq++) {
+			rc = zdb_ts_build_segment_path(ts->db->cfg, ts->stream_name, seq, path,
+						       sizeof(path));
+			if (rc < 0) {
+				zdb_unlock_read(ts->db);
+				return zdb_status_from_errno(rc);
+			}
+			if (fs_stat(path, &entry) != 0) {
+				continue;
+			}
+			if ((size_t)entry.size > sizeof(struct zdb_ts_stream_header)) {
+				flushed += ((size_t)entry.size -
+					    sizeof(struct zdb_ts_stream_header)) /
+					   sizeof(struct zdb_ts_record_i64);
+			}
+		}
+	}
+#else
+	rc = zdb_ts_build_path(ts->db->cfg, ts->stream_name, path, sizeof(path));
+	if (rc < 0) {
+		zdb_unlock_read(ts->db);
+		return zdb_status_from_errno(rc);
 	}
 
 	rc = fs_stat(path, &entry);
@@ -1308,6 +1688,7 @@ static zdb_status_t zdb_ts_count_all(zdb_ts_t *ts, uint32_t *out_count)
 		zdb_unlock_read(ts->db);
 		return zdb_status_from_errno(rc);
 	}
+#endif
 
 	ctx = (struct zdb_ts_core_ctx *)ts->db->ts_ctx;
 	if (ctx != NULL) {
@@ -1476,13 +1857,15 @@ static zdb_status_t zdb_ts_cursor_open_dir(zdb_ts_t *ts, zdb_ts_window_t window,
 	}
 #endif
 
-#if ZDB_TS_USE_LITTLEFS
+#if ZDB_TS_USE_LITTLEFS && !ZDB_TS_ROLLOVER_ENABLED
 	rc = zdb_ts_ensure_stream_header(ts->db, ts->stream_name);
 	if (rc != ZDB_OK) {
 		return rc;
 	}
 #else
+	/* Segment headers are written as segments are created. */
 	rc = ZDB_OK;
+	ARG_UNUSED(rc);
 #endif
 
 	if (k_mem_slab_alloc(ts->db->cursor_slab, (void **)&ctx, K_NO_WAIT) != 0) {
@@ -1497,6 +1880,34 @@ static zdb_status_t zdb_ts_cursor_open_dir(zdb_ts_t *ts, zdb_ts_window_t window,
 	ctx->ram_offset = 0U;
 	ctx->file_done = false;
 #if ZDB_TS_USE_LITTLEFS
+#if ZDB_TS_ROLLOVER_ENABLED
+	{
+		struct zdb_ts_core_ctx *tctx = zdb_ts_ctx_get_or_alloc(ts->db);
+		struct zdb_ts_stream_ctx *slot =
+			(tctx != NULL) ? zdb_ts_slot_find(tctx, ts->stream_name) : NULL;
+		zdb_status_t seg_rc;
+
+		if ((slot == NULL) || (zdb_ts_scan_segments(ts->db, slot) != ZDB_OK)) {
+			k_mem_slab_free(ts->db->cursor_slab, ctx);
+			return ZDB_ERR_INVAL;
+		}
+
+		fs_file_t_init(&ctx->file);
+		ctx->file_open = false;
+		ctx->seg_lo = slot->oldest_seg;
+		ctx->seg_hi = slot->cur_seg;
+		ctx->cur_seg = descending ? ctx->seg_hi : ctx->seg_lo;
+
+		seg_rc = zdb_ts_cursor_open_segment(ctx, ctx->cur_seg);
+		if (seg_rc != ZDB_OK) {
+			if (ctx->file_open) {
+				(void)fs_close(&ctx->file);
+			}
+			k_mem_slab_free(ts->db->cursor_slab, ctx);
+			return seg_rc;
+		}
+	}
+#else
 	{
 		char cursor_path[ZDB_TS_PATH_MAX];
 		int open_rc;
@@ -1546,6 +1957,7 @@ static zdb_status_t zdb_ts_cursor_open_dir(zdb_ts_t *ts, zdb_ts_window_t window,
 			return zdb_status_from_errno(open_rc);
 		}
 	}
+#endif /* ZDB_TS_ROLLOVER_ENABLED */
 #endif
 #if ZDB_TS_USE_FCB
 	ctx->fcb_started = false;
@@ -2030,7 +2442,24 @@ zdb_status_t zdb_ts_recover_stream(zdb_ts_t *ts, size_t *out_truncated_bytes)
 		*out_truncated_bytes = 0U;
 	}
 
+#if ZDB_TS_ROLLOVER_ENABLED
+	{
+		/*
+		 * Only the newest segment can hold a partial write; the rest
+		 * were sealed when the stream rolled past them.
+		 */
+		struct zdb_ts_core_ctx *tctx = zdb_ts_ctx_get_or_alloc(ts->db);
+		struct zdb_ts_stream_ctx *slot =
+			(tctx != NULL) ? zdb_ts_slot_find(tctx, ts->stream_name) : NULL;
+
+		if (slot == NULL) {
+			return ZDB_ERR_INVAL;
+		}
+		rc = zdb_ts_active_path(ts->db, slot, path, sizeof(path));
+	}
+#else
 	rc = zdb_ts_build_path(ts->db->cfg, ts->stream_name, path, sizeof(path));
+#endif
 	if (rc < 0) {
 		ZDB_STAT_INC(ts->db, recover_failures);
 		zdb_health_check(ts->db);
