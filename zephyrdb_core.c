@@ -108,6 +108,28 @@ void zdb_unlock_write(zdb_t *db)
 }
 
 #if defined(CONFIG_ZDB_EVENTING) && (CONFIG_ZDB_EVENTING)
+/*
+ * Copy a name into an event's fixed-size field, tolerating NULL.
+ *
+ * Not every event names one object: a flush covers whichever streams held
+ * buffered samples, so it names none of them. Listeners see an empty string
+ * rather than the emitter dereferencing NULL.
+ */
+static void zdb_event_copy_name(char *dst, size_t dst_size, const char *src)
+{
+	if ((dst == NULL) || (dst_size == 0U)) {
+		return;
+	}
+
+	if (src == NULL) {
+		dst[0] = '\0';
+		return;
+	}
+
+	(void)strncpy(dst, src, dst_size - 1U);
+	dst[dst_size - 1U] = '\0';
+}
+
 void zdb_emit_kv_event(zdb_t *db, zdb_event_type_t type, const char *namespace_name,
 		       const char *key, size_t value_len, zdb_status_t status)
 {
@@ -119,11 +141,8 @@ void zdb_emit_kv_event(zdb_t *db, zdb_event_type_t type, const char *namespace_n
 	}
 
 	event.type = type;
-	strncpy(event.namespace_name, namespace_name,
-		sizeof(event.namespace_name) - 1);
-	event.namespace_name[sizeof(event.namespace_name) - 1] = '\0';
-	strncpy(event.key, key, sizeof(event.key) - 1);
-	event.key[sizeof(event.key) - 1] = '\0';
+	zdb_event_copy_name(event.namespace_name, sizeof(event.namespace_name), namespace_name);
+	zdb_event_copy_name(event.key, sizeof(event.key), key);
 	event.value_len = value_len;
 	event.timestamp_ms = (uint64_t)k_uptime_get();
 	event.status = status;
@@ -158,9 +177,7 @@ void zdb_emit_ts_event(zdb_t *db, zdb_ts_event_type_t type, const char *stream_n
 	}
 
 	event.type = type;
-	strncpy(event.stream_name, stream_name,
-		sizeof(event.stream_name) - 1);
-	event.stream_name[sizeof(event.stream_name) - 1] = '\0';
+	zdb_event_copy_name(event.stream_name, sizeof(event.stream_name), stream_name);
 	event.timestamp_ms = (uint64_t)k_uptime_get();
 	event.sample_ts_ms = sample_ts_ms;
 	event.sample_value = sample_value;
@@ -198,12 +215,8 @@ void zdb_emit_doc_event(zdb_t *db, zdb_doc_event_type_t type,
 	}
 
 	event.type = type;
-	strncpy(event.collection_name, collection_name,
-		sizeof(event.collection_name) - 1);
-	event.collection_name[sizeof(event.collection_name) - 1] = '\0';
-	strncpy(event.document_id, document_id,
-		sizeof(event.document_id) - 1);
-	event.document_id[sizeof(event.document_id) - 1] = '\0';
+	zdb_event_copy_name(event.collection_name, sizeof(event.collection_name), collection_name);
+	zdb_event_copy_name(event.document_id, sizeof(event.document_id), document_id);
 	event.timestamp_ms = (uint64_t)k_uptime_get();
 	event.field_count = field_count;
 	event.serialized_bytes = serialized_bytes;

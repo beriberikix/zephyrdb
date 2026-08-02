@@ -95,6 +95,67 @@ ZTEST(ts_suite, test_ts_flush_async_without_configured_work_q)
 	(void)zdb_deinit(&no_wq_db);
 }
 
+#if defined(CONFIG_ZDB_EVENTING) && (CONFIG_ZDB_EVENTING)
+static uint32_t g_flush_events;
+static bool g_flush_name_ok = true;
+
+static void ts_event_capture(const zdb_ts_event_t *event, void *user_ctx)
+{
+	ARG_UNUSED(user_ctx);
+
+	if (event == NULL) {
+		return;
+	}
+
+	if (event->type == ZDB_TS_EVENT_FLUSH) {
+		g_flush_events++;
+		/* A flush spans streams, so it names none — but the field must
+		 * still be a readable, terminated string.
+		 */
+		if (memchr(event->stream_name, '\0', sizeof(event->stream_name)) == NULL) {
+			g_flush_name_ok = false;
+		}
+	}
+}
+
+static const zdb_ts_event_listener_t g_ts_listeners[] = {
+	{ .notify = ts_event_capture, .user_ctx = NULL },
+};
+
+/*
+ * A flush with listeners attached must deliver an event rather than fault on
+ * the stream name it does not have.
+ */
+ZTEST(ts_suite, test_ts_flush_event_delivered_to_listener)
+{
+	static const zdb_cfg_t ev_cfg = {
+		.kv_backend_fs = NULL,
+		.lfs_mount_point = "/lfs",
+		.work_q = &k_sys_work_q,
+		.ts_event_listeners = g_ts_listeners,
+		.ts_event_listener_count = ARRAY_SIZE(g_ts_listeners),
+	};
+	ZDB_DEFINE_STATIC(ev_db, ev_cfg);
+	zdb_ts_t ts;
+	int64_t values[] = {1, 2, 3};
+
+	g_flush_events = 0U;
+	g_flush_name_ok = true;
+
+	zassert_equal(zdb_init(&ev_db, &ev_cfg), ZDB_OK, "init failed");
+	zassert_equal(zdb_ts_open(&ev_db, "t_evt", &ts), ZDB_OK, "open failed");
+
+	ts_append_fixed(&ts, values, ARRAY_SIZE(values), 1000U);
+	zassert_equal(zdb_ts_flush_sync(&ts, K_SECONDS(2)), ZDB_OK, "flush failed");
+
+	zassert_true(g_flush_events > 0U, "no flush event delivered");
+	zassert_true(g_flush_name_ok, "flush event stream name is not a valid string");
+
+	(void)zdb_ts_close(&ts);
+	(void)zdb_deinit(&ev_db);
+}
+#endif /* CONFIG_ZDB_EVENTING */
+
 ZTEST(ts_suite, test_ts_open_close_success)
 {
 	zdb_ts_t ts;

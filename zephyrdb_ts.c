@@ -493,13 +493,18 @@ static int zdb_ts_flush_buffer_locked(struct zdb_ts_core_ctx *ctx,
  * error must not strand another stream's data in RAM. A failed stream keeps
  * its buffer for the next attempt.
  */
-static int zdb_ts_flush_all_locked(struct zdb_ts_core_ctx *ctx, size_t *out_flushed_bytes)
+static int zdb_ts_flush_all_locked(struct zdb_ts_core_ctx *ctx, size_t *out_flushed_bytes,
+				   const char **out_only_stream)
 {
 	int first_error = 0;
+	size_t flushed_streams = 0U;
 	size_t i;
 
 	if (out_flushed_bytes != NULL) {
 		*out_flushed_bytes = 0U;
+	}
+	if (out_only_stream != NULL) {
+		*out_only_stream = NULL;
 	}
 
 	for (i = 0U; i < ARRAY_SIZE(ctx->streams); i++) {
@@ -522,6 +527,17 @@ static int zdb_ts_flush_all_locked(struct zdb_ts_core_ctx *ctx, size_t *out_flus
 
 		if (out_flushed_bytes != NULL) {
 			*out_flushed_bytes += pending;
+		}
+
+		/*
+		 * Name the stream when exactly one was flushed, which is the
+		 * usual case; a flush spanning several names none of them.
+		 */
+		flushed_streams++;
+		if ((out_only_stream != NULL) && (flushed_streams == 1U)) {
+			*out_only_stream = slot->name;
+		} else if (out_only_stream != NULL) {
+			*out_only_stream = NULL;
 		}
 	}
 
@@ -1321,6 +1337,7 @@ static void zdb_ts_flush_work_handler(struct k_work *work)
 	struct zdb_ts_core_ctx *ctx = CONTAINER_OF(work, struct zdb_ts_core_ctx, flush_work);
 	int rc = 0;
 	size_t flushed_bytes = 0U;
+	const char *flushed_stream = NULL;
 	zdb_status_t status = ZDB_OK;
 
 	if ((ctx == NULL) || (ctx->db == NULL)) {
@@ -1335,7 +1352,7 @@ static void zdb_ts_flush_work_handler(struct k_work *work)
 
 #if ZDB_TS_USE_LITTLEFS
 	/* One work item drains every stream; a failing stream keeps its data. */
-	rc = zdb_ts_flush_all_locked(ctx, &flushed_bytes);
+	rc = zdb_ts_flush_all_locked(ctx, &flushed_bytes, &flushed_stream);
 	if (rc < 0) {
 		status = zdb_status_from_errno(rc);
 	}
@@ -1349,10 +1366,11 @@ static void zdb_ts_flush_work_handler(struct k_work *work)
 #if defined(CONFIG_ZDB_EVENTING) && (CONFIG_ZDB_EVENTING)
 	if ((flushed_bytes > 0U) || (status != ZDB_OK)) {
 		/*
-		 * The flush covers every stream, so the event reports the total
-		 * rather than naming one of them.
+		 * The flush covers every stream with pending samples, so it
+		 * reports the total; it names the stream only when there was
+		 * exactly one, which is the usual case.
 		 */
-		zdb_emit_ts_event(ctx->db, ZDB_TS_EVENT_FLUSH, NULL,
+		zdb_emit_ts_event(ctx->db, ZDB_TS_EVENT_FLUSH, flushed_stream,
 				  0U, 0, flushed_bytes, 0U, status);
 	}
 #endif
