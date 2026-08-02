@@ -33,6 +33,8 @@
 #define ZDB_TS_REC_VERSION 1u
 #define ZDB_TS_STREAM_MAGIC 0x5A445453u
 #define ZDB_TS_STREAM_VERSION 1u
+#define ZDB_TS_WMK_MAGIC 0x5A444257u
+#define ZDB_TS_WMK_VERSION 1u
 #define ZDB_TS_FCB_MAGIC 0x5A444246u
 #define ZDB_TS_FCB_VERSION 1u
 
@@ -118,6 +120,17 @@ struct __packed zdb_ts_stream_header {
 
 BUILD_ASSERT(sizeof(struct zdb_ts_stream_header) == 16,
 	     "Unexpected TS stream header layout size");
+
+struct __packed zdb_ts_watermark_rec {
+	uint32_t magic_le;
+	uint16_t version_le;
+	uint16_t reserved_le;
+	uint64_t ts_ms_le;
+	uint32_t crc_le;
+};
+
+BUILD_ASSERT(sizeof(struct zdb_ts_watermark_rec) == 20,
+	     "Unexpected TS watermark layout size");
 
 struct zdb_ts_cursor_ctx {
 	zdb_t *db;

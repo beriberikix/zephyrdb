@@ -167,6 +167,8 @@ Publication is best-effort and never changes operation return values.
 - `zdb_ts_flush_async(ts)` / `zdb_ts_flush_sync(ts, timeout)`
 - `zdb_ts_query_aggregate(ts, window, agg, out_result)` — MIN/MAX/AVG/SUM/COUNT
 - `zdb_ts_recover_stream(ts, out_truncated_bytes)`
+- `zdb_ts_watermark_set(ts, consumed_ts_ms)` / `zdb_ts_watermark_get(ts, out_consumed_ts_ms)` /
+  `zdb_ts_watermark_clear(ts)`
 - `zdb_ts_cursor_open(ts, window, predicate, predicate_ctx, out_cursor)`
 - `zdb_ts_cursor_open_desc(ts, window, predicate, predicate_ctx, out_cursor)` — newest-first
 
@@ -195,10 +197,18 @@ Notes:
   reading payloads, so it stays cheap as the stream grows. It counts stored
   records, so a record that would fail its CRC is still counted; use a cursor
   if you need decode-verified totals.
+- A **consumed watermark** lets a forwarder or uploader remember how far it
+  processed a stream, so a restart resumes rather than replays. Acknowledge a
+  batch with `zdb_ts_watermark_set`, then open the next cursor at
+  `watermark + 1`. The value is stored rather than interpreted: it may move
+  backwards to force re-processing, and it is independent of which samples the
+  stream still holds. A watermark that fails its integrity check reads as
+  unset, so a consumer replays instead of skipping.
 - Backend differences (FCB): appends are written through synchronously, so
   `flush_*` are no-ops returning `ZDB_OK`; `zdb_ts_query_aggregate` returns
   `ZDB_ERR_UNSUPPORTED`; `zdb_ts_recover_stream` is a no-op reporting zero
-  truncated bytes; `zdb_ts_cursor_open_desc` returns `ZDB_ERR_UNSUPPORTED`.
+  truncated bytes; `zdb_ts_cursor_open_desc` and the watermark calls return
+  `ZDB_ERR_UNSUPPORTED`.
 
 ## FlatBuffers Export Helper
 

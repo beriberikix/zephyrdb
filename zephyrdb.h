@@ -1062,6 +1062,70 @@ extern "C"
 										 zdb_cursor_t *out_cursor);
 
 	/**
+	 * @brief Record how far a consumer has processed a stream.
+	 *
+	 * Stores a per-stream timestamp that survives restarts, so an uploader
+	 * or forwarder can resume where it stopped instead of replaying the
+	 * stream. Typical use is to acknowledge a batch after it is safely
+	 * delivered, then open the next cursor at `watermark + 1`:
+	 *
+	 * @code
+	 * uint64_t mark;
+	 * zdb_ts_window_t window = ZDB_TS_WINDOW_ALL;
+	 *
+	 * if (zdb_ts_watermark_get(&ts, &mark) == ZDB_OK) {
+	 *         window.from_ts_ms = mark + 1U;
+	 * }
+	 * @endcode
+	 *
+	 * The value is stored, not interpreted: it may move backwards to force
+	 * re-processing, and it is independent of which samples the stream
+	 * still holds.
+	 *
+	 * @param ts              Open stream handle.
+	 * @param consumed_ts_ms  Timestamp processed up to, inclusive.
+	 * @retval ZDB_OK              Watermark stored.
+	 * @retval ZDB_ERR_INVAL       NULL argument.
+	 * @retval ZDB_ERR_NOMEM       No core slab block was free.
+	 * @retval ZDB_ERR_UNSUPPORTED Backend keeps no sidecar state (FCB).
+	 * @retval ZDB_ERR_IO          Filesystem write failure.
+	 */
+	zdb_status_t zdb_ts_watermark_set(zdb_ts_t *ts, uint64_t consumed_ts_ms);
+
+	/**
+	 * @brief Read a stream's consumed watermark.
+	 *
+	 * Reports ::ZDB_ERR_NOT_FOUND when no watermark has been stored, and
+	 * also when the stored one fails its integrity check — a consumer then
+	 * re-processes from the beginning rather than skipping samples it never
+	 * handled.
+	 *
+	 * @param ts                  Open stream handle.
+	 * @param out_consumed_ts_ms  Set to the stored timestamp.
+	 * @retval ZDB_OK              Watermark read.
+	 * @retval ZDB_ERR_INVAL       NULL argument.
+	 * @retval ZDB_ERR_NOT_FOUND   No usable watermark stored.
+	 * @retval ZDB_ERR_UNSUPPORTED Backend keeps no sidecar state (FCB).
+	 * @retval ZDB_ERR_IO          Filesystem read failure.
+	 */
+	zdb_status_t zdb_ts_watermark_get(zdb_ts_t *ts, uint64_t *out_consumed_ts_ms);
+
+	/**
+	 * @brief Forget a stream's consumed watermark.
+	 *
+	 * The next zdb_ts_watermark_get() reports ::ZDB_ERR_NOT_FOUND, so a
+	 * consumer starts from the beginning again. Succeeds when no watermark
+	 * was stored.
+	 *
+	 * @param ts Open stream handle.
+	 * @retval ZDB_OK              Watermark cleared or already absent.
+	 * @retval ZDB_ERR_INVAL       NULL argument.
+	 * @retval ZDB_ERR_UNSUPPORTED Backend keeps no sidecar state (FCB).
+	 * @retval ZDB_ERR_IO          Filesystem delete failure.
+	 */
+	zdb_status_t zdb_ts_watermark_clear(zdb_ts_t *ts);
+
+	/**
 	 * @brief Fetch the next record from a cursor.
 	 *
 	 * Part of the core cursor framework; declared with the TS module

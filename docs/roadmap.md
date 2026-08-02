@@ -13,10 +13,6 @@ reverse traversal, which remains below.
   overwrite-oldest-when-full option. FCB nearly provides it via sector
   rotation; the LittleFS backend needs segmented files with oldest-segment
   deletion. Highest-value TS feature; medium effort.
-- **TS consumed watermark** — Persisted "processed up to timestamp T" ack
-  state per stream, serving mark-as-processed upload pipelines. Replaces the
-  earlier per-record mutable status idea, which fights both backends (FCB is
-  append-only; LittleFS copy-on-write makes in-place mutation illusory).
 - **TS multiple concurrent streams** — Lift the one-stream-per-instance limit
   (second `zdb_ts_open()` returns `ZDB_ERR_BUSY` today); N streams, each with
   its own file/FCB region, slab-sized via Kconfig. Subsumes the earlier

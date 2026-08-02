@@ -318,6 +318,38 @@ static zdb_status_t zdb_ts_record_decode(zdb_t *db,
 }
 
 #if ZDB_TS_USE_LITTLEFS
+#if ZDB_TS_USE_LITTLEFS
+/*
+ * Path of a stream's consumed-watermark sidecar.
+ *
+ * Kept beside the stream rather than inside it: the stream file is append-only
+ * so that recovery can trust its tail, and a watermark is rewritten in place
+ * every time a consumer acknowledges.
+ */
+static int zdb_ts_build_watermark_path(const zdb_cfg_t *cfg, const char *stream_name,
+				       char *path, size_t path_len)
+{
+	int n;
+
+	if ((cfg == NULL) || (cfg->lfs_mount_point == NULL) || (stream_name == NULL) ||
+	    (path == NULL) || (path_len == 0U)) {
+		return -EINVAL;
+	}
+
+	if (!zdb_ts_stream_name_valid(stream_name)) {
+		return -EINVAL;
+	}
+
+	n = snprintf(path, path_len, "%s/%s/%s.wmk", cfg->lfs_mount_point,
+		     CONFIG_ZDB_TS_DIRNAME, stream_name);
+	if ((n < 0) || ((size_t)n >= path_len)) {
+		return -ENAMETOOLONG;
+	}
+
+	return 0;
+}
+#endif
+
 static int zdb_ts_build_path(const zdb_cfg_t *cfg, const char *stream_name,
 			     char *path, size_t path_len)
 {
@@ -1594,6 +1626,189 @@ zdb_status_t zdb_cursor_next(zdb_cursor_t *cursor, zdb_bytes_t *out_record)
 	out_record->data = NULL;
 	out_record->len = 0U;
 	return ZDB_ERR_UNSUPPORTED;
+#endif
+}
+
+/*
+ * Consumed watermark.
+ *
+ * A consumer that forwards samples somewhere else needs to remember how far it
+ * got, so a restart resumes instead of replaying. The mark is a timestamp
+ * rather than a record position, which stays meaningful even as older records
+ * age out of the stream.
+ *
+ * The sidecar is rewritten whole on each update; littlefs commits a file
+ * update atomically, and a torn or corrupt file fails its CRC and reads as
+ * unset. That is the safe direction to fail: the consumer re-processes from
+ * the last known-good mark rather than skipping samples it never handled.
+ */
+zdb_status_t zdb_ts_watermark_set(zdb_ts_t *ts, uint64_t consumed_ts_ms)
+{
+#if ZDB_TS_USE_FCB
+	ARG_UNUSED(consumed_ts_ms);
+	if ((ts == NULL) || (ts->db == NULL)) {
+		return ZDB_ERR_INVAL;
+	}
+	return ZDB_ERR_UNSUPPORTED;
+#else
+	char path[ZDB_TS_PATH_MAX];
+	struct zdb_ts_watermark_rec rec;
+	struct fs_file_t file;
+	struct zdb_ts_core_ctx *ctx;
+	zdb_status_t lock_rc;
+	ssize_t wr;
+	int rc;
+
+	if ((ts == NULL) || (ts->db == NULL) || (ts->db->cfg == NULL)) {
+		return ZDB_ERR_INVAL;
+	}
+
+	ctx = zdb_ts_ctx_get_or_alloc(ts->db);
+	if (ctx == NULL) {
+		return ZDB_ERR_NOMEM;
+	}
+
+	rc = zdb_ts_ensure_stream_dir(ts->db->cfg, ctx);
+	if (rc < 0) {
+		return zdb_status_from_errno(rc);
+	}
+
+	rc = zdb_ts_build_watermark_path(ts->db->cfg, ts->stream_name, path, sizeof(path));
+	if (rc < 0) {
+		return zdb_status_from_errno(rc);
+	}
+
+	rec.magic_le = sys_cpu_to_le32(ZDB_TS_WMK_MAGIC);
+	rec.version_le = sys_cpu_to_le16(ZDB_TS_WMK_VERSION);
+	rec.reserved_le = 0U;
+	rec.ts_ms_le = sys_cpu_to_le64(consumed_ts_ms);
+	rec.crc_le = sys_cpu_to_le32(
+		crc32_ieee((const uint8_t *)&rec, offsetof(struct zdb_ts_watermark_rec, crc_le)));
+
+	lock_rc = zdb_lock_write(ts->db);
+	if (lock_rc != ZDB_OK) {
+		return lock_rc;
+	}
+
+	fs_file_t_init(&file);
+	rc = fs_open(&file, path, FS_O_CREATE | FS_O_WRITE | FS_O_TRUNC);
+	if (rc < 0) {
+		zdb_unlock_write(ts->db);
+		return zdb_status_from_errno(rc);
+	}
+
+	wr = fs_write(&file, &rec, sizeof(rec));
+	(void)fs_close(&file);
+	zdb_unlock_write(ts->db);
+
+	if (wr < 0) {
+		return zdb_status_from_errno((int)wr);
+	}
+
+	return (wr == (ssize_t)sizeof(rec)) ? ZDB_OK : ZDB_ERR_IO;
+#endif
+}
+
+zdb_status_t zdb_ts_watermark_get(zdb_ts_t *ts, uint64_t *out_consumed_ts_ms)
+{
+#if ZDB_TS_USE_FCB
+	ARG_UNUSED(out_consumed_ts_ms);
+	if ((ts == NULL) || (ts->db == NULL)) {
+		return ZDB_ERR_INVAL;
+	}
+	return ZDB_ERR_UNSUPPORTED;
+#else
+	char path[ZDB_TS_PATH_MAX];
+	struct zdb_ts_watermark_rec rec;
+	struct fs_file_t file;
+	zdb_status_t lock_rc;
+	uint32_t expect_crc;
+	ssize_t rd;
+	int rc;
+
+	if ((ts == NULL) || (ts->db == NULL) || (ts->db->cfg == NULL) ||
+	    (out_consumed_ts_ms == NULL)) {
+		return ZDB_ERR_INVAL;
+	}
+
+	rc = zdb_ts_build_watermark_path(ts->db->cfg, ts->stream_name, path, sizeof(path));
+	if (rc < 0) {
+		return zdb_status_from_errno(rc);
+	}
+
+	lock_rc = zdb_lock_read(ts->db);
+	if (lock_rc != ZDB_OK) {
+		return lock_rc;
+	}
+
+	fs_file_t_init(&file);
+	rc = fs_open(&file, path, FS_O_READ);
+	if (rc < 0) {
+		zdb_unlock_read(ts->db);
+		return (rc == -ENOENT) ? ZDB_ERR_NOT_FOUND : zdb_status_from_errno(rc);
+	}
+
+	rd = fs_read(&file, &rec, sizeof(rec));
+	(void)fs_close(&file);
+	zdb_unlock_read(ts->db);
+
+	if (rd < 0) {
+		return zdb_status_from_errno((int)rd);
+	}
+
+	/* A short, stale, or corrupt mark reads as unset. */
+	if (((size_t)rd != sizeof(rec)) ||
+	    (sys_le32_to_cpu(rec.magic_le) != ZDB_TS_WMK_MAGIC) ||
+	    (sys_le16_to_cpu(rec.version_le) != ZDB_TS_WMK_VERSION)) {
+		return ZDB_ERR_NOT_FOUND;
+	}
+
+	expect_crc = crc32_ieee((const uint8_t *)&rec,
+				offsetof(struct zdb_ts_watermark_rec, crc_le));
+	if (sys_le32_to_cpu(rec.crc_le) != expect_crc) {
+		return ZDB_ERR_NOT_FOUND;
+	}
+
+	*out_consumed_ts_ms = sys_le64_to_cpu(rec.ts_ms_le);
+	return ZDB_OK;
+#endif
+}
+
+zdb_status_t zdb_ts_watermark_clear(zdb_ts_t *ts)
+{
+#if ZDB_TS_USE_FCB
+	if ((ts == NULL) || (ts->db == NULL)) {
+		return ZDB_ERR_INVAL;
+	}
+	return ZDB_ERR_UNSUPPORTED;
+#else
+	char path[ZDB_TS_PATH_MAX];
+	zdb_status_t lock_rc;
+	int rc;
+
+	if ((ts == NULL) || (ts->db == NULL) || (ts->db->cfg == NULL)) {
+		return ZDB_ERR_INVAL;
+	}
+
+	rc = zdb_ts_build_watermark_path(ts->db->cfg, ts->stream_name, path, sizeof(path));
+	if (rc < 0) {
+		return zdb_status_from_errno(rc);
+	}
+
+	lock_rc = zdb_lock_write(ts->db);
+	if (lock_rc != ZDB_OK) {
+		return lock_rc;
+	}
+
+	rc = fs_unlink(path);
+	zdb_unlock_write(ts->db);
+
+	/* Clearing an unset watermark is the state the caller asked for. */
+	if ((rc < 0) && (rc != -ENOENT)) {
+		return zdb_status_from_errno(rc);
+	}
+
+	return ZDB_OK;
 #endif
 }
 

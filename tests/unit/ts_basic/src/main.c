@@ -614,3 +614,119 @@ ZTEST(ts_suite, test_ts_cursor_descending_empty_stream)
 	(void)zdb_cursor_close(&cursor);
 	(void)zdb_ts_close(&ts);
 }
+
+ZTEST(ts_suite, test_ts_watermark_roundtrip)
+{
+	zdb_ts_t ts;
+	uint64_t mark = 0U;
+
+	zassert_equal(zdb_ts_open(&g_db, "t_wmk", &ts), ZDB_OK, "open failed");
+
+	/* Nothing stored yet. */
+	zassert_equal(zdb_ts_watermark_get(&ts, &mark), ZDB_ERR_NOT_FOUND,
+		      "unset watermark should report NOT_FOUND");
+
+	zassert_equal(zdb_ts_watermark_set(&ts, 1234U), ZDB_OK, "set failed");
+	zassert_equal(zdb_ts_watermark_get(&ts, &mark), ZDB_OK, "get failed");
+	zassert_equal(mark, 1234U, "watermark mismatch: %llu", (unsigned long long)mark);
+
+	/* The value is stored, not interpreted: moving it back is allowed. */
+	zassert_equal(zdb_ts_watermark_set(&ts, 100U), ZDB_OK, "rewind set failed");
+	zassert_equal(zdb_ts_watermark_get(&ts, &mark), ZDB_OK, "get failed");
+	zassert_equal(mark, 100U, "watermark did not move back: %llu", (unsigned long long)mark);
+
+	zassert_equal(zdb_ts_watermark_clear(&ts), ZDB_OK, "clear failed");
+	zassert_equal(zdb_ts_watermark_get(&ts, &mark), ZDB_ERR_NOT_FOUND,
+		      "cleared watermark still readable");
+
+	/* Clearing again is the state the caller asked for. */
+	zassert_equal(zdb_ts_watermark_clear(&ts), ZDB_OK, "second clear failed");
+
+	(void)zdb_ts_close(&ts);
+}
+
+/* The point of the watermark is that it outlives the process. */
+ZTEST(ts_suite, test_ts_watermark_survives_reinit)
+{
+	zdb_ts_t ts;
+	uint64_t mark = 0U;
+
+	zassert_equal(zdb_ts_open(&g_db, "t_wmk_boot", &ts), ZDB_OK, "open failed");
+	zassert_equal(zdb_ts_watermark_set(&ts, 5150U), ZDB_OK, "set failed");
+	(void)zdb_ts_close(&ts);
+
+	(void)zdb_deinit(&g_db);
+	zassert_equal(zdb_init(&g_db, &g_cfg), ZDB_OK, "re-init failed");
+
+	zassert_equal(zdb_ts_open(&g_db, "t_wmk_boot", &ts), ZDB_OK, "reopen failed");
+	zassert_equal(zdb_ts_watermark_get(&ts, &mark), ZDB_OK, "get after re-init failed");
+	zassert_equal(mark, 5150U, "watermark lost across re-init: %llu",
+		      (unsigned long long)mark);
+
+	(void)zdb_ts_close(&ts);
+}
+
+/* A damaged mark must read as unset, so the consumer replays rather than skips. */
+ZTEST(ts_suite, test_ts_watermark_corrupt_reads_as_unset)
+{
+	zdb_ts_t ts;
+	struct fs_file_t file;
+	uint64_t mark = 0U;
+	uint8_t byte = 0U;
+	int fs_rc;
+
+	zassert_equal(zdb_ts_open(&g_db, "t_wmk_bad", &ts), ZDB_OK, "open failed");
+	zassert_equal(zdb_ts_watermark_set(&ts, 4242U), ZDB_OK, "set failed");
+
+	fs_file_t_init(&file);
+	fs_rc = fs_open(&file, "/lfs/zdb/t_wmk_bad.wmk", FS_O_READ | FS_O_WRITE);
+	zassert_equal(fs_rc, 0, "opening watermark file failed: %d", fs_rc);
+	/* Flip a byte inside the timestamp, which the CRC covers. */
+	fs_rc = fs_seek(&file, 8, FS_SEEK_SET);
+	zassert_equal(fs_rc, 0, "seek failed: %d", fs_rc);
+	fs_rc = fs_read(&file, &byte, sizeof(byte));
+	zassert_equal(fs_rc, (int)sizeof(byte), "read failed: %d", fs_rc);
+	byte ^= 0xFFU;
+	fs_rc = fs_seek(&file, 8, FS_SEEK_SET);
+	zassert_equal(fs_rc, 0, "seek failed: %d", fs_rc);
+	fs_rc = fs_write(&file, &byte, sizeof(byte));
+	zassert_equal(fs_rc, (int)sizeof(byte), "write failed: %d", fs_rc);
+	zassert_equal(fs_close(&file), 0, "close failed");
+
+	zassert_equal(zdb_ts_watermark_get(&ts, &mark), ZDB_ERR_NOT_FOUND,
+		      "corrupt watermark was trusted");
+
+	(void)zdb_ts_close(&ts);
+}
+
+/* The workflow the watermark exists for: resume where the last drain stopped. */
+ZTEST(ts_suite, test_ts_watermark_resumes_drain)
+{
+	zdb_ts_t ts;
+	const int64_t values[] = {1, 2, 3, 4, 5};
+	zdb_ts_window_t window = ZDB_TS_WINDOW_ALL;
+	zdb_cursor_t cursor;
+	zdb_bytes_t record;
+	uint64_t mark = 0U;
+	size_t remaining = 0U;
+
+	zassert_equal(zdb_ts_open(&g_db, "t_wmk_drain", &ts), ZDB_OK, "open failed");
+	ts_append_fixed(&ts, values, ARRAY_SIZE(values), 1000U);
+	zassert_equal(zdb_ts_flush_sync(&ts, K_SECONDS(2)), ZDB_OK, "flush failed");
+
+	/* Consumer handled the first three samples (1000..1002). */
+	zassert_equal(zdb_ts_watermark_set(&ts, 1002U), ZDB_OK, "set failed");
+
+	zassert_equal(zdb_ts_watermark_get(&ts, &mark), ZDB_OK, "get failed");
+	window.from_ts_ms = mark + 1U;
+
+	zassert_equal(zdb_ts_cursor_open(&ts, window, NULL, NULL, &cursor), ZDB_OK,
+		      "cursor open failed");
+	while (zdb_cursor_next(&cursor, &record) == ZDB_OK) {
+		remaining++;
+	}
+	zassert_equal(remaining, 2U, "expected 2 unprocessed samples, got %zu", remaining);
+
+	(void)zdb_cursor_close(&cursor);
+	(void)zdb_ts_close(&ts);
+}
