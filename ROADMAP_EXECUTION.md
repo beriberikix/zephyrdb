@@ -50,7 +50,7 @@ under Notes with its reason, keeps its roadmap bullet, and the loop moves on.
 ## Items
 
 - [x] 0. Setup: roadmap commit, doc debt, tracker, VM, baseline — `6756b5d`, `a1aa968`
-- [x] 1. Atomic document saves + full-payload CRC (§5.1, M) — `a99773f`
+- [x] 1. Atomic document saves + full-payload CRC (§5.1, M) — `bd5fabf`
 - [ ] 2. TS COUNT correctness & cost (§5.2, M) — folds: flush_async work_q fallback, slab BUILD_ASSERTs
 - [ ] 3. KV string convenience API (§5.3, S) — folds: zero-length value fix
 - [ ] 4. KV defaults with auto-init (§5.4, M) — folds: ZDB_EVENTING dependency fix
