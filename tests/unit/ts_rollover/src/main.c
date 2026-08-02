@@ -8,6 +8,10 @@
  * Built with 280-byte segments (10 records) and 3 retained segments, so a
  * stream reaches its bound after ~30 records and starts discarding the oldest.
  *
+ * The record-count arithmetic here assumes the default 28-byte record, so this
+ * suite pins that format. Compact records are covered by tests/unit/ts_delta,
+ * which also exercises them alongside rollover.
+ *
  * Each test uses its own stream name so segment files do not interact.
  */
 

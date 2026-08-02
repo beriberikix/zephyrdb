@@ -55,8 +55,9 @@ staging file promotes it if it validates.
 - KV storage is provided through `cfg.kv_backend_fs`; one reserved record ID
   per backend holds the key index when `CONFIG_ZDB_KV_PERSIST_INDEX` is enabled
 - TS files are written under `<mount>/<CONFIG_ZDB_TS_DIRNAME>/`: `<stream>.zts`,
-  or `<stream>.NNNN.zts` segments when rollover bounds the stream, alongside a
-  `<stream>.wmk` sidecar once a consumed watermark is stored
+  or `<stream>.NNNN.zts` segments when the stream is bounded or uses compact
+  records, alongside a `<stream>.wmk` sidecar once a consumed watermark is
+  stored
 - DOC files are written under `<mount>/zdb_docs/` (`<id>.zdoc`, with
   `<id>.zdoc.tmp` appearing transiently during a save)
 

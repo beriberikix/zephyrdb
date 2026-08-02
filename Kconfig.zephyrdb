@@ -115,8 +115,7 @@ config ZDB_CORE_SLAB_BLOCK_COUNT
 config ZDB_CURSOR_SLAB_BLOCK_SIZE
 	int "Cursor slab block size (bytes)"
 	range 32 2048
-	default 160 if ZDB_TS_ROLLOVER
-	default 128
+	default 192
 	help
 	  Must be large enough to hold a time-series cursor context, which
 	  embeds a record-sized staging buffer plus the backend's file or FCB
@@ -199,6 +198,24 @@ config ZDB_TS_MAX_STREAMS
 	  ZDB_TS_INGEST_SLAB_BLOCK_COUNT at least as large, and may need a
 	  bigger ZDB_CORE_SLAB_BLOCK_SIZE. The build asserts both.
 
+config ZDB_TS_DELTA_ENCODING
+	bool "Store timestamps as deltas to fit more samples"
+	default n
+	depends on ZDB_TS_BACKEND_LITTLEFS
+	help
+	  Store each sample's timestamp relative to a base recorded once per
+	  segment, and drop the per-record magic and version that the segment
+	  header already carries. Records shrink from 28 bytes to 16, so a
+	  given amount of storage holds about 1.75x the samples.
+
+	  Records stay fixed size and independently decodable, so reverse
+	  cursors and the payload-free COUNT keep working.
+
+	  Streams written without this option are still read, and keep their
+	  original format when appended to; only new streams use the compact
+	  one. A sample more than 2^32 milliseconds (about 49 days) past its
+	  segment's base starts a new segment.
+
 config ZDB_TS_ROLLOVER
 	bool "Overwrite the oldest samples when a stream is full"
 	default y if ZDB_TS_BACKEND_FCB
@@ -216,10 +233,10 @@ config ZDB_TS_ROLLOVER_SEGMENT_BYTES
 	int "Bytes of records per stream segment"
 	range 256 1048576
 	default 4096
-	depends on ZDB_TS_ROLLOVER && ZDB_TS_BACKEND_LITTLEFS
+	depends on (ZDB_TS_ROLLOVER || ZDB_TS_DELTA_ENCODING) && ZDB_TS_BACKEND_LITTLEFS
 	help
 	  Records are grouped into segment files so the oldest can be
-	  discarded whole. This is the record payload per segment, excluding
+	  discarded whole, and so each carries its own timestamp base. This is the record payload per segment, excluding
 	  its 16-byte header. Smaller segments discard data in finer steps;
 	  larger ones mean fewer files.
 

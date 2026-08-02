@@ -78,8 +78,15 @@ ZTEST(ts_suite, test_ts_flush_async_without_configured_work_q)
 
 	ts_append_fixed(&ts, values, ARRAY_SIZE(values), 1000U);
 
+	/*
+	 * BUSY is fine here: filling the ingest buffer starts a flush on its
+	 * own, and this call only asks for one. What must not happen is
+	 * ZDB_ERR_UNSUPPORTED, which is how a NULL cfg.work_q used to be
+	 * reported.
+	 */
 	rc = zdb_ts_flush_async(&ts);
-	zassert_equal(rc, ZDB_OK, "async flush rejected without cfg.work_q: %d", rc);
+	zassert_true((rc == ZDB_OK) || (rc == ZDB_ERR_BUSY),
+		     "async flush rejected without cfg.work_q: %d", rc);
 
 	rc = zdb_ts_flush_sync(&ts, K_SECONDS(2));
 	zassert_equal(rc, ZDB_OK, "sync flush failed: %d", rc);

@@ -40,11 +40,13 @@ static uint32_t zdb_fnv1a32(const char *s)
 zdb_status_t zdb_ts_recover_stream(zdb_ts_t *ts, size_t *out_truncated_bytes);
 
 #if ZDB_TS_USE_LITTLEFS
+#if !ZDB_TS_SEGMENTED
 static zdb_status_t zdb_ts_ensure_header_at(zdb_t *db, const char *stream_name,
 					    const char *path);
+#endif
 static int zdb_ts_active_path(zdb_t *db, struct zdb_ts_stream_ctx *slot, char *path,
 			      size_t path_len);
-#if ZDB_TS_ROLLOVER_ENABLED
+#if ZDB_TS_SEGMENTED
 static int zdb_ts_build_segment_path(const zdb_cfg_t *cfg, const char *stream_name,
 				     uint32_t seq, char *path, size_t path_len);
 static zdb_status_t zdb_ts_scan_segments(zdb_t *db, struct zdb_ts_stream_ctx *slot);
@@ -137,7 +139,7 @@ static int zdb_ts_fcb_append_record(struct zdb_ts_core_ctx *ctx,
 
 	rc = fcb_append(&ctx->ts_fcb, (uint16_t)sizeof(*rec), &loc);
 	if (rc == -ENOSPC) {
-#if ZDB_TS_ROLLOVER_ENABLED
+#if ZDB_TS_SEGMENTED
 		/* Discard the oldest sector to make room. */
 		rc = fcb_rotate(&ctx->ts_fcb);
 		if (rc < 0) {
@@ -392,6 +394,40 @@ static int zdb_ts_build_path(const zdb_cfg_t *cfg, const char *stream_name,
 	return 0;
 }
 
+#if ZDB_TS_USE_LITTLEFS
+/* Record size of the segment a stream is appending to. */
+static size_t zdb_ts_slot_rec_size(const struct zdb_ts_stream_ctx *slot)
+{
+#if ZDB_TS_SEGMENTED
+	return (slot->seg_rec_size != 0U) ? slot->seg_rec_size
+					  : sizeof(struct zdb_ts_record_i64);
+#else
+	ARG_UNUSED(slot);
+	return sizeof(struct zdb_ts_record_i64);
+#endif
+}
+
+static uint16_t zdb_ts_slot_version(const struct zdb_ts_stream_ctx *slot)
+{
+#if ZDB_TS_SEGMENTED
+	return (slot->seg_version != 0U) ? slot->seg_version : (uint16_t)ZDB_TS_STREAM_VERSION;
+#else
+	ARG_UNUSED(slot);
+	return (uint16_t)ZDB_TS_STREAM_VERSION;
+#endif
+}
+
+static uint64_t zdb_ts_slot_base_ts(const struct zdb_ts_stream_ctx *slot)
+{
+#if ZDB_TS_SEGMENTED
+	return slot->seg_base_ts_ms;
+#else
+	ARG_UNUSED(slot);
+	return 0U;
+#endif
+}
+#endif /* ZDB_TS_USE_LITTLEFS */
+
 static int zdb_ts_flush_buffer_locked(struct zdb_ts_core_ctx *ctx,
 				      struct zdb_ts_stream_ctx *slot)
 {
@@ -434,12 +470,12 @@ static int zdb_ts_flush_buffer_locked(struct zdb_ts_core_ctx *ctx,
 		return rc;
 	}
 
-#if ZDB_TS_ROLLOVER_ENABLED
+#if ZDB_TS_SEGMENTED
 	slot->cur_seg_bytes += slot->ingest_used;
 #endif
 	slot->ingest_used = 0U;
 
-#if ZDB_TS_ROLLOVER_ENABLED
+#if ZDB_TS_SEGMENTED
 	/* Roll after writing, so a flush never spans two segments. */
 	rc = zdb_ts_roll_segment_if_full(ctx->db, slot);
 	if (rc < 0) {
@@ -493,6 +529,99 @@ static int zdb_ts_flush_all_locked(struct zdb_ts_core_ctx *ctx, size_t *out_flus
 }
 #endif
 
+#if ZDB_TS_USE_LITTLEFS
+#if ZDB_TS_SEGMENTED
+/* Bytes each supported record format occupies on storage. */
+static size_t zdb_ts_rec_size_for(uint16_t version)
+{
+	return (version == ZDB_TS_STREAM_VERSION_V2) ? sizeof(struct zdb_ts_record_v2)
+						     : sizeof(struct zdb_ts_record_i64);
+}
+
+/* Bytes each supported segment header occupies. */
+static size_t zdb_ts_hdr_size_for(uint16_t version)
+{
+	return (version == ZDB_TS_STREAM_VERSION_V2) ? sizeof(struct zdb_ts_stream_header_v2)
+						     : sizeof(struct zdb_ts_stream_header);
+}
+#endif /* ZDB_TS_SEGMENTED */
+
+/*
+ * Encode a sample in @p version's layout into @p out, which must have room for
+ * zdb_ts_rec_size_for(version) bytes.
+ *
+ * A compact record stores the timestamp as an offset from @p base_ts_ms.
+ * Reports false when the sample cannot be expressed that way — before the base,
+ * or more than a 32-bit millisecond span past it — which tells the caller to
+ * start a segment with a new base.
+ */
+static bool zdb_ts_record_encode_as(uint16_t version, uint64_t base_ts_ms,
+				    const zdb_ts_sample_i64_t *sample, uint8_t *out)
+{
+	if (version != ZDB_TS_STREAM_VERSION_V2) {
+		zdb_ts_record_encode(sample, (struct zdb_ts_record_i64 *)out);
+		return true;
+	}
+
+	{
+		struct zdb_ts_record_v2 rec;
+		uint64_t delta;
+
+		if (sample->ts_ms < base_ts_ms) {
+			return false;
+		}
+		delta = sample->ts_ms - base_ts_ms;
+		if (delta > UINT32_MAX) {
+			return false;
+		}
+
+		rec.ts_delta_ms_le = sys_cpu_to_le32((uint32_t)delta);
+		rec.value_le = sys_cpu_to_le64((uint64_t)sample->value);
+		rec.crc_le = sys_cpu_to_le32(crc32_ieee(
+			(const uint8_t *)&rec, offsetof(struct zdb_ts_record_v2, crc_le)));
+		(void)memcpy(out, &rec, sizeof(rec));
+	}
+
+	return true;
+}
+
+/*
+ * Decode a record of @p version. A compact record has no magic or version of
+ * its own — the segment header carries both — so its CRC is the whole check.
+ */
+static zdb_status_t zdb_ts_record_decode_as(zdb_t *db, uint16_t version, uint64_t base_ts_ms,
+					    const uint8_t *raw, uint64_t *out_ts_ms,
+					    int64_t *out_value)
+{
+	if (version != ZDB_TS_STREAM_VERSION_V2) {
+		struct zdb_ts_record_i64 rec;
+
+		(void)memcpy(&rec, raw, sizeof(rec));
+		return zdb_ts_record_decode(db, &rec, out_ts_ms, out_value);
+	}
+
+	{
+		struct zdb_ts_record_v2 rec;
+		uint32_t expect_crc;
+
+		(void)memcpy(&rec, raw, sizeof(rec));
+		expect_crc = crc32_ieee((const uint8_t *)&rec,
+					offsetof(struct zdb_ts_record_v2, crc_le));
+		if (sys_le32_to_cpu(rec.crc_le) != expect_crc) {
+			ZDB_STAT_INC(db, crc_failures);
+			ZDB_STAT_INC(db, corrupt_records);
+			zdb_health_check(db);
+			return ZDB_ERR_CORRUPT;
+		}
+
+		*out_ts_ms = base_ts_ms + (uint64_t)sys_le32_to_cpu(rec.ts_delta_ms_le);
+		*out_value = (int64_t)sys_le64_to_cpu(rec.value_le);
+	}
+
+	return ZDB_OK;
+}
+#endif /* ZDB_TS_USE_LITTLEFS */
+
 static bool zdb_ts_agg_update(zdb_ts_agg_t agg, double sample, uint32_t *points, double *acc)
 {
 	if ((*points) == 0U) {
@@ -527,7 +656,63 @@ static bool zdb_ts_agg_update(zdb_ts_agg_t agg, double sample, uint32_t *points,
 }
 
 #if ZDB_TS_USE_LITTLEFS
-#if ZDB_TS_USE_LITTLEFS && ZDB_TS_ROLLOVER_ENABLED
+/*
+ * Read a file's header to learn which record layout it holds, so the cursor
+ * uses the right stride and timestamp base. Files of either format are read.
+ */
+static zdb_status_t zdb_ts_cursor_learn_layout(struct zdb_ts_cursor_ctx *cctx,
+					       const char *path)
+{
+	struct fs_file_t hdr_file;
+	uint8_t raw[ZDB_TS_HDR_MAX_SIZE];
+	struct zdb_ts_stream_header hdr;
+	uint16_t version;
+	ssize_t rd;
+	int rc;
+
+	cctx->hdr_size = sizeof(struct zdb_ts_stream_header);
+	cctx->rec_size = sizeof(struct zdb_ts_record_i64);
+	cctx->base_ts_ms = 0U;
+
+	fs_file_t_init(&hdr_file);
+	rc = fs_open(&hdr_file, path, FS_O_READ);
+	if (rc < 0) {
+		return zdb_status_from_errno(rc);
+	}
+
+	rd = fs_read(&hdr_file, raw, sizeof(raw));
+	(void)fs_close(&hdr_file);
+
+	if (rd < (ssize_t)sizeof(struct zdb_ts_stream_header)) {
+		/* Too short to hold a header; the walk finds no records. */
+		return ZDB_OK;
+	}
+
+	(void)memcpy(&hdr, raw, sizeof(hdr));
+	version = sys_le16_to_cpu(hdr.version_le);
+	if (version != ZDB_TS_STREAM_VERSION_V2) {
+		return ZDB_OK;
+	}
+
+	if (rd < (ssize_t)sizeof(struct zdb_ts_stream_header_v2)) {
+		return ZDB_ERR_CORRUPT;
+	}
+
+	{
+		struct zdb_ts_stream_header_v2 h2;
+
+		(void)memcpy(&h2, raw, sizeof(h2));
+		cctx->hdr_size = sizeof(h2);
+		cctx->rec_size = sizeof(struct zdb_ts_record_v2);
+		cctx->base_ts_ms = sys_le64_to_cpu(h2.base_ts_ms_le);
+	}
+
+	return ZDB_OK;
+}
+#endif /* ZDB_TS_USE_LITTLEFS */
+
+#if ZDB_TS_USE_LITTLEFS
+#if ZDB_TS_USE_LITTLEFS && ZDB_TS_SEGMENTED
 /*
  * Point the cursor's file handle at one segment, positioned for the walk's
  * direction. Reports ZDB_ERR_NOT_FOUND when that segment is gone, which is
@@ -556,6 +741,14 @@ static zdb_status_t zdb_ts_cursor_open_segment(struct zdb_ts_cursor_ctx *cctx, u
 	cctx->file_open = true;
 	cctx->cur_seg = seq;
 
+	{
+		zdb_status_t layout_rc = zdb_ts_cursor_learn_layout(cctx, path);
+
+		if (layout_rc != ZDB_OK) {
+			return layout_rc;
+		}
+	}
+
 	if (cctx->descending) {
 		off_t end = fs_seek(&cctx->file, 0, FS_SEEK_END);
 
@@ -563,9 +756,12 @@ static zdb_status_t zdb_ts_cursor_open_segment(struct zdb_ts_cursor_ctx *cctx, u
 			return zdb_status_from_errno((int)end);
 		}
 		cctx->file_size = (size_t)fs_tell(&cctx->file);
-		cctx->file_offset = cctx->file_size;
+		/* Start at the last whole record, ignoring any partial tail. */
+		cctx->file_offset = cctx->hdr_size +
+				    (((cctx->file_size - cctx->hdr_size) / cctx->rec_size) *
+				     cctx->rec_size);
 	} else {
-		cctx->file_offset = sizeof(struct zdb_ts_stream_header);
+		cctx->file_offset = cctx->hdr_size;
 	}
 
 	rc = fs_seek(&cctx->file, (off_t)cctx->file_offset, FS_SEEK_SET);
@@ -605,7 +801,7 @@ static zdb_status_t zdb_ts_cursor_next_segment(struct zdb_ts_cursor_ctx *cctx)
 		cctx->cur_seg = next;
 	}
 }
-#endif /* ZDB_TS_USE_LITTLEFS && ZDB_TS_ROLLOVER_ENABLED */
+#endif /* ZDB_TS_USE_LITTLEFS && ZDB_TS_SEGMENTED */
 
 static zdb_status_t zdb_ts_cursor_read_file_record(struct zdb_ts_cursor_ctx *cctx,
 						    zdb_bytes_t *out_record)
@@ -626,9 +822,8 @@ static zdb_status_t zdb_ts_cursor_read_file_record(struct zdb_ts_cursor_ctx *cct
 		 * the previous record always starts exactly one stride back;
 		 * the stream header bounds the walk.
 		 */
-		if (cctx->file_offset < (sizeof(struct zdb_ts_stream_header) +
-					 sizeof(cctx->cache))) {
-#if ZDB_TS_ROLLOVER_ENABLED
+		if (cctx->file_offset < (cctx->hdr_size + cctx->rec_size)) {
+#if ZDB_TS_SEGMENTED
 			if (zdb_ts_cursor_next_segment(cctx) == ZDB_OK) {
 				return zdb_ts_cursor_read_file_record(cctx, out_record);
 			}
@@ -636,16 +831,16 @@ static zdb_status_t zdb_ts_cursor_read_file_record(struct zdb_ts_cursor_ctx *cct
 			return ZDB_ERR_NOT_FOUND;
 		}
 
-		cctx->file_offset -= sizeof(cctx->cache);
+		cctx->file_offset -= cctx->rec_size;
 		if (fs_seek(&cctx->file, (off_t)cctx->file_offset, FS_SEEK_SET) < 0) {
 			return ZDB_ERR_IO;
 		}
 	}
 
-	rd = fs_read(&cctx->file, &cctx->cache, sizeof(cctx->cache));
+	rd = fs_read(&cctx->file, &cctx->cache, cctx->rec_size);
 
 	if (rd == 0) {
-#if ZDB_TS_ROLLOVER_ENABLED
+#if ZDB_TS_SEGMENTED
 		if (zdb_ts_cursor_next_segment(cctx) == ZDB_OK) {
 			return zdb_ts_cursor_read_file_record(cctx, out_record);
 		}
@@ -655,7 +850,7 @@ static zdb_status_t zdb_ts_cursor_read_file_record(struct zdb_ts_cursor_ctx *cct
 	if (rd < 0) {
 		return zdb_status_from_errno((int)rd);
 	}
-	if ((size_t)rd != sizeof(cctx->cache)) {
+	if ((size_t)rd != cctx->rec_size) {
 		return ZDB_ERR_CORRUPT;
 	}
 
@@ -665,18 +860,29 @@ static zdb_status_t zdb_ts_cursor_read_file_record(struct zdb_ts_cursor_ctx *cct
 			return ZDB_ERR_IO;
 		}
 	} else {
-		cctx->file_offset += sizeof(cctx->cache);
+		cctx->file_offset += cctx->rec_size;
 	}
 	out_record->data = (const uint8_t *)&cctx->cache;
-	out_record->len = sizeof(cctx->cache);
+	out_record->len = cctx->rec_size;
 	return ZDB_OK;
 }
 
-static zdb_status_t zdb_ts_ensure_header_at(zdb_t *db, const char *stream_name,
-					    const char *path)
+/*
+ * Create or validate a segment header, reporting the format the file uses.
+ *
+ * A new file is written in the configured format. An existing one keeps
+ * whatever it was created with, so records inside a file never change size.
+ * @p out_version and @p out_base_ts may be NULL.
+ */
+static zdb_status_t zdb_ts_ensure_header_ex(zdb_t *db, const char *stream_name,
+					    const char *path, uint64_t new_base_ts_ms,
+					    uint16_t *out_version, uint64_t *out_base_ts)
 {
 	struct fs_file_t file;
+	uint8_t raw[ZDB_TS_HDR_MAX_SIZE];
 	struct zdb_ts_stream_header hdr;
+	uint16_t version;
+	uint64_t base_ts = 0U;
 	ssize_t rd;
 	int rc;
 
@@ -690,22 +896,52 @@ static zdb_status_t zdb_ts_ensure_header_at(zdb_t *db, const char *stream_name,
 		return zdb_status_from_errno(rc);
 	}
 
-	rd = fs_read(&file, &hdr, sizeof(hdr));
+	rd = fs_read(&file, raw, sizeof(raw));
 	if (rd == 0) {
 		ssize_t wr;
+		size_t hdr_len;
 
+#if ZDB_TS_DELTA_ENABLED
+		{
+			struct zdb_ts_stream_header_v2 h2;
+
+			h2.magic_le = sys_cpu_to_le32(ZDB_TS_STREAM_MAGIC);
+			h2.version_le = sys_cpu_to_le16(ZDB_TS_STREAM_VERSION_V2);
+			h2.reserved_le = 0U;
+			h2.stream_id_le = sys_cpu_to_le32(zdb_fnv1a32(stream_name));
+			h2.base_ts_ms_le = sys_cpu_to_le64(new_base_ts_ms);
+			h2.crc_le = sys_cpu_to_le32(crc32_ieee(
+				(const uint8_t *)&h2,
+				offsetof(struct zdb_ts_stream_header_v2, crc_le)));
+			(void)memcpy(raw, &h2, sizeof(h2));
+			hdr_len = sizeof(h2);
+			version = ZDB_TS_STREAM_VERSION_V2;
+			base_ts = new_base_ts_ms;
+		}
+#else
+		ARG_UNUSED(new_base_ts_ms);
 		zdb_ts_stream_header_encode(stream_name, &hdr);
+		(void)memcpy(raw, &hdr, sizeof(hdr));
+		hdr_len = sizeof(hdr);
+		version = ZDB_TS_STREAM_VERSION;
+#endif
 		rc = fs_seek(&file, 0, FS_SEEK_SET);
 		if (rc < 0) {
 			(void)fs_close(&file);
 			return zdb_status_from_errno(rc);
 		}
-		wr = fs_write(&file, &hdr, sizeof(hdr));
-		if ((wr < 0) || ((size_t)wr != sizeof(hdr))) {
+		wr = fs_write(&file, raw, hdr_len);
+		if ((wr < 0) || ((size_t)wr != hdr_len)) {
 			(void)fs_close(&file);
 			return (wr < 0) ? zdb_status_from_errno((int)wr) : ZDB_ERR_IO;
 		}
 		(void)fs_close(&file);
+		if (out_version != NULL) {
+			*out_version = version;
+		}
+		if (out_base_ts != NULL) {
+			*out_base_ts = base_ts;
+		}
 		return ZDB_OK;
 	}
 
@@ -714,16 +950,69 @@ static zdb_status_t zdb_ts_ensure_header_at(zdb_t *db, const char *stream_name,
 		return zdb_status_from_errno((int)rd);
 	}
 
-	if ((size_t)rd != sizeof(hdr)) {
+	if ((size_t)rd < sizeof(struct zdb_ts_stream_header)) {
 		(void)fs_close(&file);
 		return ZDB_ERR_CORRUPT;
 	}
 
 	(void)fs_close(&file);
-	return zdb_ts_stream_header_decode(db, &hdr, stream_name);
+
+	/* Existing file: its own header says which layout it holds. */
+	(void)memcpy(&hdr, raw, sizeof(hdr));
+	version = sys_le16_to_cpu(hdr.version_le);
+
+	if (version == ZDB_TS_STREAM_VERSION_V2) {
+		struct zdb_ts_stream_header_v2 h2;
+		uint32_t expect_crc;
+
+		if ((size_t)rd < sizeof(h2)) {
+			return ZDB_ERR_CORRUPT;
+		}
+		(void)memcpy(&h2, raw, sizeof(h2));
+
+		if (sys_le32_to_cpu(h2.magic_le) != ZDB_TS_STREAM_MAGIC) {
+			ZDB_STAT_INC(db, corrupt_records);
+			return ZDB_ERR_CORRUPT;
+		}
+		expect_crc = crc32_ieee((const uint8_t *)&h2,
+					offsetof(struct zdb_ts_stream_header_v2, crc_le));
+		if (sys_le32_to_cpu(h2.crc_le) != expect_crc) {
+			ZDB_STAT_INC(db, crc_failures);
+			ZDB_STAT_INC(db, corrupt_records);
+			return ZDB_ERR_CORRUPT;
+		}
+		if (sys_le32_to_cpu(h2.stream_id_le) != zdb_fnv1a32(stream_name)) {
+			ZDB_STAT_INC(db, corrupt_records);
+			return ZDB_ERR_CORRUPT;
+		}
+
+		base_ts = sys_le64_to_cpu(h2.base_ts_ms_le);
+	} else {
+		zdb_status_t decode_rc = zdb_ts_stream_header_decode(db, &hdr, stream_name);
+
+		if (decode_rc != ZDB_OK) {
+			return decode_rc;
+		}
+	}
+
+	if (out_version != NULL) {
+		*out_version = version;
+	}
+	if (out_base_ts != NULL) {
+		*out_base_ts = base_ts;
+	}
+	return ZDB_OK;
 }
 
-#if ZDB_TS_ROLLOVER_ENABLED
+#if !ZDB_TS_SEGMENTED
+static zdb_status_t zdb_ts_ensure_header_at(zdb_t *db, const char *stream_name,
+					    const char *path)
+{
+	return zdb_ts_ensure_header_ex(db, stream_name, path, 0U, NULL, NULL);
+}
+#endif
+
+#if ZDB_TS_SEGMENTED
 /*
  * Path of one segment of a stream.
  *
@@ -853,16 +1142,26 @@ static zdb_status_t zdb_ts_scan_segments(zdb_t *db, struct zdb_ts_stream_ctx *sl
 		return zdb_status_from_errno(rc);
 	}
 
-	hdr_rc = zdb_ts_ensure_header_at(db, slot->name, seg_path);
-	if (hdr_rc != ZDB_OK) {
-		return hdr_rc;
+	{
+		uint16_t seg_version = (uint16_t)ZDB_TS_STREAM_VERSION;
+		uint64_t seg_base = 0U;
+
+		hdr_rc = zdb_ts_ensure_header_ex(db, slot->name, seg_path, 0U, &seg_version,
+						 &seg_base);
+		if (hdr_rc != ZDB_OK) {
+			return hdr_rc;
+		}
+
+		slot->seg_version = seg_version;
+		slot->seg_hdr_size = zdb_ts_hdr_size_for(seg_version);
+		slot->seg_rec_size = zdb_ts_rec_size_for(seg_version);
+		slot->seg_base_ts_ms = seg_base;
 	}
 
 	slot->cur_seg_bytes = 0U;
 	if (fs_stat(seg_path, &info) == 0) {
-		if ((size_t)info.size > sizeof(struct zdb_ts_stream_header)) {
-			slot->cur_seg_bytes =
-				(size_t)info.size - sizeof(struct zdb_ts_stream_header);
+		if ((size_t)info.size > slot->seg_hdr_size) {
+			slot->cur_seg_bytes = (size_t)info.size - slot->seg_hdr_size;
 		}
 	}
 
@@ -878,15 +1177,18 @@ static zdb_status_t zdb_ts_scan_segments(zdb_t *db, struct zdb_ts_stream_ctx *sl
  * two files; a segment therefore overshoots its configured size by at most one
  * ingest buffer.
  */
-static int zdb_ts_roll_segment_if_full(zdb_t *db, struct zdb_ts_stream_ctx *slot)
+/*
+ * Begin a new segment, giving it @p base_ts_ms as the base its records offset
+ * from, and drop the oldest once the stream holds its full complement.
+ */
+static int zdb_ts_start_segment(zdb_t *db, struct zdb_ts_stream_ctx *slot,
+				uint64_t base_ts_ms)
 {
 	char seg_path[ZDB_TS_PATH_MAX];
+	uint16_t seg_version = (uint16_t)ZDB_TS_STREAM_VERSION;
+	uint64_t seg_base = 0U;
 	zdb_status_t hdr_rc;
 	int rc;
-
-	if (slot->cur_seg_bytes < (size_t)CONFIG_ZDB_TS_ROLLOVER_SEGMENT_BYTES) {
-		return 0;
-	}
 
 	slot->cur_seg++;
 	slot->cur_seg_bytes = 0U;
@@ -897,11 +1199,19 @@ static int zdb_ts_roll_segment_if_full(zdb_t *db, struct zdb_ts_stream_ctx *slot
 		return rc;
 	}
 
-	hdr_rc = zdb_ts_ensure_header_at(db, slot->name, seg_path);
+	hdr_rc = zdb_ts_ensure_header_ex(db, slot->name, seg_path, base_ts_ms, &seg_version,
+					 &seg_base);
 	if (hdr_rc != ZDB_OK) {
 		return -EIO;
 	}
 
+	slot->seg_version = seg_version;
+	slot->seg_hdr_size = zdb_ts_hdr_size_for(seg_version);
+	slot->seg_rec_size = zdb_ts_rec_size_for(seg_version);
+	slot->seg_base_ts_ms = seg_base;
+
+#if ZDB_TS_ROLLOVER_ENABLED
+	/* Discarding the oldest segment is rollover's job, not segmentation's. */
 	while ((slot->cur_seg - slot->oldest_seg + 1U) >
 	       (uint32_t)CONFIG_ZDB_TS_ROLLOVER_MAX_SEGMENTS) {
 		rc = zdb_ts_build_segment_path(db->cfg, slot->name, slot->oldest_seg, seg_path,
@@ -915,10 +1225,21 @@ static int zdb_ts_roll_segment_if_full(zdb_t *db, struct zdb_ts_stream_ctx *slot
 		}
 		slot->oldest_seg++;
 	}
+#endif
 
 	return 0;
 }
-#endif /* ZDB_TS_ROLLOVER_ENABLED */
+
+static int zdb_ts_roll_segment_if_full(zdb_t *db, struct zdb_ts_stream_ctx *slot)
+{
+	if (slot->cur_seg_bytes < (size_t)CONFIG_ZDB_TS_ROLLOVER_SEGMENT_BYTES) {
+		return 0;
+	}
+
+	/* Carry the base forward; an out-of-range sample rebases on its own. */
+	return zdb_ts_start_segment(db, slot, slot->seg_base_ts_ms);
+}
+#endif /* ZDB_TS_SEGMENTED */
 
 /*
  * Path a stream currently appends to: its newest segment when rollover bounds
@@ -927,7 +1248,7 @@ static int zdb_ts_roll_segment_if_full(zdb_t *db, struct zdb_ts_stream_ctx *slot
 static int zdb_ts_active_path(zdb_t *db, struct zdb_ts_stream_ctx *slot, char *path,
 			      size_t path_len)
 {
-#if ZDB_TS_ROLLOVER_ENABLED
+#if ZDB_TS_SEGMENTED
 	if (zdb_ts_scan_segments(db, slot) != ZDB_OK) {
 		return -EIO;
 	}
@@ -937,7 +1258,8 @@ static int zdb_ts_active_path(zdb_t *db, struct zdb_ts_stream_ctx *slot, char *p
 #endif
 }
 
-/* Single-file layout wrapper. */
+#if !ZDB_TS_SEGMENTED
+/* Single-file layout wrapper; segmented streams write a header per segment. */
 static zdb_status_t zdb_ts_ensure_stream_header(zdb_t *db, const char *stream_name)
 {
 	char path[ZDB_TS_PATH_MAX];
@@ -954,6 +1276,7 @@ static zdb_status_t zdb_ts_ensure_stream_header(zdb_t *db, const char *stream_na
 
 	return zdb_ts_ensure_header_at(db, stream_name, path);
 }
+#endif /* !ZDB_TS_SEGMENTED */
 #endif
 
 /*
@@ -1200,10 +1523,13 @@ zdb_status_t zdb_ts_open(zdb_t *db, const char *stream_name, zdb_ts_t *ts)
 		}
 	}
 
+#if !ZDB_TS_SEGMENTED
+	/* Segmented streams create a header per segment as segments appear. */
 	rc = zdb_ts_ensure_stream_header(db, stream_name);
 	if (rc != ZDB_OK) {
 		return rc;
 	}
+#endif
 #endif
 
 	/*
@@ -1279,11 +1605,12 @@ zdb_status_t zdb_ts_append_i64(zdb_ts_t *ts, const zdb_ts_sample_i64_t *sample)
 {
 	struct zdb_ts_core_ctx *ctx;
 	struct zdb_ts_stream_ctx *slot;
-	struct zdb_ts_record_i64 rec;
 	zdb_status_t lock_rc;
 	zdb_status_t status = ZDB_OK;
 	int rc;
-#if !ZDB_TS_USE_FCB
+#if ZDB_TS_USE_FCB
+	struct zdb_ts_record_i64 rec;
+#else
 	bool need_async_flush = false;
 #endif
 
@@ -1314,25 +1641,56 @@ zdb_status_t zdb_ts_append_i64(zdb_ts_t *ts, const zdb_ts_sample_i64_t *sample)
 
 	status = (rc < 0) ? zdb_status_from_errno(rc) : ZDB_OK;
 #else
-	if ((slot->ingest_capacity < sizeof(rec)) || (slot->ingest_buf == NULL)) {
-		zdb_unlock_write(ts->db);
-		status = ZDB_ERR_NOMEM;
-		goto out;
-	}
+	{
+		size_t rec_size = zdb_ts_slot_rec_size(slot);
 
-	if ((slot->ingest_used + sizeof(rec)) > slot->ingest_capacity) {
-		rc = zdb_ts_flush_buffer_locked(ctx, slot);
-		if (rc < 0) {
+		if ((slot->ingest_capacity < rec_size) || (slot->ingest_buf == NULL)) {
 			zdb_unlock_write(ts->db);
-			status = zdb_status_from_errno(rc);
+			status = ZDB_ERR_NOMEM;
 			goto out;
 		}
-	}
 
-	zdb_ts_record_encode(sample, &rec);
-	(void)memcpy(&slot->ingest_buf[slot->ingest_used], &rec, sizeof(rec));
-	slot->ingest_used += sizeof(rec);
-	need_async_flush = (slot->ingest_used == slot->ingest_capacity);
+		if ((slot->ingest_used + rec_size) > slot->ingest_capacity) {
+			rc = zdb_ts_flush_buffer_locked(ctx, slot);
+			if (rc < 0) {
+				zdb_unlock_write(ts->db);
+				status = zdb_status_from_errno(rc);
+				goto out;
+			}
+		}
+
+		if (!zdb_ts_record_encode_as(zdb_ts_slot_version(slot),
+					     zdb_ts_slot_base_ts(slot), sample,
+					     &slot->ingest_buf[slot->ingest_used])) {
+#if ZDB_TS_SEGMENTED
+			/*
+			 * Out of range of this segment's timestamp base. Persist
+			 * what is buffered, then start a segment based on this
+			 * sample so it and its successors fit.
+			 */
+			rc = zdb_ts_flush_buffer_locked(ctx, slot);
+			if (rc == 0) {
+				rc = zdb_ts_start_segment(ctx->db, slot, sample->ts_ms);
+			}
+			if ((rc < 0) ||
+			    !zdb_ts_record_encode_as(zdb_ts_slot_version(slot),
+						     zdb_ts_slot_base_ts(slot), sample,
+						     &slot->ingest_buf[slot->ingest_used])) {
+				zdb_unlock_write(ts->db);
+				status = (rc < 0) ? zdb_status_from_errno(rc) : ZDB_ERR_INVAL;
+				goto out;
+			}
+			rec_size = zdb_ts_slot_rec_size(slot);
+#else
+			zdb_unlock_write(ts->db);
+			status = ZDB_ERR_INVAL;
+			goto out;
+#endif
+		}
+
+		slot->ingest_used += rec_size;
+		need_async_flush = (slot->ingest_used + rec_size) > slot->ingest_capacity;
+	}
 	zdb_unlock_write(ts->db);
 
 	if (need_async_flush) {
@@ -1363,7 +1721,9 @@ zdb_status_t zdb_ts_append_batch_i64(zdb_ts_t *ts, const zdb_ts_sample_i64_t *sa
 {
 	struct zdb_ts_core_ctx *ctx;
 	struct zdb_ts_stream_ctx *slot;
+#if ZDB_TS_USE_FCB
 	struct zdb_ts_record_i64 rec;
+#endif
 	zdb_status_t lock_rc;
 	zdb_status_t status = ZDB_OK;
 	size_t i;
@@ -1398,12 +1758,14 @@ zdb_status_t zdb_ts_append_batch_i64(zdb_ts_t *ts, const zdb_ts_sample_i64_t *sa
 			break;
 		}
 #else
-		if ((slot->ingest_capacity < sizeof(rec)) || (slot->ingest_buf == NULL)) {
+		size_t rec_size = zdb_ts_slot_rec_size(slot);
+
+		if ((slot->ingest_capacity < rec_size) || (slot->ingest_buf == NULL)) {
 			status = ZDB_ERR_NOMEM;
 			break;
 		}
 
-		if ((slot->ingest_used + sizeof(rec)) > slot->ingest_capacity) {
+		if ((slot->ingest_used + rec_size) > slot->ingest_capacity) {
 			rc = zdb_ts_flush_buffer_locked(ctx, slot);
 			if (rc < 0) {
 				status = zdb_status_from_errno(rc);
@@ -1411,16 +1773,37 @@ zdb_status_t zdb_ts_append_batch_i64(zdb_ts_t *ts, const zdb_ts_sample_i64_t *sa
 			}
 		}
 
-		zdb_ts_record_encode(&samples[i], &rec);
-		(void)memcpy(&slot->ingest_buf[slot->ingest_used], &rec, sizeof(rec));
-		slot->ingest_used += sizeof(rec);
+		if (!zdb_ts_record_encode_as(zdb_ts_slot_version(slot),
+					     zdb_ts_slot_base_ts(slot), &samples[i],
+					     &slot->ingest_buf[slot->ingest_used])) {
+#if ZDB_TS_SEGMENTED
+			rc = zdb_ts_flush_buffer_locked(ctx, slot);
+			if (rc == 0) {
+				rc = zdb_ts_start_segment(ctx->db, slot, samples[i].ts_ms);
+			}
+			if ((rc < 0) ||
+			    !zdb_ts_record_encode_as(zdb_ts_slot_version(slot),
+						     zdb_ts_slot_base_ts(slot), &samples[i],
+						     &slot->ingest_buf[slot->ingest_used])) {
+				status = (rc < 0) ? zdb_status_from_errno(rc) : ZDB_ERR_INVAL;
+				break;
+			}
+			rec_size = zdb_ts_slot_rec_size(slot);
+#else
+			status = ZDB_ERR_INVAL;
+			break;
+#endif
+		}
+
+		slot->ingest_used += rec_size;
 #endif
 	}
 
 	zdb_unlock_write(ts->db);
 
 #if !ZDB_TS_USE_FCB
-	if ((status == ZDB_OK) && (slot->ingest_used == slot->ingest_capacity)) {
+	if ((status == ZDB_OK) &&
+	    ((slot->ingest_used + zdb_ts_slot_rec_size(slot)) > slot->ingest_capacity)) {
 		(void)zdb_ts_flush_async(ts);
 	}
 #endif
@@ -1639,7 +2022,7 @@ static zdb_status_t zdb_ts_count_all(zdb_ts_t *ts, uint32_t *out_count)
 		return lock_rc;
 	}
 
-#if ZDB_TS_ROLLOVER_ENABLED
+#if ZDB_TS_SEGMENTED
 	{
 		struct zdb_ts_core_ctx *tctx = (struct zdb_ts_core_ctx *)ts->db->ts_ctx;
 		struct zdb_ts_stream_ctx *seg_slot =
@@ -1651,8 +2034,14 @@ static zdb_status_t zdb_ts_count_all(zdb_ts_t *ts, uint32_t *out_count)
 			return ZDB_ERR_INVAL;
 		}
 
-		/* Every retained segment contributes its whole-record count. */
+		/*
+		 * Every retained segment contributes its whole-record count.
+		 * Segments may differ in layout, so each one's own header says
+		 * how to divide its size — still no payload reads.
+		 */
 		for (seq = seg_slot->oldest_seg; seq <= seg_slot->cur_seg; seq++) {
+			struct zdb_ts_cursor_ctx probe;
+
 			rc = zdb_ts_build_segment_path(ts->db->cfg, ts->stream_name, seq, path,
 						       sizeof(path));
 			if (rc < 0) {
@@ -1662,10 +2051,12 @@ static zdb_status_t zdb_ts_count_all(zdb_ts_t *ts, uint32_t *out_count)
 			if (fs_stat(path, &entry) != 0) {
 				continue;
 			}
-			if ((size_t)entry.size > sizeof(struct zdb_ts_stream_header)) {
-				flushed += ((size_t)entry.size -
-					    sizeof(struct zdb_ts_stream_header)) /
-					   sizeof(struct zdb_ts_record_i64);
+			if (zdb_ts_cursor_learn_layout(&probe, path) != ZDB_OK) {
+				continue;
+			}
+			if ((size_t)entry.size > probe.hdr_size) {
+				flushed += ((size_t)entry.size - probe.hdr_size) /
+					   probe.rec_size;
 			}
 		}
 	}
@@ -1678,11 +2069,13 @@ static zdb_status_t zdb_ts_count_all(zdb_ts_t *ts, uint32_t *out_count)
 
 	rc = fs_stat(path, &entry);
 	if (rc == 0) {
-		size_t payload = (size_t)entry.size;
+		struct zdb_ts_cursor_ctx probe;
 
-		if (payload > sizeof(struct zdb_ts_stream_header)) {
-			payload -= sizeof(struct zdb_ts_stream_header);
-			flushed = payload / sizeof(struct zdb_ts_record_i64);
+		if (zdb_ts_cursor_learn_layout(&probe, path) == ZDB_OK) {
+			if ((size_t)entry.size > probe.hdr_size) {
+				flushed = ((size_t)entry.size - probe.hdr_size) /
+					  probe.rec_size;
+			}
 		}
 	} else if (rc != -ENOENT) {
 		zdb_unlock_read(ts->db);
@@ -1695,7 +2088,7 @@ static zdb_status_t zdb_ts_count_all(zdb_ts_t *ts, uint32_t *out_count)
 		struct zdb_ts_stream_ctx *slot = zdb_ts_slot_find(ctx, ts->stream_name);
 
 		if (slot != NULL) {
-			buffered = slot->ingest_used / sizeof(struct zdb_ts_record_i64);
+			buffered = slot->ingest_used / zdb_ts_slot_rec_size(slot);
 		}
 	}
 
@@ -1720,7 +2113,6 @@ zdb_status_t zdb_ts_query_aggregate(zdb_ts_t *ts, zdb_ts_window_t window,
 #else
 	zdb_cursor_t cursor;
 	zdb_bytes_t record;
-	struct zdb_ts_record_i64 rec;
 	uint32_t points = 0U;
 	double acc = 0.0;
 	bool truncated = false;
@@ -1765,9 +2157,7 @@ zdb_status_t zdb_ts_query_aggregate(zdb_ts_t *ts, zdb_ts_window_t window,
 	 * and now report that they hit it.
 	 */
 	while ((agg == ZDB_TS_AGG_COUNT) || (points < CONFIG_ZDB_TS_MAX_AGG_POINTS)) {
-		uint64_t ts_ms;
 		int64_t val;
-		zdb_status_t dec_rc;
 
 		rc = zdb_cursor_next(&cursor, &record);
 		if (rc == ZDB_ERR_NOT_FOUND) {
@@ -1778,15 +2168,12 @@ zdb_status_t zdb_ts_query_aggregate(zdb_ts_t *ts, zdb_ts_window_t window,
 			return rc;
 		}
 
-		(void)memcpy(&rec, record.data, sizeof(rec));
-		dec_rc = zdb_ts_record_decode(ts->db, &rec, &ts_ms, &val);
-		if (dec_rc == ZDB_ERR_UNSUPPORTED) {
-			continue;
-		}
-		if (dec_rc != ZDB_OK) {
-			(void)zdb_cursor_close(&cursor);
-			return dec_rc;
-		}
+		/*
+		 * The cursor already decoded this record to apply the window,
+		 * and knows which format it was in; take its result rather than
+		 * decoding the raw bytes again.
+		 */
+		val = ((const struct zdb_ts_cursor_ctx *)cursor.impl)->last_value;
 
 		if (!zdb_ts_agg_update(agg, (double)val, &points, &acc)) {
 			(void)zdb_cursor_close(&cursor);
@@ -1799,18 +2186,8 @@ zdb_status_t zdb_ts_query_aggregate(zdb_ts_t *ts, zdb_ts_window_t window,
 	 * more matching record before declaring the result truncated.
 	 */
 	if ((agg != ZDB_TS_AGG_COUNT) && (points == CONFIG_ZDB_TS_MAX_AGG_POINTS)) {
-		while (zdb_cursor_next(&cursor, &record) == ZDB_OK) {
-			uint64_t extra_ts_ms;
-			int64_t extra_val;
-			zdb_status_t extra_rc;
-
-			(void)memcpy(&rec, record.data, sizeof(rec));
-			extra_rc = zdb_ts_record_decode(ts->db, &rec, &extra_ts_ms, &extra_val);
-			if (extra_rc == ZDB_ERR_UNSUPPORTED) {
-				continue;
-			}
-			truncated = (extra_rc == ZDB_OK);
-			break;
+		if (zdb_cursor_next(&cursor, &record) == ZDB_OK) {
+			truncated = true;
 		}
 	}
 
@@ -1857,7 +2234,7 @@ static zdb_status_t zdb_ts_cursor_open_dir(zdb_ts_t *ts, zdb_ts_window_t window,
 	}
 #endif
 
-#if ZDB_TS_USE_LITTLEFS && !ZDB_TS_ROLLOVER_ENABLED
+#if ZDB_TS_USE_LITTLEFS && !ZDB_TS_SEGMENTED
 	rc = zdb_ts_ensure_stream_header(ts->db, ts->stream_name);
 	if (rc != ZDB_OK) {
 		return rc;
@@ -1880,7 +2257,7 @@ static zdb_status_t zdb_ts_cursor_open_dir(zdb_ts_t *ts, zdb_ts_window_t window,
 	ctx->ram_offset = 0U;
 	ctx->file_done = false;
 #if ZDB_TS_USE_LITTLEFS
-#if ZDB_TS_ROLLOVER_ENABLED
+#if ZDB_TS_SEGMENTED
 	{
 		struct zdb_ts_core_ctx *tctx = zdb_ts_ctx_get_or_alloc(ts->db);
 		struct zdb_ts_stream_ctx *slot =
@@ -1927,6 +2304,16 @@ static zdb_status_t zdb_ts_cursor_open_dir(zdb_ts_t *ts, zdb_ts_window_t window,
 		}
 		ctx->file_open = true;
 
+		{
+			zdb_status_t layout_rc = zdb_ts_cursor_learn_layout(ctx, cursor_path);
+
+			if (layout_rc != ZDB_OK) {
+				(void)fs_close(&ctx->file);
+				k_mem_slab_free(ts->db->cursor_slab, ctx);
+				return layout_rc;
+			}
+		}
+
 		/*
 		 * Record the size once: a descending walk starts at the end and
 		 * steps back a record at a time, and reset needs the same
@@ -1944,8 +2331,11 @@ static zdb_status_t zdb_ts_cursor_open_dir(zdb_ts_t *ts, zdb_ts_window_t window,
 			ctx->file_size = (size_t)fs_tell(&ctx->file);
 		}
 
+		ctx->file_offset = ctx->hdr_size;
 		if (descending) {
-			ctx->file_offset = ctx->file_size;
+			ctx->file_offset = ctx->hdr_size +
+					   (((ctx->file_size - ctx->hdr_size) / ctx->rec_size) *
+					    ctx->rec_size);
 		}
 
 		open_rc = fs_seek(&ctx->file,
@@ -1957,7 +2347,7 @@ static zdb_status_t zdb_ts_cursor_open_dir(zdb_ts_t *ts, zdb_ts_window_t window,
 			return zdb_status_from_errno(open_rc);
 		}
 	}
-#endif /* ZDB_TS_ROLLOVER_ENABLED */
+#endif /* ZDB_TS_SEGMENTED */
 #endif
 #if ZDB_TS_USE_FCB
 	ctx->fcb_started = false;
@@ -2007,7 +2397,6 @@ static zdb_status_t zdb_ts_cursor_next_ram(zdb_cursor_t *cursor,
 {
 	struct zdb_ts_core_ctx *tctx;
 	struct zdb_ts_stream_ctx *slot;
-	struct zdb_ts_record_i64 rec;
 	zdb_bytes_t candidate;
 	zdb_status_t lock_rc;
 
@@ -2032,11 +2421,12 @@ static zdb_status_t zdb_ts_cursor_next_ram(zdb_cursor_t *cursor,
 		return lock_rc;
 	}
 
-	while ((cctx->ram_offset + sizeof(rec)) <= slot->ingest_used) {
+	while ((cctx->ram_offset + zdb_ts_slot_rec_size(slot)) <= slot->ingest_used) {
 		uint64_t ts_ms;
 		int64_t val;
 		zdb_status_t dec_rc;
 		size_t buf_off;
+		size_t rec_size = zdb_ts_slot_rec_size(slot);
 
 		/*
 		 * ram_offset counts bytes already consumed in the walk's own
@@ -2044,15 +2434,16 @@ static zdb_status_t zdb_ts_cursor_next_ram(zdb_cursor_t *cursor,
 		 * back from the end of the buffer.
 		 */
 		buf_off = cctx->descending
-				  ? (slot->ingest_used - cctx->ram_offset - sizeof(rec))
+				  ? (slot->ingest_used - cctx->ram_offset - rec_size)
 				  : cctx->ram_offset;
 
 		candidate.data = &slot->ingest_buf[buf_off];
-		candidate.len = sizeof(rec);
-		(void)memcpy(&rec, candidate.data, sizeof(rec));
-		dec_rc = zdb_ts_record_decode(cctx->db, &rec, &ts_ms, &val);
+		candidate.len = rec_size;
+		dec_rc = zdb_ts_record_decode_as(cctx->db, zdb_ts_slot_version(slot),
+						 zdb_ts_slot_base_ts(slot), candidate.data,
+						 &ts_ms, &val);
 		if (dec_rc == ZDB_ERR_UNSUPPORTED) {
-			cctx->ram_offset += sizeof(rec);
+			cctx->ram_offset += rec_size;
 			continue;
 		}
 		if (dec_rc != ZDB_OK) {
@@ -2060,7 +2451,7 @@ static zdb_status_t zdb_ts_cursor_next_ram(zdb_cursor_t *cursor,
 			return dec_rc;
 		}
 		ARG_UNUSED(val);
-		cctx->ram_offset += sizeof(rec);
+		cctx->ram_offset += rec_size;
 		cursor->iter_count++;
 
 		if ((CONFIG_ZDB_SCAN_YIELD_EVERY_N > 0) &&
@@ -2076,6 +2467,8 @@ static zdb_status_t zdb_ts_cursor_next_ram(zdb_cursor_t *cursor,
 			continue;
 		}
 
+		cctx->last_ts_ms = ts_ms;
+		cctx->last_value = val;
 		*out_record = candidate;
 		cursor->current = candidate;
 		zdb_unlock_read(cctx->db);
@@ -2094,7 +2487,6 @@ zdb_status_t zdb_cursor_next(zdb_cursor_t *cursor, zdb_bytes_t *out_record)
 {
 	struct zdb_ts_cursor_ctx *cctx;
 	zdb_bytes_t candidate;
-	struct zdb_ts_record_i64 rec;
 
 	if ((cursor == NULL) || (out_record == NULL)) {
 		return ZDB_ERR_INVAL;
@@ -2152,6 +2544,8 @@ zdb_status_t zdb_cursor_next(zdb_cursor_t *cursor, zdb_bytes_t *out_record)
 				continue;
 			}
 
+			cctx->last_ts_ms = ts_ms;
+			cctx->last_value = val;
 			*out_record = candidate;
 			cursor->current = candidate;
 			return ZDB_OK;
@@ -2183,8 +2577,12 @@ zdb_status_t zdb_cursor_next(zdb_cursor_t *cursor, zdb_bytes_t *out_record)
 			return rc;
 		}
 
-		(void)memcpy(&rec, candidate.data, sizeof(rec));
-		dec_rc = zdb_ts_record_decode(cctx->db, &rec, &ts_ms, &val);
+		dec_rc = zdb_ts_record_decode_as(cctx->db, (cctx->rec_size ==
+							    sizeof(struct zdb_ts_record_v2))
+							   ? (uint16_t)ZDB_TS_STREAM_VERSION_V2
+							   : (uint16_t)ZDB_TS_STREAM_VERSION,
+						 cctx->base_ts_ms, candidate.data, &ts_ms,
+						 &val);
 		if (dec_rc == ZDB_ERR_UNSUPPORTED) {
 			continue;
 		}
@@ -2207,6 +2605,8 @@ zdb_status_t zdb_cursor_next(zdb_cursor_t *cursor, zdb_bytes_t *out_record)
 			continue;
 		}
 
+		cctx->last_ts_ms = ts_ms;
+		cctx->last_value = val;
 		*out_record = candidate;
 		cursor->current = candidate;
 		return ZDB_OK;
@@ -2425,8 +2825,10 @@ zdb_status_t zdb_ts_recover_stream(zdb_ts_t *ts, size_t *out_truncated_bytes)
 #else
 	struct fs_file_t file;
 	struct zdb_ts_stream_header hdr;
-	struct zdb_ts_record_i64 rec;
+	uint8_t rec[ZDB_TS_HDR_MAX_SIZE];
 	char path[ZDB_TS_PATH_MAX];
+	size_t hdr_size;
+	size_t rec_size;
 	size_t good_end;
 	size_t truncated_bytes = 0U;
 	int rc;
@@ -2442,7 +2844,7 @@ zdb_status_t zdb_ts_recover_stream(zdb_ts_t *ts, size_t *out_truncated_bytes)
 		*out_truncated_bytes = 0U;
 	}
 
-#if ZDB_TS_ROLLOVER_ENABLED
+#if ZDB_TS_SEGMENTED
 	{
 		/*
 		 * Only the newest segment can hold a partial write; the rest
@@ -2464,6 +2866,23 @@ zdb_status_t zdb_ts_recover_stream(zdb_ts_t *ts, size_t *out_truncated_bytes)
 		ZDB_STAT_INC(ts->db, recover_failures);
 		zdb_health_check(ts->db);
 		return zdb_status_from_errno(rc);
+	}
+
+	/*
+	 * A stream may hold either record layout, so learn this file's before
+	 * walking it — the header size and record stride both depend on it.
+	 */
+	{
+		struct zdb_ts_cursor_ctx probe;
+		struct fs_dirent probe_info;
+
+		hdr_size = sizeof(struct zdb_ts_stream_header);
+		rec_size = sizeof(struct zdb_ts_record_i64);
+		if ((fs_stat(path, &probe_info) == 0) &&
+		    (zdb_ts_cursor_learn_layout(&probe, path) == ZDB_OK)) {
+			hdr_size = probe.hdr_size;
+			rec_size = probe.rec_size;
+		}
 	}
 
 	fs_file_t_init(&file);
@@ -2505,7 +2924,7 @@ zdb_status_t zdb_ts_recover_stream(zdb_ts_t *ts, size_t *out_truncated_bytes)
 		return (rd < 0) ? zdb_status_from_errno((int)rd) : ZDB_ERR_CORRUPT;
 	}
 
-	{
+	if (hdr_size == sizeof(struct zdb_ts_stream_header)) {
 		zdb_status_t dec = zdb_ts_stream_header_decode(ts->db, &hdr, ts->stream_name);
 		if (dec != ZDB_OK) {
 			(void)fs_close(&file);
@@ -2515,13 +2934,22 @@ zdb_status_t zdb_ts_recover_stream(zdb_ts_t *ts, size_t *out_truncated_bytes)
 		}
 	}
 
-	good_end = sizeof(struct zdb_ts_stream_header);
+	/* Walk from just past this file's header, one record stride at a time. */
+	good_end = hdr_size;
+	rc = fs_seek(&file, (off_t)hdr_size, FS_SEEK_SET);
+	if (rc < 0) {
+		(void)fs_close(&file);
+		ZDB_STAT_INC(ts->db, recover_failures);
+		zdb_health_check(ts->db);
+		return zdb_status_from_errno(rc);
+	}
+
 	while (true) {
 		uint64_t ts_ms;
 		int64_t val;
 		zdb_status_t dec_rc;
 
-		rd = fs_read(&file, &rec, sizeof(rec));
+		rd = fs_read(&file, rec, rec_size);
 		if (rd == 0) {
 			break;
 		}
@@ -2531,16 +2959,20 @@ zdb_status_t zdb_ts_recover_stream(zdb_ts_t *ts, size_t *out_truncated_bytes)
 			zdb_health_check(ts->db);
 			return zdb_status_from_errno((int)rd);
 		}
-		if ((size_t)rd != sizeof(rec)) {
+		if ((size_t)rd != rec_size) {
 			break;
 		}
 
-		dec_rc = zdb_ts_record_decode(ts->db, &rec, &ts_ms, &val);
+		dec_rc = zdb_ts_record_decode_as(ts->db,
+						 (rec_size == sizeof(struct zdb_ts_record_v2))
+							 ? (uint16_t)ZDB_TS_STREAM_VERSION_V2
+							 : (uint16_t)ZDB_TS_STREAM_VERSION,
+						 0U, rec, &ts_ms, &val);
 		if (dec_rc != ZDB_OK) {
 			break;
 		}
 
-		good_end += sizeof(rec);
+		good_end += rec_size;
 	}
 
 	{

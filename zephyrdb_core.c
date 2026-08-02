@@ -430,8 +430,20 @@ zdb_status_t zdb_cursor_reset(zdb_cursor_t *cursor)
 		ctx->ram_offset = 0U;
 #if ZDB_TS_USE_LITTLEFS
 		ctx->file_done = false;
-		ctx->file_offset = ctx->descending ? ctx->file_size
-						   : sizeof(struct zdb_ts_stream_header);
+		/*
+		 * Rewind to this file's first record, or to its last whole one
+		 * for a reverse walk. Both depend on the layout the cursor
+		 * learned when it opened the file, which differs between record
+		 * formats.
+		 */
+		ctx->file_offset = ctx->hdr_size;
+		if (ctx->descending && (ctx->rec_size > 0U) &&
+		    (ctx->file_size > ctx->hdr_size)) {
+			ctx->file_offset =
+				ctx->hdr_size +
+				(((ctx->file_size - ctx->hdr_size) / ctx->rec_size) *
+				 ctx->rec_size);
+		}
 		if (ctx->file_open) {
 			int rc = fs_seek(&ctx->file, (off_t)ctx->file_offset, FS_SEEK_SET);
 

@@ -55,10 +55,14 @@ This page covers the complete option surface, grouped as in the Kconfig menus.
 ## TS Boundaries
 
 - `CONFIG_ZDB_TS_STREAM_NAME_MAX_LEN` (default 24)
+- `CONFIG_ZDB_TS_DELTA_ENCODING` (default n, LittleFS): store timestamps as
+  offsets from a per-segment base, shrinking records from 28 to 16 bytes.
+  Implies segmented storage, so `CONFIG_ZDB_TS_ROLLOVER_SEGMENT_BYTES` applies
+  whether or not rollover is enabled.
 - `CONFIG_ZDB_TS_ROLLOVER` (default y for FCB, n otherwise): bound a stream by
   discarding its oldest samples when it is full, instead of refusing new ones.
 - `CONFIG_ZDB_TS_ROLLOVER_SEGMENT_BYTES` (range 256–1048576, default 4096,
-  LittleFS): record bytes per segment file, excluding its 16-byte header. A
+  LittleFS): record bytes per segment file, excluding its header. A
   segment is closed once a write takes it past this, so it can overshoot by up
   to one ingest buffer.
 - `CONFIG_ZDB_TS_ROLLOVER_MAX_SEGMENTS` (range 2–64, default 4, LittleFS):

@@ -56,6 +56,23 @@
 #define ZDB_TS_ROLLOVER_ENABLED 0
 #endif
 
+#if defined(CONFIG_ZDB_TS_DELTA_ENCODING) && (CONFIG_ZDB_TS_DELTA_ENCODING)
+#define ZDB_TS_DELTA_ENABLED 1
+#else
+#define ZDB_TS_DELTA_ENABLED 0
+#endif
+
+/*
+ * Records are split across segment files when the oldest must be discardable
+ * (rollover) or when each needs its own timestamp base (delta encoding).
+ * Discarding is rollover's job alone.
+ */
+#if ZDB_TS_ROLLOVER_ENABLED || ZDB_TS_DELTA_ENABLED
+#define ZDB_TS_SEGMENTED 1
+#else
+#define ZDB_TS_SEGMENTED 0
+#endif
+
 #ifndef CONFIG_ZDB_TS_ROLLOVER_SEGMENT_BYTES
 #define CONFIG_ZDB_TS_ROLLOVER_SEGMENT_BYTES 4096
 #endif
@@ -134,6 +151,50 @@ struct __packed zdb_ts_stream_header {
 BUILD_ASSERT(sizeof(struct zdb_ts_stream_header) == 16,
 	     "Unexpected TS stream header layout size");
 
+/*
+ * Compact record format.
+ *
+ * The per-record magic and version of the v1 layout repeat what the segment
+ * header already states, and a full 64-bit absolute timestamp repeats most of
+ * the previous record. Storing the timestamp as an offset from a base recorded
+ * once per segment, and dropping the redundant fields, halves the record
+ * almost exactly: 28 bytes to 16.
+ *
+ * The offset is from the segment's base rather than the previous record, so
+ * every record still decodes on its own — which is what lets a cursor seek
+ * backwards and lets COUNT work from file sizes.
+ */
+struct __packed zdb_ts_record_v2 {
+	uint32_t ts_delta_ms_le;
+	uint64_t value_le;
+	uint32_t crc_le;
+};
+
+BUILD_ASSERT(sizeof(struct zdb_ts_record_v2) == 16,
+	     "Unexpected TS compact record layout size");
+
+/*
+ * Segment header carrying the timestamp base its records offset from. Written
+ * for segments holding compact records; the 16-byte header above still
+ * introduces segments of v1 records.
+ */
+struct __packed zdb_ts_stream_header_v2 {
+	uint32_t magic_le;
+	uint16_t version_le;
+	uint16_t reserved_le;
+	uint32_t stream_id_le;
+	uint64_t base_ts_ms_le;
+	uint32_t crc_le;
+};
+
+BUILD_ASSERT(sizeof(struct zdb_ts_stream_header_v2) == 24,
+	     "Unexpected TS compact stream header layout size");
+
+/* Largest header any supported format uses, for staging buffers. */
+#define ZDB_TS_HDR_MAX_SIZE sizeof(struct zdb_ts_stream_header_v2)
+
+#define ZDB_TS_STREAM_VERSION_V2 2u
+
 struct __packed zdb_ts_watermark_rec {
 	uint32_t magic_le;
 	uint16_t version_le;
@@ -153,7 +214,7 @@ struct zdb_ts_cursor_ctx {
 	size_t file_offset;
 	size_t ram_offset;
 	bool file_done;
-#if ZDB_TS_USE_LITTLEFS && ZDB_TS_ROLLOVER_ENABLED
+#if ZDB_TS_USE_LITTLEFS && ZDB_TS_SEGMENTED
 	/*
 	 * Segment being read, and the window snapshotted at open. Segments
 	 * discarded while the cursor is open simply read as absent.
@@ -162,6 +223,20 @@ struct zdb_ts_cursor_ctx {
 	uint32_t seg_lo;
 	uint32_t seg_hi;
 #endif
+#if ZDB_TS_USE_LITTLEFS
+	/* Layout of the file being read, learned from its header. */
+	size_t hdr_size;
+	size_t rec_size;
+	uint64_t base_ts_ms;
+#endif
+	/*
+	 * Decoded form of the record most recently yielded. The cursor has to
+	 * decode a record to apply the window and predicate, so consumers read
+	 * the result here instead of decoding the raw bytes a second time —
+	 * which also keeps them from having to know the record's format.
+	 */
+	uint64_t last_ts_ms;
+	int64_t last_value;
 	/*
 	 * Direction is held here rather than in zdb_cursor_t::flags, which
 	 * zdb_cursor_reset() clears.
@@ -201,16 +276,25 @@ struct zdb_ts_stream_ctx {
 	 */
 	uint8_t open_count;
 	bool in_use;
-#if ZDB_TS_USE_LITTLEFS && ZDB_TS_ROLLOVER_ENABLED
+#if ZDB_TS_USE_LITTLEFS && ZDB_TS_SEGMENTED
 	/*
 	 * Segment window. Records live in <stream>.NNNN.zts files so the
-	 * oldest can be discarded whole; these track which files exist and how
-	 * full the newest one is.
+	 * oldest can be discarded whole and each can carry its own timestamp
+	 * base; these track which files exist and how full the newest one is.
 	 */
 	uint32_t oldest_seg;
 	uint32_t cur_seg;
 	size_t cur_seg_bytes;
 	bool segs_scanned;
+	/*
+	 * Format of the segment currently being appended to. A stream keeps
+	 * whichever format its segment was created with, so records within one
+	 * file are always the same size.
+	 */
+	uint16_t seg_version;
+	size_t seg_hdr_size;
+	size_t seg_rec_size;
+	uint64_t seg_base_ts_ms;
 #endif
 };
 

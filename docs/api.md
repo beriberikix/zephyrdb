@@ -217,6 +217,15 @@ Notes:
   `CONFIG_ZDB_TS_ROLLOVER_SEGMENT_BYTES` each, and the oldest whole segment is
   what gets discarded; cursors, aggregates, and recovery span them. A stream
   previously stored as a single file is adopted as the first segment.
+- `CONFIG_ZDB_TS_DELTA_ENCODING` stores each sample's timestamp as an offset
+  from a base recorded once per segment and drops the per-record magic and
+  version the segment header already carries, shrinking records from 28 bytes
+  to 16 — about 1.75x the samples for the same storage. Records stay fixed size
+  and independently decodable, so reverse cursors and the payload-free COUNT
+  are unaffected. Streams written without it keep their format when appended
+  to, and are still read; only new streams use the compact one. A sample more
+  than 2^32 ms (about 49 days) past its segment's base starts a new segment
+  rather than failing.
 - Backend differences (FCB): appends are written through synchronously, so
   `flush_*` are no-ops returning `ZDB_OK`; `zdb_ts_query_aggregate` returns
   `ZDB_ERR_UNSUPPORTED`; `zdb_ts_recover_stream` is a no-op reporting zero
