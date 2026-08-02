@@ -2,7 +2,7 @@
 
 ## Design Goals
 
-- No heap allocation in long-lived paths
+- Bounded, statically sized allocation on the core and time-series paths
 - Predictable behavior on constrained embedded targets
 - Durable storage with recovery support
 - Thread-safe reads and writes
@@ -11,16 +11,28 @@
 
 ZephyrDB relies on static `k_mem_slab` pools for internal objects:
 
-- Core slab
-- Cursor slab
-- KV IO slab
-- TS ingest slab
+- Core slab — time-series core context
+- Cursor slab — cursor state
+- KV IO slab — per-call key-value record buffers
+- TS ingest slab — the time-series ingest buffer
 
-The `ZDB_DEFINE_STATIC` helper wires these slabs into a `zdb_t` instance.
+The `ZDB_DEFINE_STATIC` helper wires these slabs into a `zdb_t` instance. Slab
+blocks are the only allocation on the append, flush, and cursor paths.
+
+Two areas still use the system heap and are sized by Kconfig rather than slabs:
+
+- The key-value session index (`k_calloc` on first use), which holds up to 128
+  entries of two `CONFIG_ZDB_MAX_KEY_LEN`-sized names plus a record ID.
+- The document model, which allocates the field array and every string/bytes
+  payload individually. Applications that enable `CONFIG_ZDB_DOC` must size
+  `CONFIG_HEAP_MEM_POOL_SIZE` accordingly.
 
 ## Concurrency
 
-Shared state is synchronized with Zephyr mutexes and model-specific locking paths so reads and writes can coexist safely.
+Shared state is synchronized with a single Zephyr mutex per instance, taken for
+the duration of each operation. Read and write paths use the same mutex, so
+operations on one instance serialize against each other; separate instances are
+independent.
 
 ## Durability and Recovery
 

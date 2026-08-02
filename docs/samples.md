@@ -121,6 +121,23 @@ Notes:
 - Uses ZMS on `storage_partition` for KV backend on `native_sim`.
 - Prints latest zbus events for KV (`zdb_kv_event_chan`), TS (`zdb_ts_event_chan`), and DOC (`zdb_doc_event_chan`).
 
+### native_sim_harness
+
+Minimal `native_sim` harness that initializes an instance and exercises the time-series FlatBuffers export helper in both size-query and write modes.
+
+Build:
+
+```bash
+west build -p always -s samples/native_sim_harness -b native_sim
+west build -t run
+```
+
+Notes:
+
+- Requires `flatcc-zephyr` in the same workspace (`CONFIG_ZDB_FLATBUFFERS=y`, `CONFIG_FLATCC=y`).
+- Builds with `CONFIG_ZDB_KV=n`; no storage backend is mounted.
+- Prints `PASS: native_sim harness exported <n> bytes` on success — useful as a smoke check that the flatcc runtime is wired into the workspace.
+
 ## Notes
 
 - DOC samples require `flatcc-zephyr` in the same workspace.
