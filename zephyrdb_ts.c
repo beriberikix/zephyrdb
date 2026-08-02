@@ -509,6 +509,17 @@ static zdb_status_t zdb_ts_ensure_stream_header(zdb_t *db, const char *stream_na
 }
 #endif
 
+/*
+ * True when the window admits every timestamp, matching the conventions
+ * zdb_ts_window_match() accepts: an all-zero window, and an open-ended upper
+ * bound expressed either as 0 or UINT64_MAX (ZDB_TS_WINDOW_ALL).
+ */
+static bool zdb_ts_window_is_unbounded(zdb_ts_window_t window)
+{
+	return (window.from_ts_ms == 0U) &&
+	       ((window.to_ts_ms == 0U) || (window.to_ts_ms == UINT64_MAX));
+}
+
 static bool zdb_ts_window_match(zdb_ts_window_t window, uint64_t ts_ms)
 {
 	if ((window.from_ts_ms == 0U) && (window.to_ts_ms == 0U)) {
@@ -1023,6 +1034,65 @@ zdb_status_t zdb_ts_flush_sync(zdb_ts_t *ts, k_timeout_t timeout)
 #endif
 }
 
+#if !ZDB_TS_USE_FCB
+/*
+ * Count every record in a stream without reading payloads.
+ *
+ * Records are fixed size and the file starts with a stream header, so the
+ * flushed count is pure arithmetic on the file size; unflushed samples are
+ * counted from the ingest buffer. Returns ZDB_ERR_UNSUPPORTED when the window
+ * is not "everything", leaving the caller to scan.
+ *
+ * This counts frames rather than decoding them, so a record that would fail
+ * its CRC still counts. That matches what a scan would report for a stream
+ * whose corrupt tail was already truncated by recovery, and the alternative
+ * (reading every payload) is exactly the cost this path exists to avoid.
+ */
+static zdb_status_t zdb_ts_count_all(zdb_ts_t *ts, uint32_t *out_count)
+{
+	char path[ZDB_TS_PATH_MAX];
+	struct fs_dirent entry;
+	struct zdb_ts_core_ctx *ctx;
+	zdb_status_t lock_rc;
+	size_t flushed = 0U;
+	size_t buffered = 0U;
+	int rc;
+
+	rc = zdb_ts_build_path(ts->db->cfg, ts->stream_name, path, sizeof(path));
+	if (rc < 0) {
+		return zdb_status_from_errno(rc);
+	}
+
+	lock_rc = zdb_lock_read(ts->db);
+	if (lock_rc != ZDB_OK) {
+		return lock_rc;
+	}
+
+	rc = fs_stat(path, &entry);
+	if (rc == 0) {
+		size_t payload = (size_t)entry.size;
+
+		if (payload > sizeof(struct zdb_ts_stream_header)) {
+			payload -= sizeof(struct zdb_ts_stream_header);
+			flushed = payload / sizeof(struct zdb_ts_record_i64);
+		}
+	} else if (rc != -ENOENT) {
+		zdb_unlock_read(ts->db);
+		return zdb_status_from_errno(rc);
+	}
+
+	ctx = (struct zdb_ts_core_ctx *)ts->db->ts_ctx;
+	if (ctx != NULL) {
+		buffered = ctx->ingest_used / sizeof(struct zdb_ts_record_i64);
+	}
+
+	zdb_unlock_read(ts->db);
+
+	*out_count = (uint32_t)(flushed + buffered);
+	return ZDB_OK;
+}
+#endif /* !ZDB_TS_USE_FCB */
+
 zdb_status_t zdb_ts_query_aggregate(zdb_ts_t *ts, zdb_ts_window_t window,
 			    zdb_ts_agg_t agg, zdb_ts_agg_result_t *out_result)
 {
@@ -1040,6 +1110,7 @@ zdb_status_t zdb_ts_query_aggregate(zdb_ts_t *ts, zdb_ts_window_t window,
 	struct zdb_ts_record_i64 rec;
 	uint32_t points = 0U;
 	double acc = 0.0;
+	bool truncated = false;
 	zdb_status_t rc;
 
 	if ((ts == NULL) || (ts->db == NULL) || (out_result == NULL)) {
@@ -1050,12 +1121,37 @@ zdb_status_t zdb_ts_query_aggregate(zdb_ts_t *ts, zdb_ts_window_t window,
 		return ZDB_ERR_INVAL;
 	}
 
+	/*
+	 * COUNT over the whole stream needs no payloads: every record is the
+	 * same fixed size, so the flushed count follows from the file size and
+	 * the rest is whatever is still buffered in RAM.
+	 */
+	if ((agg == ZDB_TS_AGG_COUNT) && zdb_ts_window_is_unbounded(window)) {
+		uint32_t fast_count = 0U;
+
+		rc = zdb_ts_count_all(ts, &fast_count);
+		if (rc != ZDB_OK) {
+			return rc;
+		}
+
+		out_result->agg = agg;
+		out_result->points = fast_count;
+		out_result->value = (double)fast_count;
+		out_result->truncated = false;
+		return ZDB_OK;
+	}
+
 	rc = zdb_ts_cursor_open(ts, window, NULL, NULL, &cursor);
 	if (rc != ZDB_OK) {
 		return rc;
 	}
 
-	while (points < CONFIG_ZDB_TS_MAX_AGG_POINTS) {
+	/*
+	 * COUNT is not capped: reporting a low number as if it were complete
+	 * would be worse than the scan cost. The other aggregates keep the cap
+	 * and now report that they hit it.
+	 */
+	while ((agg == ZDB_TS_AGG_COUNT) || (points < CONFIG_ZDB_TS_MAX_AGG_POINTS)) {
 		uint64_t ts_ms;
 		int64_t val;
 		zdb_status_t dec_rc;
@@ -1085,14 +1181,39 @@ zdb_status_t zdb_ts_query_aggregate(zdb_ts_t *ts, zdb_ts_window_t window,
 		}
 	}
 
+	/*
+	 * Distinguish "stopped at the cap" from "consumed the stream": peek one
+	 * more matching record before declaring the result truncated.
+	 */
+	if ((agg != ZDB_TS_AGG_COUNT) && (points == CONFIG_ZDB_TS_MAX_AGG_POINTS)) {
+		while (zdb_cursor_next(&cursor, &record) == ZDB_OK) {
+			uint64_t extra_ts_ms;
+			int64_t extra_val;
+			zdb_status_t extra_rc;
+
+			(void)memcpy(&rec, record.data, sizeof(rec));
+			extra_rc = zdb_ts_record_decode(ts->db, &rec, &extra_ts_ms, &extra_val);
+			if (extra_rc == ZDB_ERR_UNSUPPORTED) {
+				continue;
+			}
+			truncated = (extra_rc == ZDB_OK);
+			break;
+		}
+	}
+
 	(void)zdb_cursor_close(&cursor);
 
-	if (points == 0U) {
+	/*
+	 * An empty window is a real answer for COUNT; the value-bearing
+	 * aggregates have nothing to report and keep returning NOT_FOUND.
+	 */
+	if ((points == 0U) && (agg != ZDB_TS_AGG_COUNT)) {
 		return ZDB_ERR_NOT_FOUND;
 	}
 
 	out_result->agg = agg;
 	out_result->points = points;
+	out_result->truncated = truncated;
 	if (agg == ZDB_TS_AGG_COUNT) {
 		out_result->value = (double)points;
 	} else if (agg == ZDB_TS_AGG_AVG) {

@@ -144,6 +144,16 @@ Notes:
   the active stream is allowed.
 - Cursors iterate flushed records from storage plus samples still in the
   RAM ingest buffer.
+- `zdb_ts_query_aggregate` scans at most `CONFIG_ZDB_TS_MAX_AGG_POINTS`
+  samples for MIN/MAX/AVG/SUM; when more matched, the result covers only that
+  prefix and `result.truncated` is set. Those aggregates return
+  `ZDB_ERR_NOT_FOUND` for an empty window.
+- COUNT is exempt: it is never capped and never truncated, and an empty window
+  is `ZDB_OK` with `points == 0`. Counting the whole stream
+  (`ZDB_TS_WINDOW_ALL`) derives the total from the stored size instead of
+  reading payloads, so it stays cheap as the stream grows. It counts stored
+  records, so a record that would fail its CRC is still counted; use a cursor
+  if you need decode-verified totals.
 - Backend differences (FCB): appends are written through synchronously, so
   `flush_*` are no-ops returning `ZDB_OK`; `zdb_ts_query_aggregate` returns
   `ZDB_ERR_UNSUPPORTED`; `zdb_ts_recover_stream` is a no-op reporting zero

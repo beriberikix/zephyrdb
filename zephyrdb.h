@@ -751,6 +751,14 @@ extern "C"
 		zdb_ts_agg_t agg; /**< Aggregation that was computed. */
 		double value;     /**< Aggregate value (equals @ref points for COUNT). */
 		uint32_t points;  /**< Number of samples that matched the window. */
+		/**
+		 * @brief True when the scan stopped early and @ref value is partial.
+		 *
+		 * Set when the scan reached @c CONFIG_ZDB_TS_MAX_AGG_POINTS while
+		 * matching samples remained. Never set for ::ZDB_TS_AGG_COUNT,
+		 * which is not capped.
+		 */
+		bool truncated;
 	} zdb_ts_agg_result_t;
 
 	/**
@@ -839,12 +847,24 @@ extern "C"
 	 *
 	 * Covers flushed records plus samples still in the ingest buffer.
 	 *
+	 * ::ZDB_TS_AGG_MIN, ::ZDB_TS_AGG_MAX, ::ZDB_TS_AGG_AVG and
+	 * ::ZDB_TS_AGG_SUM scan at most @c CONFIG_ZDB_TS_MAX_AGG_POINTS samples;
+	 * if more matched, the result is computed from that prefix and
+	 * zdb_ts_agg_result_t::truncated is set. They report
+	 * ::ZDB_ERR_NOT_FOUND when nothing matched, since they have no value to
+	 * return.
+	 *
+	 * ::ZDB_TS_AGG_COUNT is neither capped nor truncated, and reports an
+	 * empty window as ::ZDB_OK with `points == 0`. Counting every sample in
+	 * the stream (an unbounded @p window) reads no payloads.
+	 *
 	 * @param ts         Open stream handle.
 	 * @param window     Inclusive timestamp window (::ZDB_TS_WINDOW_ALL for everything).
 	 * @param agg        Aggregation function.
 	 * @param out_result Result; `points == 0` means no samples matched.
 	 * @retval ZDB_OK              Success.
 	 * @retval ZDB_ERR_INVAL       NULL argument or unknown @p agg.
+	 * @retval ZDB_ERR_NOT_FOUND   No samples matched (value-bearing aggregates only).
 	 * @retval ZDB_ERR_UNSUPPORTED Backend cannot aggregate (FCB).
 	 * @retval ZDB_ERR_IO          Backend read failure.
 	 */

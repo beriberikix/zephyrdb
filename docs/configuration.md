@@ -30,10 +30,13 @@ This page covers the complete option surface, grouped as in the Kconfig menus.
 - `CONFIG_ZDB_SCAN_YIELD_EVERY_N` (default 64): cooperative yield interval
   for long scans
 - `CONFIG_ZDB_CORE_SLAB_BLOCK_SIZE` / `CONFIG_ZDB_CORE_SLAB_BLOCK_COUNT`
-  (defaults 128 / 16): core context allocations
+  (defaults 128 / 16, block size 512 with the FCB TS backend): core context
+  allocations. The block size must hold the time-series core context; the
+  build asserts this, so a too-small value fails to compile.
 - `CONFIG_ZDB_CURSOR_SLAB_BLOCK_SIZE` / `CONFIG_ZDB_CURSOR_SLAB_BLOCK_COUNT`
-  (defaults 96 / 8): cursor contexts; the block count bounds concurrently
-  open cursors
+  (defaults 128 / 8): cursor contexts; the block count bounds concurrently
+  open cursors. The block size must hold a time-series cursor context (which
+  is larger on 64-bit targets) and is likewise build-asserted.
 
 ## KV Boundaries
 
@@ -46,7 +49,9 @@ This page covers the complete option surface, grouped as in the Kconfig menus.
 - `CONFIG_ZDB_TS_STREAM_NAME_MAX_LEN` (default 24)
 - `CONFIG_ZDB_TS_INGEST_BUFFER_BYTES` (default 1024, LittleFS): RAM staging
   before flush
-- `CONFIG_ZDB_TS_MAX_AGG_POINTS` (default 4096, LittleFS): aggregation scan cap
+- `CONFIG_ZDB_TS_MAX_AGG_POINTS` (default 4096, LittleFS): scan cap for
+  MIN/MAX/AVG/SUM. Reaching it sets `result.truncated` rather than silently
+  returning a partial answer. `ZDB_TS_AGG_COUNT` ignores this cap.
 - `CONFIG_ZDB_TS_INGEST_SLAB_BLOCK_SIZE` / `CONFIG_ZDB_TS_INGEST_SLAB_BLOCK_COUNT`
   (defaults 64 / 32)
 - `CONFIG_ZDB_TS_AUTO_RECOVER_ON_OPEN` (default y, LittleFS): scan and

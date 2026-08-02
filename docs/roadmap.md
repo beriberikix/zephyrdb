@@ -15,11 +15,6 @@ reverse traversal, which remains below.
   post-firmware-update merge: new defaults appear, user-modified values
   survive. (Handling removed/renamed/retyped keys would additionally need a
   defaults-schema version; defer until needed.)
-- **TS COUNT correctness and cost** — `ZDB_TS_AGG_COUNT` exists but decodes
-  every payload and silently truncates at `CONFIG_ZDB_TS_MAX_AGG_POINTS`,
-  returning a low count as if complete. Report or remove the truncation for
-  COUNT, and count fixed-size records without payload decode (full-window
-  count on the file backend is `size / record_size`).
 - **KV string type convenience API** — Dedicated string get/set wrappers over
   the raw blob API (store NUL, guarantee termination on read). Trivial;
   filler work.

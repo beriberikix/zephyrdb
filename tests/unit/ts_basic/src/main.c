@@ -265,8 +265,15 @@ ZTEST(ts_suite, test_ts_query_aggregate_window)
 	zassert_equal(rc, ZDB_OK, "windowed count failed: %d", rc);
 	zassert_equal(result.points, 3U, "expected 3 in-window points, got %u", result.points);
 
+	/* Zero is a real answer for COUNT; only the value-bearing aggregates
+	 * have nothing to report on an empty window.
+	 */
 	rc = zdb_ts_query_aggregate(&ts, empty, ZDB_TS_AGG_COUNT, &result);
-	zassert_equal(rc, ZDB_ERR_NOT_FOUND, "empty window should be NOT_FOUND, got %d", rc);
+	zassert_equal(rc, ZDB_OK, "empty-window count should succeed, got %d", rc);
+	zassert_equal(result.points, 0U, "expected 0 in-window points, got %u", result.points);
+
+	rc = zdb_ts_query_aggregate(&ts, empty, ZDB_TS_AGG_SUM, &result);
+	zassert_equal(rc, ZDB_ERR_NOT_FOUND, "empty-window sum should be NOT_FOUND, got %d", rc);
 
 	zdb_ts_close(&ts);
 }
