@@ -415,6 +415,36 @@ zdb_status_t zdb_cursor_reset(zdb_cursor_t *cursor)
 	cursor->current.data = NULL;
 	cursor->current.len = 0U;
 
+#if defined(CONFIG_ZDB_TS) && (CONFIG_ZDB_TS)
+	/*
+	 * Zeroing the public fields alone leaves the backend read position
+	 * where the last walk ended, so a reset cursor yielded nothing. Rewind
+	 * the implementation state too.
+	 */
+	if ((cursor->model == ZDB_MODEL_TS) && (cursor->impl != NULL)) {
+		struct zdb_ts_cursor_ctx *ctx = (struct zdb_ts_cursor_ctx *)cursor->impl;
+
+		ctx->ram_offset = 0U;
+#if ZDB_TS_USE_LITTLEFS
+		ctx->file_done = false;
+		ctx->file_offset = ctx->descending ? ctx->file_size
+						   : sizeof(struct zdb_ts_stream_header);
+		if (ctx->file_open) {
+			int rc = fs_seek(&ctx->file, (off_t)ctx->file_offset, FS_SEEK_SET);
+
+			if (rc < 0) {
+				return zdb_status_from_errno(rc);
+			}
+		}
+#endif
+#if ZDB_TS_USE_FCB
+		/* The FCB walk restarts from the oldest entry on the next read. */
+		ctx->fcb_started = false;
+		ctx->file_done = true;
+#endif
+	}
+#endif
+
 	return ZDB_OK;
 }
 

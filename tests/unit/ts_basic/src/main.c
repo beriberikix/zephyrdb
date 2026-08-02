@@ -13,6 +13,7 @@
 #include <zephyr/kernel.h>
 #include <zephyr/ztest.h>
 #include <zephyr/fs/fs.h>
+#include <zephyr/sys/byteorder.h>
 #include <string.h>
 
 #include "zephyrdb.h"
@@ -448,3 +449,168 @@ ZTEST(ts_suite, test_ts_sample_export_flatbuffer)
 	zassert_true(out_len > 0U, "export produced empty output");
 }
 #endif /* CONFIG_ZDB_FLATBUFFERS */
+
+/* Reset must rewind the backend read position, not just the public fields. */
+ZTEST(ts_suite, test_ts_cursor_reset_rewinds)
+{
+	zdb_ts_t ts;
+	const int64_t values[] = {10, 20, 30};
+	zdb_cursor_t cursor;
+	zdb_bytes_t record;
+	size_t first_pass = 0U;
+	size_t second_pass = 0U;
+
+	zassert_equal(zdb_ts_open(&g_db, "t_reset", &ts), ZDB_OK, "open failed");
+	ts_append_fixed(&ts, values, ARRAY_SIZE(values), 1000U);
+	zassert_equal(zdb_ts_flush_sync(&ts, K_SECONDS(2)), ZDB_OK, "flush failed");
+
+	zassert_equal(zdb_ts_cursor_open(&ts, ZDB_TS_WINDOW_ALL, NULL, NULL, &cursor), ZDB_OK,
+		      "cursor open failed");
+
+	while (zdb_cursor_next(&cursor, &record) == ZDB_OK) {
+		first_pass++;
+	}
+	zassert_equal(first_pass, ARRAY_SIZE(values), "first pass saw %zu", first_pass);
+
+	zassert_equal(zdb_cursor_reset(&cursor), ZDB_OK, "reset failed");
+
+	while (zdb_cursor_next(&cursor, &record) == ZDB_OK) {
+		second_pass++;
+	}
+	zassert_equal(second_pass, ARRAY_SIZE(values), "reset cursor re-yielded %zu", second_pass);
+
+	(void)zdb_cursor_close(&cursor);
+	(void)zdb_ts_close(&ts);
+}
+
+/* Descending order must be the exact reverse of ascending. */
+ZTEST(ts_suite, test_ts_cursor_descending_reverses_order)
+{
+	zdb_ts_t ts;
+	const int64_t values[] = {1, 2, 3, 4, 5};
+	zdb_cursor_t cursor;
+	zdb_bytes_t record;
+	int64_t seen[ARRAY_SIZE(values)];
+	size_t count = 0U;
+
+	zassert_equal(zdb_ts_open(&g_db, "t_desc", &ts), ZDB_OK, "open failed");
+	ts_append_fixed(&ts, values, ARRAY_SIZE(values), 1000U);
+	zassert_equal(zdb_ts_flush_sync(&ts, K_SECONDS(2)), ZDB_OK, "flush failed");
+
+	zassert_equal(zdb_ts_cursor_open_desc(&ts, ZDB_TS_WINDOW_ALL, NULL, NULL, &cursor), ZDB_OK,
+		      "descending cursor open failed");
+
+	while ((count < ARRAY_SIZE(seen)) && (zdb_cursor_next(&cursor, &record) == ZDB_OK)) {
+		struct {
+			uint32_t magic_le;
+			uint16_t version_le;
+			uint16_t reserved_le;
+			uint64_t ts_ms_le;
+			uint64_t value_le;
+			uint32_t crc_le;
+		} __packed rec;
+
+		zassert_equal(record.len, sizeof(rec), "unexpected record size");
+		(void)memcpy(&rec, record.data, sizeof(rec));
+		seen[count] = (int64_t)sys_le64_to_cpu(rec.value_le);
+		count++;
+	}
+
+	zassert_equal(count, ARRAY_SIZE(values), "descending yielded %zu records", count);
+	for (size_t i = 0U; i < count; i++) {
+		zassert_equal(seen[i], values[ARRAY_SIZE(values) - 1U - i],
+			      "position %zu: expected %lld, got %lld", i,
+			      (long long)values[ARRAY_SIZE(values) - 1U - i], (long long)seen[i]);
+	}
+
+	(void)zdb_cursor_close(&cursor);
+	(void)zdb_ts_close(&ts);
+}
+
+/* Unflushed samples are the newest, so a reverse walk must see them first. */
+ZTEST(ts_suite, test_ts_cursor_descending_covers_unflushed)
+{
+	zdb_ts_t ts;
+	const int64_t flushed[] = {1, 2};
+	const int64_t buffered[] = {3};
+	zdb_cursor_t cursor;
+	zdb_bytes_t record;
+	int64_t first_value = 0;
+	size_t count = 0U;
+
+	zassert_equal(zdb_ts_open(&g_db, "t_desc_ram", &ts), ZDB_OK, "open failed");
+	ts_append_fixed(&ts, flushed, ARRAY_SIZE(flushed), 1000U);
+	zassert_equal(zdb_ts_flush_sync(&ts, K_SECONDS(2)), ZDB_OK, "flush failed");
+	ts_append_fixed(&ts, buffered, ARRAY_SIZE(buffered), 1010U);
+
+	zassert_equal(zdb_ts_cursor_open_desc(&ts, ZDB_TS_WINDOW_ALL, NULL, NULL, &cursor), ZDB_OK,
+		      "descending cursor open failed");
+
+	while (zdb_cursor_next(&cursor, &record) == ZDB_OK) {
+		struct {
+			uint32_t magic_le;
+			uint16_t version_le;
+			uint16_t reserved_le;
+			uint64_t ts_ms_le;
+			uint64_t value_le;
+			uint32_t crc_le;
+		} __packed rec;
+
+		(void)memcpy(&rec, record.data, sizeof(rec));
+		if (count == 0U) {
+			first_value = (int64_t)sys_le64_to_cpu(rec.value_le);
+		}
+		count++;
+	}
+
+	zassert_equal(count, ARRAY_SIZE(flushed) + ARRAY_SIZE(buffered),
+		      "descending missed records: %zu", count);
+	zassert_equal(first_value, 3, "unflushed sample not returned first: %lld",
+		      (long long)first_value);
+
+	(void)zdb_cursor_close(&cursor);
+	(void)zdb_ts_close(&ts);
+}
+
+/* Window filtering applies in reverse too. */
+ZTEST(ts_suite, test_ts_cursor_descending_honours_window)
+{
+	zdb_ts_t ts;
+	const int64_t values[] = {1, 2, 3, 4, 5};
+	zdb_ts_window_t inner = {.from_ts_ms = 1001U, .to_ts_ms = 1003U};
+	zdb_cursor_t cursor;
+	zdb_bytes_t record;
+	size_t count = 0U;
+
+	zassert_equal(zdb_ts_open(&g_db, "t_desc_win", &ts), ZDB_OK, "open failed");
+	ts_append_fixed(&ts, values, ARRAY_SIZE(values), 1000U);
+	zassert_equal(zdb_ts_flush_sync(&ts, K_SECONDS(2)), ZDB_OK, "flush failed");
+
+	zassert_equal(zdb_ts_cursor_open_desc(&ts, inner, NULL, NULL, &cursor), ZDB_OK,
+		      "descending cursor open failed");
+
+	while (zdb_cursor_next(&cursor, &record) == ZDB_OK) {
+		count++;
+	}
+	zassert_equal(count, 3U, "window not honoured in reverse: %zu", count);
+
+	(void)zdb_cursor_close(&cursor);
+	(void)zdb_ts_close(&ts);
+}
+
+/* An empty stream terminates immediately in reverse. */
+ZTEST(ts_suite, test_ts_cursor_descending_empty_stream)
+{
+	zdb_ts_t ts;
+	zdb_cursor_t cursor;
+	zdb_bytes_t record;
+
+	zassert_equal(zdb_ts_open(&g_db, "t_desc_empty", &ts), ZDB_OK, "open failed");
+	zassert_equal(zdb_ts_cursor_open_desc(&ts, ZDB_TS_WINDOW_ALL, NULL, NULL, &cursor), ZDB_OK,
+		      "descending cursor open failed");
+	zassert_equal(zdb_cursor_next(&cursor, &record), ZDB_ERR_NOT_FOUND,
+		      "empty stream yielded a record");
+
+	(void)zdb_cursor_close(&cursor);
+	(void)zdb_ts_close(&ts);
+}

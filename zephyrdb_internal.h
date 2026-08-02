@@ -127,8 +127,15 @@ struct zdb_ts_cursor_ctx {
 	size_t file_offset;
 	size_t ram_offset;
 	bool file_done;
+	/*
+	 * Direction is held here rather than in zdb_cursor_t::flags, which
+	 * zdb_cursor_reset() clears.
+	 */
+	bool descending;
 #if ZDB_TS_USE_LITTLEFS
 	struct fs_file_t file;
+	/* Size at open, so a descending walk knows where to start. */
+	size_t file_size;
 	bool file_open;
 #endif
 #if ZDB_TS_USE_FCB
