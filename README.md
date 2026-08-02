@@ -5,18 +5,31 @@
 
 Embedded multi-model database for Zephyr RTOS, designed for memory-constrained systems.
 
-## What Is Implemented
+## Features
 
-- Static-slab IO buffers for KV/TS data paths (the KV session index and
-  document fields use the kernel heap)
-- Key-value model with NVS or ZMS backends, namespaced records with
-  collision rejection
-- Time-series model with LittleFS or FCB backends
-- Document model with typed fields and query APIs (filesystem-backed)
-- Durability helpers: integrity checks, recovery, stats export
-- Optional FlatBuffers export helper for TS samples
-- Optional KV event emitter/listener hooks
-- Optional zbus adapter for KV event publication
+**Key-value** — namespaced records on NVS or ZMS, with byte and string APIs.
+A defaults table seeds product parameters at init and merges in newly added
+keys after a firmware update without disturbing values the device changed.
+Iteration covers every stored key, including those written before the current
+boot, and a namespace can be reset to its defaults for factory reset.
+
+**Time-series** — append-only streams on LittleFS or FCB, buffered in RAM and
+flushed in the background. Cursors walk a time window in either direction,
+aggregates compute MIN/MAX/AVG/SUM/COUNT, and a consumed watermark records how
+far a forwarder has processed so a restart resumes rather than replays.
+Streams can be bounded, discarding the oldest samples to keep a recent window,
+and can store compact records that hold about 1.75x the samples per byte.
+Several streams can be open at once.
+
+**Documents** — typed fields (integer, double, string, bool, bytes) with
+equality-filter queries, stored on a filesystem. Saves are atomic and
+integrity-checked end to end, so an interrupted write leaves the previous
+document intact rather than a truncated one.
+
+**Across all models** — bounded, statically sized allocation on the core and
+time-series paths; corruption detection with recovery; optional mutation
+events, with a zbus adapter; optional FlatBuffers export for transport; and a
+`zdb` shell command tree.
 
 ## Quick Start
 
@@ -28,7 +41,7 @@ manifest:
     - name: zephyrdb
       url: https://github.com/beriberikix/zephyrdb
       path: modules/lib/zephyrdb
-      revision: main
+      revision: v0.5.0
 ```
 
 ### 2. Enable in prj.conf
