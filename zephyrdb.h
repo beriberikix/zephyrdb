@@ -1034,6 +1034,34 @@ extern "C"
 									zdb_cursor_t *out_cursor);
 
 	/**
+	 * @brief Open a cursor that walks the stream newest-first.
+	 *
+	 * The reverse of zdb_ts_cursor_open(): unflushed samples come first,
+	 * newest to oldest, then stored records from the end of the stream
+	 * backwards. Window and predicate filtering are unchanged.
+	 *
+	 * Order follows storage, which matches timestamp order for the usual
+	 * case of samples appended as they are produced. A stream appended out
+	 * of order is returned in reverse append order, not sorted.
+	 *
+	 * Records appended after the cursor is opened are not visible to it.
+	 *
+	 * @param ts            Open stream handle.
+	 * @param window        Inclusive timestamp window (::ZDB_TS_WINDOW_ALL for everything).
+	 * @param predicate     Optional filter, or NULL.
+	 * @param predicate_ctx Context passed to @p predicate.
+	 * @param out_cursor    Cursor to initialize (close with zdb_cursor_close()).
+	 * @retval ZDB_OK              Success.
+	 * @retval ZDB_ERR_INVAL       NULL argument.
+	 * @retval ZDB_ERR_NOMEM       No cursor slab block was free.
+	 * @retval ZDB_ERR_UNSUPPORTED Backend cannot walk backwards (FCB).
+	 * @retval ZDB_ERR_IO          Backend read failure.
+	 */
+	zdb_status_t zdb_ts_cursor_open_desc(zdb_ts_t *ts, zdb_ts_window_t window,
+										 zdb_predicate_fn predicate, void *predicate_ctx,
+										 zdb_cursor_t *out_cursor);
+
+	/**
 	 * @brief Fetch the next record from a cursor.
 	 *
 	 * Part of the core cursor framework; declared with the TS module

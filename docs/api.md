@@ -168,6 +168,7 @@ Publication is best-effort and never changes operation return values.
 - `zdb_ts_query_aggregate(ts, window, agg, out_result)` — MIN/MAX/AVG/SUM/COUNT
 - `zdb_ts_recover_stream(ts, out_truncated_bytes)`
 - `zdb_ts_cursor_open(ts, window, predicate, predicate_ctx, out_cursor)`
+- `zdb_ts_cursor_open_desc(ts, window, predicate, predicate_ctx, out_cursor)` — newest-first
 
 Helpers: `ZDB_TS_WINDOW_ALL` — a `zdb_ts_window_t` covering all timestamps.
 
@@ -177,7 +178,13 @@ Notes:
   different stream returns `ZDB_ERR_BUSY` until `zdb_deinit()`. Re-opening
   the active stream is allowed.
 - Cursors iterate flushed records from storage plus samples still in the
-  RAM ingest buffer.
+  RAM ingest buffer. `zdb_cursor_reset` rewinds a cursor so it can be walked
+  again.
+- `zdb_ts_cursor_open_desc` walks the same records newest-first: unflushed
+  samples first, then stored records from the end backwards. Order follows
+  storage, which matches timestamp order when samples are appended as they are
+  produced; a stream appended out of order comes back in reverse append order,
+  not sorted. Unsupported on FCB, which can only walk forward.
 - `zdb_ts_query_aggregate` scans at most `CONFIG_ZDB_TS_MAX_AGG_POINTS`
   samples for MIN/MAX/AVG/SUM; when more matched, the result covers only that
   prefix and `result.truncated` is set. Those aggregates return
@@ -191,7 +198,7 @@ Notes:
 - Backend differences (FCB): appends are written through synchronously, so
   `flush_*` are no-ops returning `ZDB_OK`; `zdb_ts_query_aggregate` returns
   `ZDB_ERR_UNSUPPORTED`; `zdb_ts_recover_stream` is a no-op reporting zero
-  truncated bytes.
+  truncated bytes; `zdb_ts_cursor_open_desc` returns `ZDB_ERR_UNSUPPORTED`.
 
 ## FlatBuffers Export Helper
 

@@ -434,6 +434,23 @@ static zdb_status_t zdb_ts_cursor_read_file_record(struct zdb_ts_cursor_ctx *cct
 		return ZDB_ERR_NOT_FOUND;
 	}
 
+	if (cctx->descending) {
+		/*
+		 * Step back one record and read it. Records are fixed size, so
+		 * the previous record always starts exactly one stride back;
+		 * the stream header bounds the walk.
+		 */
+		if (cctx->file_offset < (sizeof(struct zdb_ts_stream_header) +
+					 sizeof(cctx->cache))) {
+			return ZDB_ERR_NOT_FOUND;
+		}
+
+		cctx->file_offset -= sizeof(cctx->cache);
+		if (fs_seek(&cctx->file, (off_t)cctx->file_offset, FS_SEEK_SET) < 0) {
+			return ZDB_ERR_IO;
+		}
+	}
+
 	rd = fs_read(&cctx->file, &cctx->cache, sizeof(cctx->cache));
 
 	if (rd == 0) {
@@ -446,7 +463,14 @@ static zdb_status_t zdb_ts_cursor_read_file_record(struct zdb_ts_cursor_ctx *cct
 		return ZDB_ERR_CORRUPT;
 	}
 
-	cctx->file_offset += sizeof(cctx->cache);
+	if (cctx->descending) {
+		/* The read advanced the handle; leave the offset at this record. */
+		if (fs_seek(&cctx->file, (off_t)cctx->file_offset, FS_SEEK_SET) < 0) {
+			return ZDB_ERR_IO;
+		}
+	} else {
+		cctx->file_offset += sizeof(cctx->cache);
+	}
 	out_record->data = (const uint8_t *)&cctx->cache;
 	out_record->len = sizeof(cctx->cache);
 	return ZDB_OK;
@@ -1226,9 +1250,9 @@ zdb_status_t zdb_ts_query_aggregate(zdb_ts_t *ts, zdb_ts_window_t window,
 #endif
 }
 
-zdb_status_t zdb_ts_cursor_open(zdb_ts_t *ts, zdb_ts_window_t window,
+static zdb_status_t zdb_ts_cursor_open_dir(zdb_ts_t *ts, zdb_ts_window_t window,
 			zdb_predicate_fn predicate, void *predicate_ctx,
-			zdb_cursor_t *out_cursor)
+			bool descending, zdb_cursor_t *out_cursor)
 {
 	struct zdb_ts_cursor_ctx *ctx = NULL;
 	zdb_status_t rc;
@@ -1236,6 +1260,13 @@ zdb_status_t zdb_ts_cursor_open(zdb_ts_t *ts, zdb_ts_window_t window,
 	if ((ts == NULL) || (ts->db == NULL) || (out_cursor == NULL)) {
 		return ZDB_ERR_INVAL;
 	}
+
+#if ZDB_TS_USE_FCB
+	if (descending) {
+		/* fcb_getnext() only walks forward. */
+		return ZDB_ERR_UNSUPPORTED;
+	}
+#endif
 
 #if ZDB_TS_USE_LITTLEFS
 	rc = zdb_ts_ensure_stream_header(ts->db, ts->stream_name);
@@ -1253,6 +1284,7 @@ zdb_status_t zdb_ts_cursor_open(zdb_ts_t *ts, zdb_ts_window_t window,
 	ctx->db = ts->db;
 	ctx->stream_name = ts->stream_name;
 	ctx->window = window;
+	ctx->descending = descending;
 	ctx->file_offset = sizeof(struct zdb_ts_stream_header);
 	ctx->ram_offset = 0U;
 	ctx->file_done = false;
@@ -1275,6 +1307,28 @@ zdb_status_t zdb_ts_cursor_open(zdb_ts_t *ts, zdb_ts_window_t window,
 			return zdb_status_from_errno(open_rc);
 		}
 		ctx->file_open = true;
+
+		/*
+		 * Record the size once: a descending walk starts at the end and
+		 * steps back a record at a time, and reset needs the same
+		 * anchor. Records appended after the cursor opened are not
+		 * visible to it either way.
+		 */
+		{
+			off_t end = fs_seek(&ctx->file, 0, FS_SEEK_END);
+
+			if (end < 0) {
+				(void)fs_close(&ctx->file);
+				k_mem_slab_free(ts->db->cursor_slab, ctx);
+				return zdb_status_from_errno((int)end);
+			}
+			ctx->file_size = (size_t)fs_tell(&ctx->file);
+		}
+
+		if (descending) {
+			ctx->file_offset = ctx->file_size;
+		}
+
 		open_rc = fs_seek(&ctx->file,
 				  (off_t)ctx->file_offset,
 				  FS_SEEK_SET);
@@ -1305,15 +1359,113 @@ zdb_status_t zdb_ts_cursor_open(zdb_ts_t *ts, zdb_ts_window_t window,
 	return zdb_cursor_reset(out_cursor);
 }
 
+zdb_status_t zdb_ts_cursor_open(zdb_ts_t *ts, zdb_ts_window_t window,
+			zdb_predicate_fn predicate, void *predicate_ctx,
+			zdb_cursor_t *out_cursor)
+{
+	return zdb_ts_cursor_open_dir(ts, window, predicate, predicate_ctx, false, out_cursor);
+}
+
+zdb_status_t zdb_ts_cursor_open_desc(zdb_ts_t *ts, zdb_ts_window_t window,
+			zdb_predicate_fn predicate, void *predicate_ctx,
+			zdb_cursor_t *out_cursor)
+{
+	return zdb_ts_cursor_open_dir(ts, window, predicate, predicate_ctx, true, out_cursor);
+}
+
+#if ZDB_TS_USE_LITTLEFS
+/*
+ * Walk the unflushed ingest buffer.
+ *
+ * Ascending order visits it after the file (it holds the newest samples);
+ * descending visits it first and steps backwards through it. Returns
+ * ZDB_ERR_NOT_FOUND once the buffer is exhausted in the current direction.
+ */
+static zdb_status_t zdb_ts_cursor_next_ram(zdb_cursor_t *cursor,
+					   struct zdb_ts_cursor_ctx *cctx,
+					   zdb_bytes_t *out_record)
+{
+	struct zdb_ts_core_ctx *tctx;
+	struct zdb_ts_record_i64 rec;
+	zdb_bytes_t candidate;
+	zdb_status_t lock_rc;
+
+	tctx = zdb_ts_ctx_get_or_alloc(cctx->db);
+	if ((tctx == NULL) || (tctx->ingest_buf == NULL)) {
+		return ZDB_ERR_INVAL;
+	}
+	if ((tctx->active_stream != NULL) && (strcmp(tctx->active_stream, cctx->stream_name) != 0)) {
+		return ZDB_ERR_BUSY;
+	}
+
+	lock_rc = zdb_lock_read(cctx->db);
+	if (lock_rc != ZDB_OK) {
+		return lock_rc;
+	}
+
+	while ((cctx->ram_offset + sizeof(rec)) <= tctx->ingest_used) {
+		uint64_t ts_ms;
+		int64_t val;
+		zdb_status_t dec_rc;
+		size_t buf_off;
+
+		/*
+		 * ram_offset counts bytes already consumed in the walk's own
+		 * direction, so a descending walk maps it to an offset measured
+		 * back from the end of the buffer.
+		 */
+		buf_off = cctx->descending
+				  ? (tctx->ingest_used - cctx->ram_offset - sizeof(rec))
+				  : cctx->ram_offset;
+
+		candidate.data = &tctx->ingest_buf[buf_off];
+		candidate.len = sizeof(rec);
+		(void)memcpy(&rec, candidate.data, sizeof(rec));
+		dec_rc = zdb_ts_record_decode(cctx->db, &rec, &ts_ms, &val);
+		if (dec_rc == ZDB_ERR_UNSUPPORTED) {
+			cctx->ram_offset += sizeof(rec);
+			continue;
+		}
+		if (dec_rc != ZDB_OK) {
+			zdb_unlock_read(cctx->db);
+			return dec_rc;
+		}
+		ARG_UNUSED(val);
+		cctx->ram_offset += sizeof(rec);
+		cursor->iter_count++;
+
+		if ((CONFIG_ZDB_SCAN_YIELD_EVERY_N > 0) &&
+		    ((cursor->iter_count % CONFIG_ZDB_SCAN_YIELD_EVERY_N) == 0U)) {
+			k_yield();
+		}
+
+		if (!zdb_ts_window_match(cctx->window, ts_ms)) {
+			continue;
+		}
+
+		if (!zdb_ts_predicate_match(cursor, &candidate)) {
+			continue;
+		}
+
+		*out_record = candidate;
+		cursor->current = candidate;
+		zdb_unlock_read(cctx->db);
+		return ZDB_OK;
+	}
+
+	zdb_unlock_read(cctx->db);
+
+	out_record->data = NULL;
+	out_record->len = 0U;
+	return ZDB_ERR_NOT_FOUND;
+}
+#endif /* ZDB_TS_USE_LITTLEFS */
+
 zdb_status_t zdb_cursor_next(zdb_cursor_t *cursor, zdb_bytes_t *out_record)
 {
 	struct zdb_ts_cursor_ctx *cctx;
-	struct zdb_ts_core_ctx *tctx;
 	zdb_bytes_t candidate;
 	struct zdb_ts_record_i64 rec;
-#if ZDB_TS_USE_LITTLEFS
-	zdb_status_t lock_rc;
-#endif
 
 	if ((cursor == NULL) || (out_record == NULL)) {
 		return ZDB_ERR_INVAL;
@@ -1379,6 +1531,15 @@ zdb_status_t zdb_cursor_next(zdb_cursor_t *cursor, zdb_bytes_t *out_record)
 #endif
 
 #if ZDB_TS_USE_LITTLEFS
+	if (cctx->descending) {
+		/* The buffer holds the newest samples, so it leads a reverse walk. */
+		zdb_status_t ram_rc = zdb_ts_cursor_next_ram(cursor, cctx, out_record);
+
+		if (ram_rc != ZDB_ERR_NOT_FOUND) {
+			return ram_rc;
+		}
+	}
+
 	while (!cctx->file_done) {
 		uint64_t ts_ms;
 		int64_t val;
@@ -1422,60 +1583,9 @@ zdb_status_t zdb_cursor_next(zdb_cursor_t *cursor, zdb_bytes_t *out_record)
 		return ZDB_OK;
 	}
 
-	tctx = zdb_ts_ctx_get_or_alloc(cctx->db);
-	if ((tctx == NULL) || (tctx->ingest_buf == NULL)) {
-		return ZDB_ERR_INVAL;
+	if (!cctx->descending) {
+		return zdb_ts_cursor_next_ram(cursor, cctx, out_record);
 	}
-	if ((tctx->active_stream != NULL) && (strcmp(tctx->active_stream, cctx->stream_name) != 0)) {
-		return ZDB_ERR_BUSY;
-	}
-
-	lock_rc = zdb_lock_read(cctx->db);
-	if (lock_rc != ZDB_OK) {
-		return lock_rc;
-	}
-
-	while ((cctx->ram_offset + sizeof(rec)) <= tctx->ingest_used) {
-		uint64_t ts_ms;
-		int64_t val;
-		zdb_status_t dec_rc;
-
-		candidate.data = &tctx->ingest_buf[cctx->ram_offset];
-		candidate.len = sizeof(rec);
-		(void)memcpy(&rec, candidate.data, sizeof(rec));
-		dec_rc = zdb_ts_record_decode(cctx->db, &rec, &ts_ms, &val);
-		if (dec_rc == ZDB_ERR_UNSUPPORTED) {
-			cctx->ram_offset += sizeof(rec);
-			continue;
-		}
-		if (dec_rc != ZDB_OK) {
-			zdb_unlock_read(cctx->db);
-			return dec_rc;
-		}
-		ARG_UNUSED(val);
-		cctx->ram_offset += sizeof(rec);
-		cursor->iter_count++;
-
-		if ((CONFIG_ZDB_SCAN_YIELD_EVERY_N > 0) &&
-		    ((cursor->iter_count % CONFIG_ZDB_SCAN_YIELD_EVERY_N) == 0U)) {
-			k_yield();
-		}
-
-		if (!zdb_ts_window_match(cctx->window, ts_ms)) {
-			continue;
-		}
-
-		if (!zdb_ts_predicate_match(cursor, &candidate)) {
-			continue;
-		}
-
-		*out_record = candidate;
-		cursor->current = candidate;
-		zdb_unlock_read(cctx->db);
-		return ZDB_OK;
-	}
-
-	zdb_unlock_read(cctx->db);
 
 	out_record->data = NULL;
 	out_record->len = 0U;

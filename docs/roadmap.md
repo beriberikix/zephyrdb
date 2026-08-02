@@ -22,9 +22,6 @@ reverse traversal, which remains below.
   its own file/FCB region, slab-sized via Kconfig. Subsumes the earlier
   "multi-stream coordination APIs" item — coordination can follow if a
   concrete need appears.
-- **TS reverse cursor traversal** — Descending iteration; easy on the file
-  backend (fixed-size records, seek backward), initially unsupported on FCB
-  (forward-walk API).
 - **FlatBuffers document export** — `zdb_doc_export_flatbuffer()` is a stub
   returning `ZDB_ERR_UNSUPPORTED`; the flatcc dependency is already available
   as a sibling Zephyr module (`flatcc-zephyr`).
