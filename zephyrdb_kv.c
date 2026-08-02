@@ -109,7 +109,10 @@ static size_t zdb_kv_record_build(uint8_t *buf, const char *namespace_name,
 	buf[2] = (uint8_t)key_len;
 	(void)memcpy(&buf[ZDB_KV_REC_HDR_SIZE], namespace_name, ns_len);
 	(void)memcpy(&buf[ZDB_KV_REC_HDR_SIZE + ns_len], key, key_len);
-	(void)memcpy(&buf[ZDB_KV_REC_HDR_SIZE + ns_len + key_len], value, value_len);
+	/* A zero-length value may come with a NULL pointer; memcpy would be UB. */
+	if (value_len > 0U) {
+		(void)memcpy(&buf[ZDB_KV_REC_HDR_SIZE + ns_len + key_len], value, value_len);
+	}
 
 	return ZDB_KV_REC_HDR_SIZE + ns_len + key_len + value_len;
 }
@@ -391,8 +394,13 @@ zdb_status_t zdb_kv_set(zdb_kv_t *kv, const char *key, const void *value, size_t
 	size_t total_len;
 	bool slot_matched = false;
 
+	/*
+	 * A zero-length value is allowed, as documented; the record still
+	 * carries its header, namespace and key, so nothing is ambiguous on
+	 * disk. Only a NULL pointer with a non-zero length is a caller error.
+	 */
 	if ((kv == NULL) || (kv->db == NULL) || (kv->namespace_name == NULL) ||
-	    (value == NULL) || (value_len == 0U) || !zdb_key_valid(key)) {
+	    ((value == NULL) && (value_len > 0U)) || !zdb_key_valid(key)) {
 		return ZDB_ERR_INVAL;
 	}
 

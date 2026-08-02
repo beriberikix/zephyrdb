@@ -602,8 +602,8 @@ extern "C"
 	 *
 	 * @param kv        Open namespace handle.
 	 * @param key       Key string, at most @c CONFIG_ZDB_MAX_KEY_LEN bytes.
-	 * @param value     Value bytes (may be zero-length).
-	 * @param value_len Value length in bytes.
+	 * @param value     Value bytes; may be NULL when @p value_len is 0.
+	 * @param value_len Value length in bytes; 0 stores an empty value.
 	 * @retval ZDB_OK            Success (including a byte-identical rewrite).
 	 * @retval ZDB_ERR_INVAL     NULL argument or over-long key.
 	 * @retval ZDB_ERR_NOMEM     Record exceeds the KV I/O slab block size.

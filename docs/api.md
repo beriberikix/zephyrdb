@@ -77,6 +77,7 @@ Notes:
 - `zdb_kv_get` never fails on a too-small output buffer: it copies up to
   `out_capacity` bytes and reports the full stored length in `*out_len`.
   Compare `*out_len` against your capacity to detect truncation.
+- A zero-length value is valid; `value` may be NULL when `value_len` is 0.
 - Records written by pre-v2 builds are treated as absent (reads and deletes
   report `ZDB_ERR_NOT_FOUND`); a set reclaims the slot.
 - The iterator walks keys set/deleted during the current session (RAM index,

@@ -592,3 +592,26 @@ ZTEST(kv_suite, test_kv_old_format_record_ignored)
 
 	zdb_kv_close(&kv);
 }
+
+/* zdb_kv_set has always documented zero-length values as allowed. */
+ZTEST(kv_suite, test_kv_set_zero_length_value)
+{
+	zdb_kv_t kv;
+	uint8_t out[4];
+	size_t out_len = 99U;
+	zdb_status_t rc = zdb_kv_open(&g_db, "ns_zero", &kv);
+
+	zassert_equal(rc, ZDB_OK, "open failed: %d", rc);
+
+	rc = zdb_kv_set(&kv, "flag", out, 0U);
+	zassert_equal(rc, ZDB_OK, "zero-length set rejected: %d", rc);
+
+	rc = zdb_kv_get(&kv, "flag", out, sizeof(out), &out_len);
+	zassert_equal(rc, ZDB_OK, "get failed: %d", rc);
+	zassert_equal(out_len, 0U, "expected zero length, got %zu", out_len);
+
+	/* NULL with a non-zero length is still a caller error. */
+	zassert_equal(zdb_kv_set(&kv, "bad", NULL, 4U), ZDB_ERR_INVAL);
+
+	zdb_kv_close(&kv);
+}
