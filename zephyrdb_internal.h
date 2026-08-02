@@ -146,6 +146,22 @@ struct zdb_ts_core_ctx {
 #endif
 };
 
+/*
+ * These contexts are carved out of fixed-size slab blocks, so a context that
+ * outgrows its block silently writes into the next one and corrupts the slab's
+ * free list. Both structures depend on pointer width and on the selected
+ * backend, so the sizes differ between targets; assert at build time rather
+ * than discovering it as a kernel assertion under load.
+ */
+#if defined(CONFIG_ZDB_CORE_SLAB_BLOCK_SIZE)
+BUILD_ASSERT(sizeof(struct zdb_ts_core_ctx) <= CONFIG_ZDB_CORE_SLAB_BLOCK_SIZE,
+	     "CONFIG_ZDB_CORE_SLAB_BLOCK_SIZE is too small for struct zdb_ts_core_ctx");
+#endif
+#if defined(CONFIG_ZDB_CURSOR_SLAB_BLOCK_SIZE)
+BUILD_ASSERT(sizeof(struct zdb_ts_cursor_ctx) <= CONFIG_ZDB_CURSOR_SLAB_BLOCK_SIZE,
+	     "CONFIG_ZDB_CURSOR_SLAB_BLOCK_SIZE is too small for struct zdb_ts_cursor_ctx");
+#endif
+
 #endif /* CONFIG_ZDB_TS */
 
 /* Event emission functions (non-static, shared across modules) */

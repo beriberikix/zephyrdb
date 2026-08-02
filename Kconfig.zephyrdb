@@ -97,7 +97,13 @@ config ZDB_SCAN_YIELD_EVERY_N
 config ZDB_CORE_SLAB_BLOCK_SIZE
 	int "Core slab block size (bytes)"
 	range 32 2048
+	default 512 if ZDB_TS_BACKEND_FCB
 	default 128
+	help
+	  Must be large enough to hold the time-series core context. The build
+	  asserts this, so a too-small value fails to compile rather than
+	  corrupting the slab at runtime. The FCB backend needs considerably
+	  more because the context embeds the FCB instance and its sector array.
 
 config ZDB_CORE_SLAB_BLOCK_COUNT
 	int "Core slab block count"
@@ -107,7 +113,12 @@ config ZDB_CORE_SLAB_BLOCK_COUNT
 config ZDB_CURSOR_SLAB_BLOCK_SIZE
 	int "Cursor slab block size (bytes)"
 	range 32 2048
-	default 96
+	default 128
+	help
+	  Must be large enough to hold a time-series cursor context, which
+	  embeds a record-sized staging buffer plus the backend's file or FCB
+	  handle. The build asserts this. 64-bit targets need more than 32-bit
+	  ones; the default covers both.
 
 config ZDB_CURSOR_SLAB_BLOCK_COUNT
 	int "Cursor slab block count"
