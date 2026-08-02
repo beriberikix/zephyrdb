@@ -699,3 +699,131 @@ ZTEST(kv_suite, test_kv_set_zero_length_value)
 
 	zdb_kv_close(&kv);
 }
+
+#if defined(CONFIG_ZDB_KV_PERSIST_INDEX) && (CONFIG_ZDB_KV_PERSIST_INDEX)
+/*
+ * Iteration must survive a reboot. zdb_deinit()/zdb_init() frees and rebuilds
+ * the heap index while the mounted backend keeps its contents, which is the
+ * same starting point a reboot produces.
+ *
+ * These cases assert persistent-index behaviour, so they are compiled out when
+ * CONFIG_ZDB_KV_PERSIST_INDEX=n selects session-only iteration.
+ */
+static void kv_reboot_cycle(void)
+{
+	zdb_status_t rc;
+
+	(void)zdb_deinit(&g_db);
+	rc = zdb_init(&g_db, &g_cfg);
+	zassert_equal(rc, ZDB_OK, "re-init failed: %d", rc);
+}
+
+static size_t kv_count_keys(const char *ns, bool *out_saw_a, bool *out_saw_b)
+{
+	zdb_kv_t kv;
+	zdb_kv_iter_t iter;
+	char key[CONFIG_ZDB_MAX_KEY_LEN + 1U];
+	size_t key_len = 0U;
+	uint32_t value = 0U;
+	size_t value_len = 0U;
+	size_t count = 0U;
+
+	zassert_equal(zdb_kv_open(&g_db, ns, &kv), ZDB_OK, "open failed");
+	zassert_equal(zdb_kv_iter_open(&kv, &iter), ZDB_OK, "iter open failed");
+
+	while (zdb_kv_iter_next(&iter, key, sizeof(key), &key_len, &value, sizeof(value),
+				&value_len) == ZDB_OK) {
+		count++;
+		if ((out_saw_a != NULL) && (strcmp(key, "alpha") == 0)) {
+			*out_saw_a = true;
+			zassert_equal(value, 1U, "alpha value mismatch: %u", value);
+		}
+		if ((out_saw_b != NULL) && (strcmp(key, "beta") == 0)) {
+			*out_saw_b = true;
+			zassert_equal(value, 2U, "beta value mismatch: %u", value);
+		}
+	}
+
+	(void)zdb_kv_iter_close(&iter);
+	(void)zdb_kv_close(&kv);
+	return count;
+}
+
+ZTEST(kv_suite, test_kv_iteration_survives_reinit)
+{
+	zdb_kv_t kv;
+	uint32_t a = 1U;
+	uint32_t b = 2U;
+	bool saw_a = false;
+	bool saw_b = false;
+	size_t count;
+
+	zassert_equal(zdb_kv_open(&g_db, "ns_persist", &kv), ZDB_OK, "open failed");
+	zassert_equal(zdb_kv_set(&kv, "alpha", &a, sizeof(a)), ZDB_OK, "set alpha failed");
+	zassert_equal(zdb_kv_set(&kv, "beta", &b, sizeof(b)), ZDB_OK, "set beta failed");
+	(void)zdb_kv_close(&kv);
+
+	kv_reboot_cycle();
+
+	count = kv_count_keys("ns_persist", &saw_a, &saw_b);
+	zassert_true(saw_a, "alpha not enumerated after re-init");
+	zassert_true(saw_b, "beta not enumerated after re-init");
+	zassert_equal(count, 2U, "expected 2 keys, got %zu", count);
+}
+
+/* The index is per-namespace-filtered, so a reboot must not blur namespaces. */
+ZTEST(kv_suite, test_kv_iteration_namespaces_stay_separate_after_reinit)
+{
+	zdb_kv_t kv;
+	uint32_t v = 7U;
+
+	zassert_equal(zdb_kv_open(&g_db, "ns_sep_one", &kv), ZDB_OK, "open failed");
+	zassert_equal(zdb_kv_set(&kv, "only_one", &v, sizeof(v)), ZDB_OK, "set failed");
+	(void)zdb_kv_close(&kv);
+
+	zassert_equal(zdb_kv_open(&g_db, "ns_sep_two", &kv), ZDB_OK, "open failed");
+	zassert_equal(zdb_kv_set(&kv, "only_two", &v, sizeof(v)), ZDB_OK, "set failed");
+	(void)zdb_kv_close(&kv);
+
+	kv_reboot_cycle();
+
+	zassert_equal(kv_count_keys("ns_sep_one", NULL, NULL), 1U, "ns_sep_one leaked keys");
+	zassert_equal(kv_count_keys("ns_sep_two", NULL, NULL), 1U, "ns_sep_two leaked keys");
+}
+
+/* A deleted key must not come back when the index is rebuilt. */
+ZTEST(kv_suite, test_kv_deleted_key_absent_after_reinit)
+{
+	zdb_kv_t kv;
+	uint32_t v = 5U;
+
+	zassert_equal(zdb_kv_open(&g_db, "ns_del_persist", &kv), ZDB_OK, "open failed");
+	zassert_equal(zdb_kv_set(&kv, "gone", &v, sizeof(v)), ZDB_OK, "set failed");
+	zassert_equal(zdb_kv_set(&kv, "stays", &v, sizeof(v)), ZDB_OK, "set failed");
+	zassert_equal(zdb_kv_delete(&kv, "gone"), ZDB_OK, "delete failed");
+	(void)zdb_kv_close(&kv);
+
+	kv_reboot_cycle();
+
+	zassert_equal(kv_count_keys("ns_del_persist", NULL, NULL), 1U,
+		      "deleted key resurrected by index rebuild");
+}
+
+/* Overwriting a value must not grow the index. */
+ZTEST(kv_suite, test_kv_overwrite_does_not_duplicate_index_entry)
+{
+	zdb_kv_t kv;
+	uint32_t v = 1U;
+
+	zassert_equal(zdb_kv_open(&g_db, "ns_dup", &kv), ZDB_OK, "open failed");
+	for (uint32_t i = 0U; i < 5U; i++) {
+		v = i;
+		zassert_equal(zdb_kv_set(&kv, "same", &v, sizeof(v)), ZDB_OK, "set %u failed", i);
+	}
+	(void)zdb_kv_close(&kv);
+
+	kv_reboot_cycle();
+
+	zassert_equal(kv_count_keys("ns_dup", NULL, NULL), 1U, "overwrite duplicated the key");
+}
+#endif /* CONFIG_ZDB_KV_PERSIST_INDEX */

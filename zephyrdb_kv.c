@@ -6,6 +6,8 @@
 #include <errno.h>
 #include <string.h>
 
+#include <zephyr/sys/byteorder.h>
+
 #if defined(CONFIG_ZDB_KV_BACKEND_NVS) && (CONFIG_ZDB_KV_BACKEND_NVS)
 #include <zephyr/kvss/nvs.h>
 #endif
@@ -13,7 +15,48 @@
 #include <zephyr/kvss/zms.h>
 #endif
 
-#define ZDB_KV_INDEX_MAX_ENTRIES 128U
+#ifndef CONFIG_ZDB_KV_INDEX_MAX_ENTRIES
+#define CONFIG_ZDB_KV_INDEX_MAX_ENTRIES 128
+#endif
+
+#define ZDB_KV_INDEX_MAX_ENTRIES ((size_t)CONFIG_ZDB_KV_INDEX_MAX_ENTRIES)
+
+#if defined(CONFIG_ZDB_KV_PERSIST_INDEX) && (CONFIG_ZDB_KV_PERSIST_INDEX)
+#define ZDB_KV_PERSIST_INDEX 1
+#else
+#define ZDB_KV_PERSIST_INDEX 0
+#endif
+
+/*
+ * Persisted key index.
+ *
+ * Enumerating keys by scanning the backend's ID space is not an option: NVS
+ * would need 65536 probes and ZMS 2^32. Instead the set of in-use record IDs
+ * is stored in one reserved record, and the (namespace, key) pair for each ID
+ * comes from the v2 record itself, which already carries both. Rebuilding is
+ * therefore one read per tracked key.
+ *
+ * On-disk index format (v1):
+ *   [tag: 0xD1] [version: 1] [count: 2 bytes LE] [count x 4-byte LE record ID]
+ *
+ * IDs are stored 4-byte wide on both backends so the format does not depend
+ * on the backend's ID width.
+ */
+#define ZDB_KV_INDEX_TAG      0xD1u
+#define ZDB_KV_INDEX_VERSION  1u
+#define ZDB_KV_INDEX_HDR_SIZE 4U
+#define ZDB_KV_INDEX_MAX_BYTES (ZDB_KV_INDEX_HDR_SIZE + (4U * ZDB_KV_INDEX_MAX_ENTRIES))
+
+/*
+ * Record ID reserved for the index itself: the top of each backend's ID space,
+ * which no key can occupy because zdb_kv_record_id() remaps a hash that lands
+ * there.
+ */
+#if defined(CONFIG_ZDB_KV_BACKEND_ZMS) && (CONFIG_ZDB_KV_BACKEND_ZMS)
+#define ZDB_KV_INDEX_REC_ID 0xFFFFFFFFu
+#else
+#define ZDB_KV_INDEX_REC_ID 0x0000FFFFu
+#endif
 
 struct zdb_kv_index_entry {
 	char namespace_name[CONFIG_ZDB_MAX_KEY_LEN + 1U];
@@ -24,6 +67,7 @@ struct zdb_kv_index_entry {
 struct zdb_kv_ctx {
 	struct zdb_kv_index_entry entries[ZDB_KV_INDEX_MAX_ENTRIES];
 	size_t entry_count;
+	bool loaded;
 };
 
 static bool zdb_key_valid(const char *key)
@@ -90,8 +134,12 @@ static uint32_t zdb_kv_record_id(const char *namespace_name, const char *key)
 	hash &= 0xFFFFu;
 #endif
 
-	/* Avoid ID 0, which can be reserved by backends. */
-	if (hash == 0U) {
+	/*
+	 * Avoid ID 0, which backends may reserve, and the ID that holds the
+	 * key index. Remapping costs a key its natural slot with probability
+	 * 2^-16 (NVS) or 2^-32 (ZMS).
+	 */
+	if ((hash == 0U) || (hash == ZDB_KV_INDEX_REC_ID)) {
 		hash = 1U;
 	}
 
@@ -162,6 +210,124 @@ static void *zdb_kv_backend_fs_from_db(zdb_t *db)
 	return (void *)db->cfg->kv_backend_fs;
 }
 
+static ssize_t zdb_kv_backend_write(zdb_t *db, uint32_t id, const void *value, size_t value_len);
+static ssize_t zdb_kv_backend_read(zdb_t *db, uint32_t id, void *out_value, size_t out_capacity);
+
+#if ZDB_KV_PERSIST_INDEX
+static void zdb_kv_index_store(zdb_t *db, struct zdb_kv_ctx *ctx);
+
+/*
+ * Rebuild the in-RAM index from the reserved record.
+ *
+ * Each stored ID is read back and its (namespace, key) recovered from the v2
+ * record header. IDs whose record is gone — a crash between the index write
+ * and the data write, or a delete that did not get to rewrite the index — are
+ * dropped, and the pruned index is written back so the next boot is clean.
+ */
+static void zdb_kv_index_load(zdb_t *db, struct zdb_kv_ctx *ctx)
+{
+	uint8_t index_buf[ZDB_KV_INDEX_MAX_BYTES];
+	uint8_t *rec_buf;
+	size_t block_size;
+	size_t stored_count;
+	size_t i;
+	ssize_t rd;
+	bool pruned = false;
+
+	if (zdb_kv_backend_fs_from_db(db) == NULL) {
+		return;
+	}
+
+	rd = zdb_kv_backend_read(db, ZDB_KV_INDEX_REC_ID, index_buf, sizeof(index_buf));
+	if (rd < (ssize_t)ZDB_KV_INDEX_HDR_SIZE) {
+		return;
+	}
+
+	if ((index_buf[0] != (uint8_t)ZDB_KV_INDEX_TAG) ||
+	    (index_buf[1] != (uint8_t)ZDB_KV_INDEX_VERSION)) {
+		return;
+	}
+
+	stored_count = (size_t)sys_get_le16(&index_buf[2]);
+	if (stored_count > ZDB_KV_INDEX_MAX_ENTRIES) {
+		stored_count = ZDB_KV_INDEX_MAX_ENTRIES;
+	}
+	if ((ZDB_KV_INDEX_HDR_SIZE + (4U * stored_count)) > (size_t)rd) {
+		return;
+	}
+
+	if (db->kv_io_slab == NULL) {
+		return;
+	}
+	block_size = db->kv_io_slab->info.block_size;
+	if (k_mem_slab_alloc(db->kv_io_slab, (void **)&rec_buf, K_NO_WAIT) != 0) {
+		return;
+	}
+
+	for (i = 0U; i < stored_count; i++) {
+		uint32_t id = sys_get_le32(&index_buf[ZDB_KV_INDEX_HDR_SIZE + (4U * i)]);
+		size_t ns_len;
+		size_t key_len;
+		struct zdb_kv_index_entry *entry;
+
+		rd = zdb_kv_backend_read(db, id, rec_buf, block_size);
+		if (rd < (ssize_t)ZDB_KV_REC_HDR_SIZE) {
+			pruned = true;
+			continue;
+		}
+
+		ns_len = rec_buf[1];
+		key_len = rec_buf[2];
+		if ((rec_buf[0] != (uint8_t)ZDB_KV_REC_TAG) || (ns_len == 0U) || (key_len == 0U) ||
+		    (ns_len > (size_t)CONFIG_ZDB_MAX_KEY_LEN) ||
+		    (key_len > (size_t)CONFIG_ZDB_MAX_KEY_LEN) ||
+		    ((ZDB_KV_REC_HDR_SIZE + ns_len + key_len) > (size_t)rd)) {
+			pruned = true;
+			continue;
+		}
+
+		entry = &ctx->entries[ctx->entry_count];
+		(void)memcpy(entry->namespace_name, &rec_buf[ZDB_KV_REC_HDR_SIZE], ns_len);
+		entry->namespace_name[ns_len] = '\0';
+		(void)memcpy(entry->key, &rec_buf[ZDB_KV_REC_HDR_SIZE + ns_len], key_len);
+		entry->key[key_len] = '\0';
+		entry->id = id;
+		ctx->entry_count++;
+	}
+
+	k_mem_slab_free(db->kv_io_slab, rec_buf);
+
+	if (pruned) {
+		zdb_kv_index_store(db, ctx);
+	}
+}
+
+/* Write the current index to its reserved record. Best effort: a failure here
+ * costs iteration coverage, not stored data.
+ */
+static void zdb_kv_index_store(zdb_t *db, struct zdb_kv_ctx *ctx)
+{
+	uint8_t index_buf[ZDB_KV_INDEX_MAX_BYTES];
+	size_t i;
+	size_t len;
+
+	if (zdb_kv_backend_fs_from_db(db) == NULL) {
+		return;
+	}
+
+	index_buf[0] = (uint8_t)ZDB_KV_INDEX_TAG;
+	index_buf[1] = (uint8_t)ZDB_KV_INDEX_VERSION;
+	sys_put_le16((uint16_t)ctx->entry_count, &index_buf[2]);
+
+	for (i = 0U; i < ctx->entry_count; i++) {
+		sys_put_le32(ctx->entries[i].id, &index_buf[ZDB_KV_INDEX_HDR_SIZE + (4U * i)]);
+	}
+
+	len = ZDB_KV_INDEX_HDR_SIZE + (4U * ctx->entry_count);
+	(void)zdb_kv_backend_write(db, ZDB_KV_INDEX_REC_ID, index_buf, len);
+}
+#endif /* ZDB_KV_PERSIST_INDEX */
+
 static struct zdb_kv_ctx *zdb_kv_ctx_get_or_alloc(zdb_t *db)
 {
 	struct zdb_kv_ctx *ctx;
@@ -180,6 +346,17 @@ static struct zdb_kv_ctx *zdb_kv_ctx_get_or_alloc(zdb_t *db)
 	}
 
 	db->kv_ctx = ctx;
+
+#if ZDB_KV_PERSIST_INDEX
+	/*
+	 * Populate from storage on first use, so iteration sees keys written
+	 * before this boot. Callers hold the instance lock, or are the only
+	 * user of the instance at this point.
+	 */
+	zdb_kv_index_load(db, ctx);
+#endif
+	ctx->loaded = true;
+
 	return ctx;
 }
 
@@ -223,6 +400,11 @@ static void zdb_kv_ctx_track_set(zdb_t *db, const char *namespace_name, const ch
 	}
 
 	if (ctx->entry_count >= ZDB_KV_INDEX_MAX_ENTRIES) {
+		/*
+		 * The key is still stored and readable, it just cannot be
+		 * enumerated. Raise CONFIG_ZDB_KV_INDEX_MAX_ENTRIES if a
+		 * deployment needs every key iterable.
+		 */
 		return;
 	}
 
@@ -234,6 +416,11 @@ static void zdb_kv_ctx_track_set(zdb_t *db, const char *namespace_name, const ch
 	ctx->entries[idx].namespace_name[sizeof(ctx->entries[idx].namespace_name) - 1U] = '\0';
 	(void)strncpy(ctx->entries[idx].key, key, sizeof(ctx->entries[idx].key) - 1U);
 	ctx->entries[idx].key[sizeof(ctx->entries[idx].key) - 1U] = '\0';
+
+#if ZDB_KV_PERSIST_INDEX
+	/* Only a new key changes the stored set; overwrites cost no extra write. */
+	zdb_kv_index_store(db, ctx);
+#endif
 }
 
 static void zdb_kv_ctx_track_delete(zdb_t *db, const char *namespace_name, const char *key)
@@ -262,6 +449,10 @@ static void zdb_kv_ctx_track_delete(zdb_t *db, const char *namespace_name, const
 
 	ctx->entry_count--;
 	(void)memset(&ctx->entries[ctx->entry_count], 0, sizeof(ctx->entries[ctx->entry_count]));
+
+#if ZDB_KV_PERSIST_INDEX
+	zdb_kv_index_store(db, ctx);
+#endif
 }
 
 static ssize_t zdb_kv_backend_write(zdb_t *db, uint32_t id, const void *value, size_t value_len)
@@ -456,6 +647,14 @@ zdb_status_t zdb_kv_set(zdb_kv_t *kv, const char *key, const void *value, size_t
 		}
 	}
 
+	/*
+	 * Record the key in the index before the data write. A crash in
+	 * between then leaves an index entry whose record is missing, which
+	 * iteration skips and the next rebuild prunes. The reverse order would
+	 * leave a stored key that nothing knows how to enumerate.
+	 */
+	zdb_kv_ctx_track_set(kv->db, kv->namespace_name, key, id);
+
 	(void)zdb_kv_record_build(io_buf, kv->namespace_name, key, value, value_len);
 
 	wr = zdb_kv_backend_write(kv->db, id, io_buf, total_len);
@@ -472,8 +671,9 @@ zdb_status_t zdb_kv_set(zdb_kv_t *kv, const char *key, const void *value, size_t
 		status = ZDB_ERR_IO;
 	}
 
-	if (status == ZDB_OK) {
-		zdb_kv_ctx_track_set(kv->db, kv->namespace_name, key, id);
+	if (status != ZDB_OK) {
+		/* The data never landed; drop the entry we optimistically added. */
+		zdb_kv_ctx_track_delete(kv->db, kv->namespace_name, key);
 	}
 	zdb_unlock_write(kv->db);
 	k_mem_slab_free(kv->db->kv_io_slab, io_buf);

@@ -140,6 +140,27 @@ config ZDB_KV_IO_SLAB_BLOCK_COUNT
 	range 1 256
 	default 8
 
+config ZDB_KV_INDEX_MAX_ENTRIES
+	int "Maximum keys tracked by the KV index"
+	range 8 1024
+	default 128
+	help
+	  Bounds how many keys the iterator can enumerate. The index costs
+	  roughly (2 * (ZDB_MAX_KEY_LEN + 1) + 4) bytes per entry of heap,
+	  plus 4 bytes per entry of storage when ZDB_KV_PERSIST_INDEX is
+	  enabled. Keys set beyond this bound are stored and readable but
+	  are not returned by the iterator.
+
+config ZDB_KV_PERSIST_INDEX
+	bool "Persist the KV key index"
+	default y
+	help
+	  Store the key index in a reserved backend record so iteration
+	  covers every key across reboots, not just the keys touched in the
+	  current session. Rebuilding reads one record per tracked key on
+	  first use. Disable to keep iteration session-only and avoid the
+	  extra write when a key is created or deleted.
+
 endmenu
 
 menu "TS Boundaries"

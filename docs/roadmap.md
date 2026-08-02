@@ -9,13 +9,8 @@ reverse traversal, which remains below.
 
 ## Next — structural features
 
-- **Persistent KV iteration** — The v2 record format already stores the
-  namespace on disk; a one-time backend ID scan at open can rebuild the key
-  index across reboots (today iteration covers only keys touched this
-  session). Prerequisite for reset-to-defaults.
 - **KV reset to defaults** — Factory-reset API: enumerate and delete all keys
-  in a namespace, then re-run the defaults pass. Depends on persistent KV
-  iteration for enumeration.
+  in a namespace, then re-run the defaults pass.
 - **TS rollover / circular buffer mode** — Explicit, backend-agnostic
   overwrite-oldest-when-full option. FCB nearly provides it via sector
   rotation; the LittleFS backend needs segmented files with oldest-segment

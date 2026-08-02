@@ -749,9 +749,14 @@ extern "C"
 	/**
 	 * @brief Open an iterator over the namespace's keys.
 	 *
-	 * The iterator walks keys set/deleted during the current session (RAM
-	 * index, 128 entries); cross-session iteration from persisted data is
-	 * not yet implemented.
+	 * Enumerates every key the index holds, including keys written before
+	 * the current boot when @c CONFIG_ZDB_KV_PERSIST_INDEX is enabled (the
+	 * default). With it disabled the iterator covers only keys set or
+	 * deleted during this session.
+	 *
+	 * The index holds at most @c CONFIG_ZDB_KV_INDEX_MAX_ENTRIES keys.
+	 * Keys stored beyond that bound remain readable through zdb_kv_get()
+	 * but are not returned by the iterator.
 	 *
 	 * @param kv       Open namespace handle.
 	 * @param out_iter Iterator to initialize.
