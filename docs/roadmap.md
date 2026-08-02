@@ -9,11 +9,6 @@ reverse traversal, which remains below.
 
 ## Now — correctness fixes and low-effort, high-value
 
-- **Atomic document saves** — `zdb_doc_save()` currently truncates the live
-  file in place (`FS_O_TRUNC`), so a power loss mid-save corrupts the existing
-  document; write-to-temp-then-rename (atomic on LittleFS) fixes this. Extend
-  the header CRC to cover field payloads. This is a data-integrity fix and
-  should land before new features.
 - **KV default values with auto-init and incremental upgrade** — Accept a
   default KV table in `zdb_cfg_t`; on every init, write any default whose key
   is absent. Because the pass is write-if-missing, it doubles as the

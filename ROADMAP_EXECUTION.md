@@ -50,7 +50,7 @@ under Notes with its reason, keeps its roadmap bullet, and the loop moves on.
 ## Items
 
 - [x] 0. Setup: roadmap commit, doc debt, tracker, VM, baseline — `6756b5d`, `a1aa968`
-- [ ] 1. Atomic document saves + full-payload CRC (§5.1, M)
+- [x] 1. Atomic document saves + full-payload CRC (§5.1, M) — `a99773f`
 - [ ] 2. TS COUNT correctness & cost (§5.2, M) — folds: flush_async work_q fallback, slab BUILD_ASSERTs
 - [ ] 3. KV string convenience API (§5.3, S) — folds: zero-length value fix
 - [ ] 4. KV defaults with auto-init (§5.4, M) — folds: ZDB_EVENTING dependency fix
@@ -66,5 +66,27 @@ under Notes with its reason, keeps its roadmap bullet, and the loop moves on.
 
 ## Notes / deviations
 
-- (iteration 0) Baseline twister run results recorded here once the workspace
-  finishes provisioning.
+- **Local runner**: `~/zdb-test.sh [lfs|kv|all] [twister args]` in the VM. Two
+  invocations are needed because Zephyr does not apply
+  `boards/native_sim.overlay` for the `native_sim/native/64` variant, so the
+  LittleFS suites must be built with
+  `--extra-args=EXTRA_DTC_OVERLAY_FILE=boards/native_sim.overlay`, which the
+  overlay-less KV suites cannot tolerate. Also requires
+  `ZEPHYR_TOOLCHAIN_VARIANT=host`.
+- The VM builds the **live mounted tree**, so never start a test run while an
+  edit is half-applied.
+- The west workspace's own `zephyrdb` clone was replaced with a symlink to
+  `/home/ubuntu/zdb-src/zephyrdb`; otherwise Zephyr sees two modules named
+  `zephyrdb` (the west project and the test's `EXTRA_ZEPHYR_MODULES`).
+- **Pre-existing failure, not caused by this work**:
+  `zephyrdb.integration.workflows` aborts on `native_sim/native/64` with a
+  kernel mem-slab assertion (`mem_slab.c:247`, corrupted `free_list`),
+  reproduced on a pristine checkout. Almost certainly the missing slab-fit
+  guard: on 64-bit `struct zdb_ts_core_ctx` overflows the 128-byte
+  `CONFIG_ZDB_CORE_SLAB_BLOCK_SIZE` block. CI does not catch it because it
+  runs the 32-bit `native_sim`. **Item 2's folded BUILD_ASSERT fix targets
+  exactly this** — verify it turns the runtime corruption into a compile-time
+  error, and bump the Kconfig defaults.
+- Baseline (iteration 0, pristine tree): KV group 3/3 suites, 36/36 cases pass;
+  `ts_basic`, `doc_basic`, `samples/verify` pass; `integration/workflows` fails
+  as above.

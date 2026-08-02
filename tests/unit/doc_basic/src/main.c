@@ -12,6 +12,8 @@
 #include <zephyr/kernel.h>
 #include <zephyr/ztest.h>
 #include <zephyr/fs/fs.h>
+#include <zephyr/sys/byteorder.h>
+#include <zephyr/sys/crc.h>
 #include <string.h>
 
 #include "zephyrdb.h"
@@ -302,6 +304,225 @@ ZTEST(doc_suite, test_doc_export_flatbuffer_unsupported)
 	zassert_equal(rc, ZDB_ERR_UNSUPPORTED, "expected UNSUPPORTED stub, got %d", rc);
 
 	zdb_doc_close(&doc);
+}
+
+/*
+ * The v2 CRC covers field payloads, so a flipped payload byte must be caught
+ * on open instead of surfacing as a plausible-looking value.
+ */
+ZTEST(doc_suite, test_doc_open_fails_on_payload_corruption)
+{
+	zdb_doc_t doc;
+	zdb_doc_t reopened;
+	struct fs_file_t file;
+	zdb_status_t rc;
+	int fs_rc;
+	uint8_t byte;
+	off_t payload_off;
+
+	rc = zdb_doc_create(&g_db, "c_payload", "d1", &doc);
+	zassert_equal(rc, ZDB_OK, "create failed: %d", rc);
+	zassert_equal(zdb_doc_field_set_i64(&doc, "age", 33), ZDB_OK);
+	zassert_equal(zdb_doc_save(&doc), ZDB_OK, "save failed");
+	zassert_equal(zdb_doc_close(&doc), ZDB_OK, "close failed");
+
+	/* 28-byte header + 8-byte field header + 3-byte name lands on the value. */
+	payload_off = 28 + 8 + 3;
+
+	fs_file_t_init(&file);
+	fs_rc = fs_open(&file, "/lfs/zdb_docs/c_payload/d1.zdoc", FS_O_READ | FS_O_WRITE);
+	zassert_equal(fs_rc, 0, "opening saved doc file failed: %d", fs_rc);
+
+	fs_rc = fs_seek(&file, payload_off, FS_SEEK_SET);
+	zassert_equal(fs_rc, 0, "seek failed: %d", fs_rc);
+	fs_rc = fs_read(&file, &byte, sizeof(byte));
+	zassert_equal(fs_rc, (int)sizeof(byte), "reading payload byte failed: %d", fs_rc);
+
+	byte ^= 0xFFU;
+
+	fs_rc = fs_seek(&file, payload_off, FS_SEEK_SET);
+	zassert_equal(fs_rc, 0, "seek failed: %d", fs_rc);
+	fs_rc = fs_write(&file, &byte, sizeof(byte));
+	zassert_equal(fs_rc, (int)sizeof(byte), "writing corrupted payload failed: %d", fs_rc);
+	fs_rc = fs_close(&file);
+	zassert_equal(fs_rc, 0, "closing doc file failed: %d", fs_rc);
+
+	rc = zdb_doc_open(&g_db, "c_payload", "d1", &reopened);
+	zassert_equal(rc, ZDB_ERR_CORRUPT, "expected CORRUPT on payload flip, got %d", rc);
+}
+
+/* A save interrupted mid-payload leaves a short file; opening must not guess. */
+ZTEST(doc_suite, test_doc_open_fails_on_truncated_payload)
+{
+	zdb_doc_t doc;
+	zdb_doc_t reopened;
+	struct fs_file_t file;
+	zdb_status_t rc;
+	int fs_rc;
+
+	rc = zdb_doc_create(&g_db, "c_trunc", "d1", &doc);
+	zassert_equal(rc, ZDB_OK, "create failed: %d", rc);
+	zassert_equal(zdb_doc_field_set_string(&doc, "name", "Charlie"), ZDB_OK);
+	zassert_equal(zdb_doc_field_set_i64(&doc, "age", 40), ZDB_OK);
+	zassert_equal(zdb_doc_save(&doc), ZDB_OK, "save failed");
+	zassert_equal(zdb_doc_close(&doc), ZDB_OK, "close failed");
+
+	fs_file_t_init(&file);
+	fs_rc = fs_open(&file, "/lfs/zdb_docs/c_trunc/d1.zdoc", FS_O_READ | FS_O_WRITE);
+	zassert_equal(fs_rc, 0, "opening saved doc file failed: %d", fs_rc);
+	/* Keep the header and the first field header, drop the rest. */
+	fs_rc = fs_truncate(&file, 28 + 8 + 2);
+	zassert_equal(fs_rc, 0, "truncate failed: %d", fs_rc);
+	fs_rc = fs_close(&file);
+	zassert_equal(fs_rc, 0, "closing doc file failed: %d", fs_rc);
+
+	rc = zdb_doc_open(&g_db, "c_trunc", "d1", &reopened);
+	zassert_equal(rc, ZDB_ERR_CORRUPT, "expected CORRUPT on truncated file, got %d", rc);
+}
+
+/*
+ * Crash window: the staging file was written and renamed away from the live
+ * name. Opening promotes it rather than reporting the document missing.
+ */
+ZTEST(doc_suite, test_doc_open_recovers_staged_save)
+{
+	zdb_doc_t doc;
+	zdb_doc_t reopened;
+	int64_t age = 0;
+	zdb_status_t rc;
+	int fs_rc;
+
+	rc = zdb_doc_create(&g_db, "c_stage", "d1", &doc);
+	zassert_equal(rc, ZDB_OK, "create failed: %d", rc);
+	zassert_equal(zdb_doc_field_set_i64(&doc, "age", 77), ZDB_OK);
+	zassert_equal(zdb_doc_save(&doc), ZDB_OK, "save failed");
+	zassert_equal(zdb_doc_close(&doc), ZDB_OK, "close failed");
+
+	/* Simulate a crash between staging and rename. */
+	fs_rc = fs_rename("/lfs/zdb_docs/c_stage/d1.zdoc", "/lfs/zdb_docs/c_stage/d1.zdoc.tmp");
+	zassert_equal(fs_rc, 0, "staging rename failed: %d", fs_rc);
+
+	rc = zdb_doc_open(&g_db, "c_stage", "d1", &reopened);
+	zassert_equal(rc, ZDB_OK, "staged save not recovered: %d", rc);
+	zassert_equal(zdb_doc_field_get_i64(&reopened, "age", &age), ZDB_OK);
+	zassert_equal(age, 77, "recovered wrong value: %lld", (long long)age);
+	zdb_doc_close(&reopened);
+
+	/* The staging file was promoted, so a second open needs no recovery. */
+	rc = zdb_doc_open(&g_db, "c_stage", "d1", &reopened);
+	zassert_equal(rc, ZDB_OK, "promoted document not readable: %d", rc);
+	zdb_doc_close(&reopened);
+}
+
+/* An unparsable staging file must not shadow or resurrect anything. */
+ZTEST(doc_suite, test_doc_save_discards_stale_staging_file)
+{
+	zdb_doc_t doc;
+	zdb_doc_t reopened;
+	struct fs_file_t file;
+	const uint8_t junk[16] = {0xFFU};
+	int64_t age = 0;
+	zdb_status_t rc;
+	int fs_rc;
+
+	rc = zdb_doc_create(&g_db, "c_stale", "d1", &doc);
+	zassert_equal(rc, ZDB_OK, "create failed: %d", rc);
+	zassert_equal(zdb_doc_field_set_i64(&doc, "age", 1), ZDB_OK);
+	zassert_equal(zdb_doc_save(&doc), ZDB_OK, "initial save failed");
+
+	fs_file_t_init(&file);
+	fs_rc = fs_open(&file, "/lfs/zdb_docs/c_stale/d1.zdoc.tmp",
+			FS_O_CREATE | FS_O_WRITE | FS_O_TRUNC);
+	zassert_equal(fs_rc, 0, "creating stale staging file failed: %d", fs_rc);
+	fs_rc = fs_write(&file, junk, sizeof(junk));
+	zassert_equal(fs_rc, (int)sizeof(junk), "writing junk failed: %d", fs_rc);
+	zassert_equal(fs_close(&file), 0, "closing staging file failed");
+
+	/* A save overwrites the staging file and renames it into place. */
+	zassert_equal(zdb_doc_field_set_i64(&doc, "age", 2), ZDB_OK);
+	zassert_equal(zdb_doc_save(&doc), ZDB_OK, "save over stale staging file failed");
+	zassert_equal(zdb_doc_close(&doc), ZDB_OK, "close failed");
+
+	rc = zdb_doc_open(&g_db, "c_stale", "d1", &reopened);
+	zassert_equal(rc, ZDB_OK, "open failed: %d", rc);
+	zassert_equal(zdb_doc_field_get_i64(&reopened, "age", &age), ZDB_OK);
+	zassert_equal(age, 2, "stale staging file won: %lld", (long long)age);
+	zdb_doc_close(&reopened);
+
+	/* The staging file is gone, so open finds nothing to recover after delete. */
+	zassert_equal(zdb_doc_delete(&g_db, "c_stale", "d1"), ZDB_OK, "delete failed");
+	rc = zdb_doc_open(&g_db, "c_stale", "d1", &reopened);
+	zassert_equal(rc, ZDB_ERR_NOT_FOUND, "document resurrected from staging file: %d", rc);
+}
+
+/* v1 files predate the payload CRC and must still open. */
+ZTEST(doc_suite, test_doc_open_accepts_v1_format)
+{
+	zdb_doc_t reopened;
+	struct fs_file_t file;
+	zdb_status_t rc;
+	int fs_rc;
+	int64_t age = 0;
+
+	struct {
+		uint32_t magic_le;
+		uint16_t version_le;
+		uint16_t field_count_le;
+		uint64_t created_ms_le;
+		uint64_t updated_ms_le;
+		uint32_t crc_le;
+	} __packed hdr;
+
+	struct {
+		uint16_t name_len_le;
+		uint16_t reserved_le;
+		uint8_t type;
+		uint8_t reserved[3];
+	} __packed fh;
+
+	uint64_t value_le = sys_cpu_to_le64((uint64_t)42);
+
+	/* Create the collection directory via a normal save, then hand-write v1. */
+	{
+		zdb_doc_t seed;
+
+		zassert_equal(zdb_doc_create(&g_db, "c_v1", "seed", &seed), ZDB_OK);
+		zassert_equal(zdb_doc_field_set_i64(&seed, "x", 0), ZDB_OK);
+		zassert_equal(zdb_doc_save(&seed), ZDB_OK, "seed save failed");
+		zassert_equal(zdb_doc_close(&seed), ZDB_OK);
+	}
+
+	hdr.magic_le = sys_cpu_to_le32(0x5A444F43u);
+	hdr.version_le = sys_cpu_to_le16(1U);
+	hdr.field_count_le = sys_cpu_to_le16(1U);
+	hdr.created_ms_le = sys_cpu_to_le64(1000U);
+	hdr.updated_ms_le = sys_cpu_to_le64(2000U);
+	/* crc_le is the last member of the packed header, so the prefix is
+	 * everything before it.
+	 */
+	hdr.crc_le = sys_cpu_to_le32(
+		crc32_ieee((const uint8_t *)&hdr, sizeof(hdr) - sizeof(hdr.crc_le)));
+
+	fh.name_len_le = sys_cpu_to_le16(3U);
+	fh.reserved_le = 0U;
+	fh.type = (uint8_t)ZDB_DOC_FIELD_INT64;
+	fh.reserved[0] = fh.reserved[1] = fh.reserved[2] = 0U;
+
+	fs_file_t_init(&file);
+	fs_rc = fs_open(&file, "/lfs/zdb_docs/c_v1/d1.zdoc", FS_O_CREATE | FS_O_WRITE | FS_O_TRUNC);
+	zassert_equal(fs_rc, 0, "creating v1 doc failed: %d", fs_rc);
+	zassert_equal(fs_write(&file, &hdr, sizeof(hdr)), (int)sizeof(hdr), "hdr write failed");
+	zassert_equal(fs_write(&file, &fh, sizeof(fh)), (int)sizeof(fh), "field hdr write failed");
+	zassert_equal(fs_write(&file, "age", 3), 3, "name write failed");
+	zassert_equal(fs_write(&file, &value_le, sizeof(value_le)), (int)sizeof(value_le),
+		      "value write failed");
+	zassert_equal(fs_close(&file), 0, "closing v1 doc failed");
+
+	rc = zdb_doc_open(&g_db, "c_v1", "d1", &reopened);
+	zassert_equal(rc, ZDB_OK, "v1 document not readable: %d", rc);
+	zassert_equal(zdb_doc_field_get_i64(&reopened, "age", &age), ZDB_OK);
+	zassert_equal(age, 42, "v1 value wrong: %lld", (long long)age);
+	zdb_doc_close(&reopened);
 }
 
 ZTEST(doc_suite, test_doc_open_fails_on_header_crc_corruption)

@@ -42,10 +42,18 @@ Time-series storage uses a versioned binary format with integrity checks.
 - Invalid trailing records are truncated safely
 - Recovery stats are exported via TS stats APIs
 
+Document storage is updated atomically. A save serializes into a staging file
+and renames it over the live document, so an interrupted write leaves the
+previous version intact rather than a half-written file. The record CRC covers
+the header and every field payload, so corruption is detected on open instead
+of being returned as valid-looking field values. An open that finds only a
+staging file promotes it if it validates.
+
 ## Storage Isolation
 
 - KV storage is provided through `cfg.kv_backend_fs`
 - TS files are written under `<mount>/<CONFIG_ZDB_TS_DIRNAME>/`
-- DOC files are written under `<mount>/zdb_docs/`
+- DOC files are written under `<mount>/zdb_docs/` (`<id>.zdoc`, with
+  `<id>.zdoc.tmp` appearing transiently during a save)
 
 Use separate flash partitions when isolating ZephyrDB from application settings.

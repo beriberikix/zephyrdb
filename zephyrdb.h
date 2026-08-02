@@ -1050,6 +1050,14 @@ extern "C"
 	/**
 	 * @brief Load an existing document from storage.
 	 *
+	 * The stored CRC covers the header and every field payload, so a flipped
+	 * payload byte or a truncated file is reported rather than returned as
+	 * field values. Documents written by older versions (header-only CRC) are
+	 * still accepted.
+	 *
+	 * If the document file is missing but zdb_doc_save() left a complete
+	 * staging file behind, that file is promoted and opened.
+	 *
 	 * @param db              Initialized instance with DOC enabled.
 	 * @param collection_name Collection name.
 	 * @param document_id     Document ID.
@@ -1057,7 +1065,8 @@ extern "C"
 	 * @retval ZDB_OK            Success.
 	 * @retval ZDB_ERR_INVAL     NULL argument, over-long name, or path separators.
 	 * @retval ZDB_ERR_NOT_FOUND No such document.
-	 * @retval ZDB_ERR_CORRUPT   Stored document failed its header CRC check.
+	 * @retval ZDB_ERR_CORRUPT   Stored document failed its CRC or is truncated.
+	 * @retval ZDB_ERR_NOMEM     Stored document has more fields than the handle holds.
 	 * @retval ZDB_ERR_UNSUPPORTED Stored document uses an unimplemented field type.
 	 * @retval ZDB_ERR_IO        Filesystem read failure.
 	 */
@@ -1067,14 +1076,16 @@ extern "C"
 	/**
 	 * @brief Persist a document's current fields.
 	 *
-	 * Rewrites the document file in place (not atomically); only the
-	 * header is CRC-protected. Updates zdb_doc_t::updated_ms.
+	 * Atomic: the document is serialized into a staging file and renamed over
+	 * the stored one, so an interrupted save leaves the previously stored
+	 * document intact. The CRC written covers the header and every field
+	 * payload. Updates zdb_doc_t::updated_ms.
 	 *
 	 * @param doc Open document handle.
 	 * @retval ZDB_OK        Success.
 	 * @retval ZDB_ERR_INVAL @p doc is NULL or not open.
 	 * @retval ZDB_ERR_UNSUPPORTED A field uses an unimplemented type.
-	 * @retval ZDB_ERR_IO    Filesystem write failure.
+	 * @retval ZDB_ERR_IO    Filesystem write or rename failure.
 	 */
 	zdb_status_t zdb_doc_save(zdb_doc_t *doc);
 

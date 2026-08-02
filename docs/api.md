@@ -179,8 +179,15 @@ Notes:
   scans all collections; there is no collection filter field.
 - Query time windows (`from_ms`/`to_ms`) filter on `updated_ms`, which is
   milliseconds since boot (`k_uptime_get()`), not wall-clock time.
-- `zdb_doc_save` rewrites the document file in place (not atomically);
-  only the header is CRC-protected.
+- `zdb_doc_save` is atomic: it stages the document into `<id>.zdoc.tmp` and
+  renames it over the live file, so an interrupted save leaves the previously
+  stored document intact. If the live file is missing but a complete staging
+  file is present, `zdb_doc_open` promotes it; an unparsable staging file is
+  discarded by the next save or delete.
+- The stored CRC covers the header **and** every field payload, so payload
+  corruption or a truncated file is reported as `ZDB_ERR_CORRUPT` on open.
+  Documents written before this change (format v1, header-only CRC) are still
+  readable; every save writes v2.
 
 ## Shell
 

@@ -13,7 +13,7 @@ the real Kconfig — no source-inclusion or fake `CONFIG_*` definitions.
 | `unit/kv_nvs` | `zephyrdb.unit.kv.nvs` | NVS on `storage_partition` | Same suite source as `kv_zms`, plus the deterministic 16-bit record-ID collision test |
 | `unit/kv_events` | `zephyrdb.unit.kv.events` | ZMS | Event listener dispatch: success statuses, multi-listener, null-notify slots, no-event-on-failure paths |
 | `unit/ts_basic` | `zephyrdb.unit.ts_basic` | LittleFS (`boards/native_sim.overlay`) | Append (single + batch API), flush sync, aggregates with exact values, time windows, cursors (file + unflushed RAM), recovery truncation, stats |
-| `unit/doc_basic` | `zephyrdb.unit.doc_basic` | LittleFS | Field CRUD for all implemented types, save/open persistence, delete, query filters (count-only, materialized, AND, limit), path-traversal rejection, header-CRC corruption |
+| `unit/doc_basic` | `zephyrdb.unit.doc_basic` | LittleFS | Field CRUD for all implemented types, save/open persistence, delete, query filters (count-only, materialized, AND, limit), path-traversal rejection, header- and payload-CRC corruption, truncated files, staged-save recovery, v1 format compatibility |
 | `integration/workflows` | `zephyrdb.integration.workflows` | ZMS + LittleFS | KV/TS/DOC on one instance, single-stream semantics, independent cursors, health, stats export/validate |
 | `samples/verify` | `zephyrdb.samples.verify` | ZMS + LittleFS | The critical path of each sample (kv_basic, ts_basic, doc_basic) |
 | `hardware/persistence_nrf52840dk` | `zephyrdb.hardware.persistence` | NVS + LittleFS on real flash | KV close/reopen persistence, TS append-log growth, recovery, multi-field DOC persistence. `build_only` in CI. |
