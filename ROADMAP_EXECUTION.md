@@ -54,7 +54,7 @@ under Notes with its reason, keeps its roadmap bullet, and the loop moves on.
 - [x] 2. TS COUNT correctness & cost (§5.2, M) — `8889103`; folded fixes `a063025` (slab asserts), `bbcb5c4` (work_q)
 - [x] 3. KV string convenience API (§5.3, S) — `6b27eed`; folded fix `c4e312d` (zero-length values)
 - [x] 4. KV defaults with auto-init (§5.4, M) — `68e6399`; folded fix `3d8bfe6` (eventing dependency)
-- [ ] 5. Persistent KV iteration (§5.5, L) — topic branch
+- [x] 5. Persistent KV iteration (§5.5, L) — `4bf78e2`, PR from feature/kv-persistent-index
 - [ ] 6. KV reset to defaults (§5.6, S/M)
 - [ ] 7. Sample: doc_kv_blob (§5.7, S)
 - [ ] 8. TS reverse cursor traversal (§5.8, M) — folds: cursor_reset rewind fix
@@ -65,6 +65,10 @@ under Notes with its reason, keeps its roadmap bullet, and the loop moves on.
 - [ ] 13. Sample: doc_cbor_nested + final cleanup (§5.13, S)
 
 ## Notes / deviations
+
+- The build VM has no ARM Zephyr SDK, so the `tests/hardware` build gate cannot
+  run locally (`verify-toolchain` fails). CI covers it. Changes to that suite
+  therefore go in unverified — prefer not to add cases there without a reason.
 
 - The VM runner `~/zdb-test.sh` lists suites explicitly; add new suite dirs to
   the right group (`lfs` or `kv`) when creating one.
