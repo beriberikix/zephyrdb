@@ -6,10 +6,11 @@ Tiers reflect a value-vs-effort assessment (2026-08).
 
 ## Later — larger or niche
 
-- **Nested object/array document fields** — `ZDB_DOC_FIELD_OBJECT`/`ARRAY`
-  exist in the type enum but serialization is unimplemented. Large API and
-  serialization surface that pressures the no-heap design goal. Interim:
-  document a CBOR-in-`BYTES` pattern in a sample.
+- **Nested object/array document fields** — `ZDB_DOC_FIELD_OBJECT`/`ARRAY` are
+  reserved in the type enum. A native implementation is a large API and
+  serialization surface that pressures the no-heap design goal. The
+  `doc_cbor_nested` sample shows the interim pattern (encode structure into a
+  `BYTES` field), which covers most uses without that cost.
 - **NVS/ZMS document backends** — For boards without a filesystem, with a RAM
   manifest for query enumeration. The `doc_kv_blob` sample now demonstrates the
   interim pattern (versioned struct stored as one KV value, seeded by the

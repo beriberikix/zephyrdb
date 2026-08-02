@@ -41,6 +41,7 @@ with the matching Zephyr SDK installed:
 ```bash
 # Everything CI runs on native_sim:
 python3 $ZEPHYR_BASE/scripts/twister -T tests -p native_sim -v --inline-logs
+python3 $ZEPHYR_BASE/scripts/twister -T samples -p native_sim -v --inline-logs
 
 # One suite:
 python3 $ZEPHYR_BASE/scripts/twister -T tests/unit -p native_sim \
@@ -57,7 +58,13 @@ python3 $ZEPHYR_BASE/scripts/twister -T tests/hardware -p nrf52840dk/nrf52840 \
 
 Note: native_sim only builds on Linux. On macOS/Windows use a Linux
 container or VM for the native_sim suites; the hardware suite cross-compiles
-anywhere the Zephyr SDK runs.
+anywhere the Zephyr SDK runs. On a 64-bit-only host toolchain (for example an
+arm64 VM) build `native_sim/native/64` and add `-K`, since the suites list
+`native_sim` in `platform_allow`.
+
+Several suites build with non-default Kconfig values so a bound is reachable
+in a test — the aggregate cap, stream slots, and segment sizes, among others.
+Their `prj.conf` says which and why.
 
 ## Known coverage gaps
 
@@ -71,4 +78,6 @@ anywhere the Zephyr SDK runs.
   python3 $ZEPHYR_BASE/scripts/twister -T tests/unit/doc_basic -p native_sim \
           --extra-args=CONFIG_FLATCC=y --extra-args=CONFIG_ZDB_FLATBUFFERS=y
   ```
-- Reboot-persistence and concurrent multi-thread access are not simulated.
+- Reboot persistence is approximated with `zdb_deinit()`/`zdb_init()` cycles
+  against a backend that stays mounted; a real power cycle is only exercised by
+  the hardware suite. Concurrent multi-thread access is not simulated.

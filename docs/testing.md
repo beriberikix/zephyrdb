@@ -26,12 +26,17 @@ Use the board based on what you want to validate.
 | FCB backend runtime behavior | Limited | Yes |
 | LittleFS-backed TS or DOC validation | Yes (flash simulator) | Yes |
 | SD card overlays | No | Yes |
-| Power-loss / reboot persistence | No | Yes (manual two-run check) |
+| Power-loss / reboot persistence | Approximated (deinit/init cycle) | Yes (manual two-run check) |
+| Bounded (rolling) streams | Yes | Yes |
+| Concurrent time-series streams | Yes | Yes |
+| FlatBuffers export | Needs `flatcc-zephyr` in the workspace | Needs `flatcc-zephyr` in the workspace |
 
 native_sim runs the storage backends against the flash simulator, which
 exercises real backend code paths but not flash wear, timing, or
-power-loss behavior — validate those on hardware. native_sim itself only
-builds on Linux hosts.
+power-loss behavior — validate those on hardware. A `zdb_deinit()`/`zdb_init()`
+cycle against a mounted backend stands in for a restart in the suites, which
+covers index and segment rebuilding but not an interrupted write. native_sim
+itself only builds on Linux hosts.
 
 ## Build Examples
 

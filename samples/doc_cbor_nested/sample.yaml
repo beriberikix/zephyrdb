@@ -1,0 +1,23 @@
+sample:
+  name: ZephyrDB nested document fields via CBOR
+
+common:
+  tags:
+    - zephyrdb
+    - samples
+    - doc
+  integration_platforms:
+    - native_sim
+
+tests:
+  zephyrdb.samples.doc_cbor_nested:
+    harness: console
+    harness_config:
+      type: multi_line
+      regex:
+        - "doc_cbor_nested: encoded .* bytes of CBOR"
+        - "doc_cbor_nested: sensor model=ACME-42 cal=\\[11,22,33\\]"
+        - "doc_cbor_nested: PASS"
+    platform_allow:
+      - native_sim
+    timeout: 20

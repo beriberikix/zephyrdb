@@ -144,6 +144,28 @@ Notes:
   stored length, so an unknown layout is reported instead of reinterpreted.
 - Prints `doc_kv_blob: PASS` after seeding, upgrading, and factory-resetting.
 
+### doc_cbor_nested
+
+Stores a nested structure in a document field by encoding it with CBOR
+(zcbor) and keeping the result in a `BYTES` field, alongside ordinary flat
+fields.
+
+Build:
+
+```bash
+west build -p always -s samples/doc_cbor_nested -b native_sim
+west build -t run
+```
+
+Notes:
+
+- Uses LittleFS via `boards/native_sim.overlay`; needs `CONFIG_ZCBOR=y`.
+- Shows the pattern for the roadmap's "nested object/array document fields"
+  item: encode structure into bytes when a field has shape of its own.
+- The encoded field is opaque to `zdb_doc_query`, so anything you filter on
+  should stay a flat field — the sample keeps `sensor_id` flat for that reason.
+- Prints `doc_cbor_nested: PASS` after a save, reopen, and decode round-trip.
+
 ### native_sim_harness
 
 Minimal `native_sim` harness that initializes an instance and exercises the time-series FlatBuffers export helper in both size-query and write modes.
