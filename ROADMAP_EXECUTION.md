@@ -58,13 +58,18 @@ under Notes with its reason, keeps its roadmap bullet, and the loop moves on.
 - [x] 6. KV reset to defaults (§5.6, S/M) — `c97e7f6`
 - [x] 7. Sample: doc_kv_blob (§5.7, S) — `a03012e`
 - [x] 8. TS reverse cursor traversal (§5.8, M) — `66115d6`; folded fix `0a49511` (cursor reset rewind)
-- [ ] 9. TS consumed watermark (§5.9, S/M)
+- [x] 9. TS consumed watermark (§5.9, S/M) — `4ddd0cb`
 - [ ] 10. TS multiple concurrent streams (§5.10, L) — topic branch
 - [ ] 11. TS rollover / circular buffer mode (§5.11, L) — topic branch
 - [ ] 12. FlatBuffers document export (§5.12, M)
 - [ ] 13. Sample: doc_cbor_nested + final cleanup (§5.13, S)
 
 ## Notes / deviations
+
+- Docs (including doxygen) describe **capabilities**, not implementation
+  status: no "stub", "not yet implemented", or change history in reference
+  docs. Unshipped work belongs in `docs/roadmap.md`. Keep boundaries honest —
+  say what a call returns rather than implying a capability that is absent.
 
 - The build VM has no ARM Zephyr SDK, so the `tests/hardware` build gate cannot
   run locally (`verify-toolchain` fails). CI covers it. Changes to that suite
