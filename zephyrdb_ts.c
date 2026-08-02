@@ -373,7 +373,8 @@ static int zdb_ts_build_path(const zdb_cfg_t *cfg, const char *stream_name,
 	return 0;
 }
 
-static int zdb_ts_flush_buffer_locked(struct zdb_ts_core_ctx *ctx)
+static int zdb_ts_flush_buffer_locked(struct zdb_ts_core_ctx *ctx,
+				      struct zdb_ts_stream_ctx *slot)
 {
 	struct fs_file_t file;
 	char path[ZDB_TS_PATH_MAX];
@@ -384,15 +385,15 @@ static int zdb_ts_flush_buffer_locked(struct zdb_ts_core_ctx *ctx)
 		return -EINVAL;
 	}
 
-	if ((ctx->active_stream == NULL) || (ctx->ingest_buf == NULL)) {
+	if ((slot == NULL) || !slot->in_use || (slot->ingest_buf == NULL)) {
 		return -EINVAL;
 	}
 
-	if (ctx->ingest_used == 0U) {
+	if (slot->ingest_used == 0U) {
 		return 0;
 	}
 
-	rc = zdb_ts_build_path(ctx->db->cfg, ctx->active_stream, path, sizeof(path));
+	rc = zdb_ts_build_path(ctx->db->cfg, slot->name, path, sizeof(path));
 	if (rc < 0) {
 		return rc;
 	}
@@ -403,8 +404,8 @@ static int zdb_ts_flush_buffer_locked(struct zdb_ts_core_ctx *ctx)
 		return rc;
 	}
 
-	wr = fs_write(&file, ctx->ingest_buf, ctx->ingest_used);
-	if ((wr < 0) || ((size_t)wr != ctx->ingest_used)) {
+	wr = fs_write(&file, slot->ingest_buf, slot->ingest_used);
+	if ((wr < 0) || ((size_t)wr != slot->ingest_used)) {
 		(void)fs_close(&file);
 		return (wr < 0) ? (int)wr : -EIO;
 	}
@@ -414,8 +415,50 @@ static int zdb_ts_flush_buffer_locked(struct zdb_ts_core_ctx *ctx)
 		return rc;
 	}
 
-	ctx->ingest_used = 0U;
+	slot->ingest_used = 0U;
 	return 0;
+}
+
+/*
+ * Flush every stream holding buffered samples.
+ *
+ * Returns the first failure, having attempted the rest: one stream's write
+ * error must not strand another stream's data in RAM. A failed stream keeps
+ * its buffer for the next attempt.
+ */
+static int zdb_ts_flush_all_locked(struct zdb_ts_core_ctx *ctx, size_t *out_flushed_bytes)
+{
+	int first_error = 0;
+	size_t i;
+
+	if (out_flushed_bytes != NULL) {
+		*out_flushed_bytes = 0U;
+	}
+
+	for (i = 0U; i < ARRAY_SIZE(ctx->streams); i++) {
+		struct zdb_ts_stream_ctx *slot = &ctx->streams[i];
+		size_t pending;
+		int rc;
+
+		if (!slot->in_use || (slot->ingest_used == 0U)) {
+			continue;
+		}
+
+		pending = slot->ingest_used;
+		rc = zdb_ts_flush_buffer_locked(ctx, slot);
+		if (rc < 0) {
+			if (first_error == 0) {
+				first_error = rc;
+			}
+			continue;
+		}
+
+		if (out_flushed_bytes != NULL) {
+			*out_flushed_bytes += pending;
+		}
+	}
+
+	return first_error;
 }
 #endif
 
@@ -620,10 +663,9 @@ static void zdb_ts_flush_work_handler(struct k_work *work)
 	}
 
 #if ZDB_TS_USE_LITTLEFS
-	flushed_bytes = ctx->ingest_used;
-	rc = zdb_ts_flush_buffer_locked(ctx);
+	/* One work item drains every stream; a failing stream keeps its data. */
+	rc = zdb_ts_flush_all_locked(ctx, &flushed_bytes);
 	if (rc < 0) {
-		/* Keep data in buffer for retry by not mutating ingest_used on error. */
 		status = zdb_status_from_errno(rc);
 	}
 #else
@@ -635,10 +677,110 @@ static void zdb_ts_flush_work_handler(struct k_work *work)
 
 #if defined(CONFIG_ZDB_EVENTING) && (CONFIG_ZDB_EVENTING)
 	if ((flushed_bytes > 0U) || (status != ZDB_OK)) {
-		zdb_emit_ts_event(ctx->db, ZDB_TS_EVENT_FLUSH, ctx->active_stream,
+		/*
+		 * The flush covers every stream, so the event reports the total
+		 * rather than naming one of them.
+		 */
+		zdb_emit_ts_event(ctx->db, ZDB_TS_EVENT_FLUSH, NULL,
 				  0U, 0, flushed_bytes, 0U, status);
 	}
 #endif
+}
+
+/*
+ * Find the slot holding an open stream, or NULL.
+ */
+static struct zdb_ts_stream_ctx *zdb_ts_slot_find(struct zdb_ts_core_ctx *ctx,
+						  const char *stream_name)
+{
+	size_t i;
+
+	if ((ctx == NULL) || (stream_name == NULL)) {
+		return NULL;
+	}
+
+	for (i = 0U; i < ARRAY_SIZE(ctx->streams); i++) {
+		if (ctx->streams[i].in_use && (strcmp(ctx->streams[i].name, stream_name) == 0)) {
+			return &ctx->streams[i];
+		}
+	}
+
+	return NULL;
+}
+
+/*
+ * Claim a slot for a stream, giving it an ingest buffer.
+ *
+ * Re-opening an already-open stream returns its existing slot, so appends and
+ * cursors keep seeing the same buffered samples.
+ */
+static struct zdb_ts_stream_ctx *zdb_ts_slot_claim(struct zdb_ts_core_ctx *ctx,
+						   const char *stream_name)
+{
+	struct zdb_ts_stream_ctx *slot;
+	size_t i;
+
+	slot = zdb_ts_slot_find(ctx, stream_name);
+	if (slot != NULL) {
+		if (slot->open_count < UINT8_MAX) {
+			slot->open_count++;
+		}
+		return slot;
+	}
+
+	for (i = 0U; i < ARRAY_SIZE(ctx->streams); i++) {
+		if (ctx->streams[i].in_use) {
+			continue;
+		}
+
+		slot = &ctx->streams[i];
+		(void)memset(slot, 0, sizeof(*slot));
+		(void)strncpy(slot->name, stream_name, sizeof(slot->name) - 1U);
+		slot->name[sizeof(slot->name) - 1U] = '\0';
+
+#if ZDB_TS_USE_LITTLEFS
+		slot->ingest_capacity = MIN((size_t)CONFIG_ZDB_TS_INGEST_BUFFER_BYTES,
+					    (size_t)CONFIG_ZDB_TS_INGEST_SLAB_BLOCK_SIZE);
+		if ((ctx->db->ts_ingest_slab == NULL) ||
+		    (k_mem_slab_alloc(ctx->db->ts_ingest_slab, (void **)&slot->ingest_buf,
+				      K_NO_WAIT) != 0)) {
+			return NULL;
+		}
+#else
+		slot->ingest_capacity = 0U;
+		slot->ingest_buf = NULL;
+#endif
+		slot->ingest_used = 0U;
+		slot->open_count = 1U;
+		slot->in_use = true;
+		return slot;
+	}
+
+	return NULL;
+}
+
+/*
+ * Drop one handle's claim on a slot, freeing it once the last one goes.
+ * Returns true when the slot was actually released.
+ */
+static bool zdb_ts_slot_release(struct zdb_ts_core_ctx *ctx, struct zdb_ts_stream_ctx *slot)
+{
+	if ((ctx == NULL) || (slot == NULL) || !slot->in_use) {
+		return false;
+	}
+
+	if (slot->open_count > 1U) {
+		slot->open_count--;
+		return false;
+	}
+
+#if ZDB_TS_USE_LITTLEFS
+	if ((slot->ingest_buf != NULL) && (ctx->db->ts_ingest_slab != NULL)) {
+		k_mem_slab_free(ctx->db->ts_ingest_slab, slot->ingest_buf);
+	}
+#endif
+	(void)memset(slot, 0, sizeof(*slot));
+	return true;
 }
 
 static struct zdb_ts_core_ctx *zdb_ts_ctx_get_or_alloc(zdb_t *db)
@@ -661,19 +803,6 @@ static struct zdb_ts_core_ctx *zdb_ts_ctx_get_or_alloc(zdb_t *db)
 	/* A NULL cfg.work_q means "use the system work queue", as documented. */
 	ctx->work_q = (db->cfg->work_q != NULL) ? db->cfg->work_q : &k_sys_work_q;
 	ctx->db = db;
-
-#if ZDB_TS_USE_LITTLEFS
-	ctx->ingest_capacity = MIN((size_t)CONFIG_ZDB_TS_INGEST_BUFFER_BYTES,
-				   (size_t)CONFIG_ZDB_TS_INGEST_SLAB_BLOCK_SIZE);
-	if ((db->ts_ingest_slab == NULL) ||
-	    (k_mem_slab_alloc(db->ts_ingest_slab, (void **)&ctx->ingest_buf, K_NO_WAIT) != 0)) {
-		k_mem_slab_free(db->core_slab, ctx);
-		return NULL;
-	}
-#else
-	ctx->ingest_capacity = 0U;
-	ctx->ingest_buf = NULL;
-#endif
 
 	k_work_init(&ctx->flush_work, zdb_ts_flush_work_handler);
 	k_sem_init(&ctx->flush_done, 0, 1);
@@ -729,13 +858,16 @@ zdb_status_t zdb_ts_open(zdb_t *db, const char *stream_name, zdb_ts_t *ts)
 	}
 #endif
 
-	if ((ctx->active_stream != NULL) && (strcmp(ctx->active_stream, stream_name) != 0)) {
+	/*
+	 * Claim a slot. Re-opening a stream that is already open returns the
+	 * same slot, so buffered samples stay visible.
+	 */
+	if (zdb_ts_slot_claim(ctx, stream_name) == NULL) {
 		return ZDB_ERR_BUSY;
 	}
 
 	ts->db = db;
 	ts->stream_name = stream_name;
-	ctx->active_stream = stream_name;
 
 #if defined(CONFIG_ZDB_TS_AUTO_RECOVER_ON_OPEN) && (CONFIG_ZDB_TS_AUTO_RECOVER_ON_OPEN)
 	rc = zdb_ts_recover_stream(ts, &truncated);
@@ -755,18 +887,50 @@ zdb_status_t zdb_ts_open(zdb_t *db, const char *stream_name, zdb_ts_t *ts)
 
 zdb_status_t zdb_ts_close(zdb_ts_t *ts)
 {
+	struct zdb_ts_core_ctx *ctx;
+	struct zdb_ts_stream_ctx *slot;
+	zdb_status_t status = ZDB_OK;
+
 	if (ts == NULL) {
 		return ZDB_ERR_INVAL;
 	}
 
+	if ((ts->db != NULL) && (ts->stream_name != NULL)) {
+		ctx = (struct zdb_ts_core_ctx *)ts->db->ts_ctx;
+		if (ctx != NULL) {
+			if (zdb_lock_write(ts->db) == ZDB_OK) {
+				slot = zdb_ts_slot_find(ctx, ts->stream_name);
+				if ((slot != NULL) && (slot->open_count <= 1U)) {
+#if ZDB_TS_USE_LITTLEFS
+					/*
+					 * Persist what is buffered before the
+					 * slot goes away, so closing a stream
+					 * never silently drops samples.
+					 */
+					int rc = zdb_ts_flush_buffer_locked(ctx, slot);
+
+					if (rc < 0) {
+						status = zdb_status_from_errno(rc);
+					}
+#endif
+				}
+				if (slot != NULL) {
+					(void)zdb_ts_slot_release(ctx, slot);
+				}
+				zdb_unlock_write(ts->db);
+			}
+		}
+	}
+
 	ts->db = NULL;
 	ts->stream_name = NULL;
-	return ZDB_OK;
+	return status;
 }
 
 zdb_status_t zdb_ts_append_i64(zdb_ts_t *ts, const zdb_ts_sample_i64_t *sample)
 {
 	struct zdb_ts_core_ctx *ctx;
+	struct zdb_ts_stream_ctx *slot;
 	struct zdb_ts_record_i64 rec;
 	zdb_status_t lock_rc;
 	zdb_status_t status = ZDB_OK;
@@ -780,12 +944,13 @@ zdb_status_t zdb_ts_append_i64(zdb_ts_t *ts, const zdb_ts_sample_i64_t *sample)
 	}
 
 	ctx = zdb_ts_ctx_get_or_alloc(ts->db);
-	if ((ctx == NULL) || (ctx->active_stream == NULL)) {
+	if (ctx == NULL) {
 		return ZDB_ERR_INVAL;
 	}
 
-	if (strcmp(ctx->active_stream, ts->stream_name) != 0) {
-		return ZDB_ERR_BUSY;
+	slot = zdb_ts_slot_find(ctx, ts->stream_name);
+	if (slot == NULL) {
+		return ZDB_ERR_INVAL;
 	}
 
 	lock_rc = zdb_lock_write(ts->db);
@@ -794,20 +959,21 @@ zdb_status_t zdb_ts_append_i64(zdb_ts_t *ts, const zdb_ts_sample_i64_t *sample)
 	}
 
 #if ZDB_TS_USE_FCB
+	ARG_UNUSED(slot);
 	zdb_ts_record_encode(sample, &rec);
 	rc = zdb_ts_fcb_append_record(ctx, &rec);
 	zdb_unlock_write(ts->db);
 
 	status = (rc < 0) ? zdb_status_from_errno(rc) : ZDB_OK;
 #else
-	if ((ctx->ingest_capacity < sizeof(rec)) || (ctx->ingest_buf == NULL)) {
+	if ((slot->ingest_capacity < sizeof(rec)) || (slot->ingest_buf == NULL)) {
 		zdb_unlock_write(ts->db);
 		status = ZDB_ERR_NOMEM;
 		goto out;
 	}
 
-	if ((ctx->ingest_used + sizeof(rec)) > ctx->ingest_capacity) {
-		rc = zdb_ts_flush_buffer_locked(ctx);
+	if ((slot->ingest_used + sizeof(rec)) > slot->ingest_capacity) {
+		rc = zdb_ts_flush_buffer_locked(ctx, slot);
 		if (rc < 0) {
 			zdb_unlock_write(ts->db);
 			status = zdb_status_from_errno(rc);
@@ -816,9 +982,9 @@ zdb_status_t zdb_ts_append_i64(zdb_ts_t *ts, const zdb_ts_sample_i64_t *sample)
 	}
 
 	zdb_ts_record_encode(sample, &rec);
-	(void)memcpy(&ctx->ingest_buf[ctx->ingest_used], &rec, sizeof(rec));
-	ctx->ingest_used += sizeof(rec);
-	need_async_flush = (ctx->ingest_used == ctx->ingest_capacity);
+	(void)memcpy(&slot->ingest_buf[slot->ingest_used], &rec, sizeof(rec));
+	slot->ingest_used += sizeof(rec);
+	need_async_flush = (slot->ingest_used == slot->ingest_capacity);
 	zdb_unlock_write(ts->db);
 
 	if (need_async_flush) {
@@ -839,6 +1005,7 @@ zdb_status_t zdb_ts_append_batch_i64(zdb_ts_t *ts, const zdb_ts_sample_i64_t *sa
 			      size_t sample_count)
 {
 	struct zdb_ts_core_ctx *ctx;
+	struct zdb_ts_stream_ctx *slot;
 	struct zdb_ts_record_i64 rec;
 	zdb_status_t lock_rc;
 	zdb_status_t status = ZDB_OK;
@@ -859,14 +1026,10 @@ zdb_status_t zdb_ts_append_batch_i64(zdb_ts_t *ts, const zdb_ts_sample_i64_t *sa
 		return lock_rc;
 	}
 
-	if (ctx->active_stream == NULL) {
+	slot = zdb_ts_slot_find(ctx, ts->stream_name);
+	if (slot == NULL) {
 		zdb_unlock_write(ts->db);
 		return ZDB_ERR_INVAL;
-	}
-
-	if (strcmp(ctx->active_stream, ts->stream_name) != 0) {
-		zdb_unlock_write(ts->db);
-		return ZDB_ERR_BUSY;
 	}
 
 	for (i = 0U; i < sample_count; i++) {
@@ -878,13 +1041,13 @@ zdb_status_t zdb_ts_append_batch_i64(zdb_ts_t *ts, const zdb_ts_sample_i64_t *sa
 			break;
 		}
 #else
-		if ((ctx->ingest_capacity < sizeof(rec)) || (ctx->ingest_buf == NULL)) {
+		if ((slot->ingest_capacity < sizeof(rec)) || (slot->ingest_buf == NULL)) {
 			status = ZDB_ERR_NOMEM;
 			break;
 		}
 
-		if ((ctx->ingest_used + sizeof(rec)) > ctx->ingest_capacity) {
-			rc = zdb_ts_flush_buffer_locked(ctx);
+		if ((slot->ingest_used + sizeof(rec)) > slot->ingest_capacity) {
+			rc = zdb_ts_flush_buffer_locked(ctx, slot);
 			if (rc < 0) {
 				status = zdb_status_from_errno(rc);
 				break;
@@ -892,15 +1055,15 @@ zdb_status_t zdb_ts_append_batch_i64(zdb_ts_t *ts, const zdb_ts_sample_i64_t *sa
 		}
 
 		zdb_ts_record_encode(&samples[i], &rec);
-		(void)memcpy(&ctx->ingest_buf[ctx->ingest_used], &rec, sizeof(rec));
-		ctx->ingest_used += sizeof(rec);
+		(void)memcpy(&slot->ingest_buf[slot->ingest_used], &rec, sizeof(rec));
+		slot->ingest_used += sizeof(rec);
 #endif
 	}
 
 	zdb_unlock_write(ts->db);
 
 #if !ZDB_TS_USE_FCB
-	if ((status == ZDB_OK) && (ctx->ingest_used == ctx->ingest_capacity)) {
+	if ((status == ZDB_OK) && (slot->ingest_used == slot->ingest_capacity)) {
 		(void)zdb_ts_flush_async(ts);
 	}
 #endif
@@ -1139,7 +1302,11 @@ static zdb_status_t zdb_ts_count_all(zdb_ts_t *ts, uint32_t *out_count)
 
 	ctx = (struct zdb_ts_core_ctx *)ts->db->ts_ctx;
 	if (ctx != NULL) {
-		buffered = ctx->ingest_used / sizeof(struct zdb_ts_record_i64);
+		struct zdb_ts_stream_ctx *slot = zdb_ts_slot_find(ctx, ts->stream_name);
+
+		if (slot != NULL) {
+			buffered = slot->ingest_used / sizeof(struct zdb_ts_record_i64);
+		}
 	}
 
 	zdb_unlock_read(ts->db);
@@ -1418,16 +1585,25 @@ static zdb_status_t zdb_ts_cursor_next_ram(zdb_cursor_t *cursor,
 					   zdb_bytes_t *out_record)
 {
 	struct zdb_ts_core_ctx *tctx;
+	struct zdb_ts_stream_ctx *slot;
 	struct zdb_ts_record_i64 rec;
 	zdb_bytes_t candidate;
 	zdb_status_t lock_rc;
 
 	tctx = zdb_ts_ctx_get_or_alloc(cctx->db);
-	if ((tctx == NULL) || (tctx->ingest_buf == NULL)) {
+	if (tctx == NULL) {
 		return ZDB_ERR_INVAL;
 	}
-	if ((tctx->active_stream != NULL) && (strcmp(tctx->active_stream, cctx->stream_name) != 0)) {
-		return ZDB_ERR_BUSY;
+
+	/*
+	 * A cursor over a stream that has since been closed simply sees no
+	 * buffered samples; its stored records are still served from the file.
+	 */
+	slot = zdb_ts_slot_find(tctx, cctx->stream_name);
+	if ((slot == NULL) || (slot->ingest_buf == NULL)) {
+		out_record->data = NULL;
+		out_record->len = 0U;
+		return ZDB_ERR_NOT_FOUND;
 	}
 
 	lock_rc = zdb_lock_read(cctx->db);
@@ -1435,7 +1611,7 @@ static zdb_status_t zdb_ts_cursor_next_ram(zdb_cursor_t *cursor,
 		return lock_rc;
 	}
 
-	while ((cctx->ram_offset + sizeof(rec)) <= tctx->ingest_used) {
+	while ((cctx->ram_offset + sizeof(rec)) <= slot->ingest_used) {
 		uint64_t ts_ms;
 		int64_t val;
 		zdb_status_t dec_rc;
@@ -1447,10 +1623,10 @@ static zdb_status_t zdb_ts_cursor_next_ram(zdb_cursor_t *cursor,
 		 * back from the end of the buffer.
 		 */
 		buf_off = cctx->descending
-				  ? (tctx->ingest_used - cctx->ram_offset - sizeof(rec))
+				  ? (slot->ingest_used - cctx->ram_offset - sizeof(rec))
 				  : cctx->ram_offset;
 
-		candidate.data = &tctx->ingest_buf[buf_off];
+		candidate.data = &slot->ingest_buf[buf_off];
 		candidate.len = sizeof(rec);
 		(void)memcpy(&rec, candidate.data, sizeof(rec));
 		dec_rc = zdb_ts_record_decode(cctx->db, &rec, &ts_ms, &val);

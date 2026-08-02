@@ -176,9 +176,13 @@ Helpers: `ZDB_TS_WINDOW_ALL` — a `zdb_ts_window_t` covering all timestamps.
 
 Notes:
 
-- One instance handles **one active stream** at a time: opening a second,
-  different stream returns `ZDB_ERR_BUSY` until `zdb_deinit()`. Re-opening
-  the active stream is allowed.
+- An instance holds up to `CONFIG_ZDB_TS_MAX_STREAMS` streams open at once
+  (default 1). Opening one more than that returns `ZDB_ERR_BUSY`; closing a
+  stream frees its slot. Re-opening a stream that is already open shares the
+  same slot, and the slot is released once every handle is closed.
+- Each open stream has its own ingest buffer, so appends to different streams
+  stay independent. `zdb_ts_flush_async`/`zdb_ts_flush_sync` persist every
+  stream's buffered samples, and `zdb_ts_close` flushes the stream it closes.
 - Cursors iterate flushed records from storage plus samples still in the
   RAM ingest buffer. `zdb_cursor_reset` rewinds a cursor so it can be walked
   again.

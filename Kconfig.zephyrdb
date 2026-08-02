@@ -98,12 +98,14 @@ config ZDB_CORE_SLAB_BLOCK_SIZE
 	int "Core slab block size (bytes)"
 	range 32 2048
 	default 512 if ZDB_TS_BACKEND_FCB
-	default 128
+	default 256
 	help
 	  Must be large enough to hold the time-series core context. The build
 	  asserts this, so a too-small value fails to compile rather than
-	  corrupting the slab at runtime. The FCB backend needs considerably
-	  more because the context embeds the FCB instance and its sector array.
+	  corrupting the slab at runtime. The context holds one slot per
+	  concurrently open stream, so raising ZDB_TS_MAX_STREAMS may require
+	  raising this too. The FCB backend needs considerably more because the
+	  context also embeds the FCB instance and its sector array.
 
 config ZDB_CORE_SLAB_BLOCK_COUNT
 	int "Core slab block count"
@@ -184,6 +186,17 @@ config ZDB_TS_MAX_AGG_POINTS
 	range 1 1048576
 	default 4096
 	depends on ZDB_TS_BACKEND_LITTLEFS
+
+config ZDB_TS_MAX_STREAMS
+	int "Maximum streams open at once"
+	range 1 16
+	default 1
+	help
+	  How many time-series streams one instance can hold open
+	  simultaneously. Each open stream takes one ingest slab block plus a
+	  small slot in the core context, so raising this needs
+	  ZDB_TS_INGEST_SLAB_BLOCK_COUNT at least as large, and may need a
+	  bigger ZDB_CORE_SLAB_BLOCK_SIZE. The build asserts both.
 
 config ZDB_TS_INGEST_SLAB_BLOCK_SIZE
 	int "TS ingest slab block size (bytes)"
