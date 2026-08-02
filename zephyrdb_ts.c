@@ -988,7 +988,16 @@ zdb_status_t zdb_ts_append_i64(zdb_ts_t *ts, const zdb_ts_sample_i64_t *sample)
 	zdb_unlock_write(ts->db);
 
 	if (need_async_flush) {
-		status = zdb_ts_flush_async(ts);
+		/*
+		 * The sample is already buffered; this flush only starts
+		 * draining early. ZDB_ERR_BUSY means a flush is in flight
+		 * already, which is not an append failure.
+		 */
+		zdb_status_t flush_rc = zdb_ts_flush_async(ts);
+
+		if (flush_rc != ZDB_ERR_BUSY) {
+			status = flush_rc;
+		}
 	}
 #endif
 
