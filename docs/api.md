@@ -55,6 +55,7 @@ All APIs return `zdb_status_t`: `ZDB_OK`, `ZDB_ERR_INVAL`, `ZDB_ERR_NOMEM`,
 - `zdb_kv_open(db, namespace_name, kv)` / `zdb_kv_close(kv)`
 - `zdb_kv_set(kv, key, value, value_len)`
 - `zdb_kv_get(kv, key, out_value, out_capacity, out_len)`
+- `zdb_kv_set_str(kv, key, value)` / `zdb_kv_get_str(kv, key, out_str, out_capacity, out_len)`
 - `zdb_kv_delete(kv, key)`
 - `zdb_kv_iter_open(kv, out_iter)`
 - `zdb_kv_iter_next(iter, out_key, out_key_capacity, out_key_len, out_value, out_value_capacity, out_value_len)`
@@ -78,6 +79,12 @@ Notes:
   `out_capacity` bytes and reports the full stored length in `*out_len`.
   Compare `*out_len` against your capacity to detect truncation.
 - A zero-length value is valid; `value` may be NULL when `value_len` is 0.
+- The string helpers wrap the byte API for the common case: `zdb_kv_set_str`
+  stores `strlen(value) + 1` bytes so the terminator is part of the value, and
+  `zdb_kv_get_str` always terminates its output, copying at most
+  `out_capacity - 1` bytes. Detect truncation with `*out_len + 1 >
+  out_capacity`. `zdb_kv_get_str` also handles values written through
+  `zdb_kv_set` without a terminator.
 - Records written by pre-v2 builds are treated as absent (reads and deletes
   report `ZDB_ERR_NOT_FOUND`); a set reclaims the slot.
 - The iterator walks keys set/deleted during the current session (RAM index,

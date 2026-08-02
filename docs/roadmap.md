@@ -15,9 +15,6 @@ reverse traversal, which remains below.
   post-firmware-update merge: new defaults appear, user-modified values
   survive. (Handling removed/renamed/retyped keys would additionally need a
   defaults-schema version; defer until needed.)
-- **KV string type convenience API** — Dedicated string get/set wrappers over
-  the raw blob API (store NUL, guarantee termination on read). Trivial;
-  filler work.
 
 ## Next — structural features
 

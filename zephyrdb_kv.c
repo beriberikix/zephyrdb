@@ -752,4 +752,58 @@ zdb_status_t zdb_kv_iter_close(zdb_kv_iter_t *iter)
 	return ZDB_OK;
 }
 
+zdb_status_t zdb_kv_set_str(zdb_kv_t *kv, const char *key, const char *value)
+{
+	if (value == NULL) {
+		return ZDB_ERR_INVAL;
+	}
+
+	/* Store the terminator so readers can hand the bytes straight back. */
+	return zdb_kv_set(kv, key, value, strlen(value) + 1U);
+}
+
+zdb_status_t zdb_kv_get_str(zdb_kv_t *kv, const char *key, char *out_str,
+			    size_t out_capacity, size_t *out_len)
+{
+	size_t stored_len = 0U;
+	const void *terminator;
+	size_t copied;
+	zdb_status_t rc;
+
+	if ((out_str == NULL) || (out_capacity == 0U) || (out_len == NULL)) {
+		return ZDB_ERR_INVAL;
+	}
+
+	/*
+	 * Reserve the last byte for the terminator so the result is always a
+	 * valid C string, even when the stored value is longer or was written
+	 * as a raw blob without one.
+	 */
+	rc = zdb_kv_get(kv, key, out_str, out_capacity - 1U, &stored_len);
+	if (rc != ZDB_OK) {
+		*out_len = 0U;
+		out_str[0] = '\0';
+		return rc;
+	}
+
+	copied = (stored_len < (out_capacity - 1U)) ? stored_len : (out_capacity - 1U);
+	terminator = memchr(out_str, '\0', copied);
+
+	if (terminator != NULL) {
+		/* Whole string present: its length is where the NUL sits. */
+		*out_len = (size_t)((const char *)terminator - out_str);
+	} else {
+		/*
+		 * Either the value did not fit, or it was written through the
+		 * raw API without a terminator. Terminate what we copied and
+		 * report the stored size, which lets the caller detect the
+		 * truncation via *out_len + 1 > out_capacity.
+		 */
+		out_str[copied] = '\0';
+		*out_len = stored_len;
+	}
+
+	return ZDB_OK;
+}
+
 #endif /* CONFIG_ZDB_KV */

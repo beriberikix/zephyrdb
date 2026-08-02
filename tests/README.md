@@ -9,7 +9,7 @@ the real Kconfig — no source-inclusion or fake `CONFIG_*` definitions.
 
 | Suite | Testcase ID | Backend | Covers |
 |---|---|---|---|
-| `unit/kv_zms` | `zephyrdb.unit.kv.zms` | ZMS on `storage_partition` (flash simulator) | KV set/get/delete round-trips, overwrite, size limits, namespace isolation, iterators |
+| `unit/kv_zms` | `zephyrdb.unit.kv.zms` | ZMS on `storage_partition` (flash simulator) | KV set/get/delete round-trips, overwrite, zero-length values, size limits, namespace isolation, iterators, string helpers (round-trip, empty, truncation termination, unterminated blobs) |
 | `unit/kv_nvs` | `zephyrdb.unit.kv.nvs` | NVS on `storage_partition` | Same suite source as `kv_zms`, plus the deterministic 16-bit record-ID collision test |
 | `unit/kv_events` | `zephyrdb.unit.kv.events` | ZMS | Event listener dispatch: success statuses, multi-listener, null-notify slots, no-event-on-failure paths |
 | `unit/ts_basic` | `zephyrdb.unit.ts_basic` | LittleFS (`boards/native_sim.overlay`) | Append (single + batch API), flush sync, aggregates with exact values, time windows, cursors (file + unflushed RAM), recovery truncation, stats |

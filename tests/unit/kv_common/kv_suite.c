@@ -593,6 +593,90 @@ ZTEST(kv_suite, test_kv_old_format_record_ignored)
 	zdb_kv_close(&kv);
 }
 
+ZTEST(kv_suite, test_kv_string_roundtrip)
+{
+	zdb_kv_t kv;
+	char out[32];
+	size_t out_len = 0U;
+	zdb_status_t rc = zdb_kv_open(&g_db, "ns_str", &kv);
+
+	zassert_equal(rc, ZDB_OK, "open failed: %d", rc);
+
+	rc = zdb_kv_set_str(&kv, "greeting", "hello");
+	zassert_equal(rc, ZDB_OK, "set_str failed: %d", rc);
+
+	rc = zdb_kv_get_str(&kv, "greeting", out, sizeof(out), &out_len);
+	zassert_equal(rc, ZDB_OK, "get_str failed: %d", rc);
+	zassert_str_equal(out, "hello", "value mismatch");
+	zassert_equal(out_len, 5U, "expected length 5, got %zu", out_len);
+
+	zdb_kv_close(&kv);
+}
+
+ZTEST(kv_suite, test_kv_string_empty)
+{
+	zdb_kv_t kv;
+	char out[8];
+	size_t out_len = 0U;
+	zdb_status_t rc = zdb_kv_open(&g_db, "ns_str_empty", &kv);
+
+	zassert_equal(rc, ZDB_OK, "open failed: %d", rc);
+
+	rc = zdb_kv_set_str(&kv, "empty", "");
+	zassert_equal(rc, ZDB_OK, "storing an empty string failed: %d", rc);
+
+	rc = zdb_kv_get_str(&kv, "empty", out, sizeof(out), &out_len);
+	zassert_equal(rc, ZDB_OK, "get_str failed: %d", rc);
+	zassert_equal(out_len, 0U, "expected length 0, got %zu", out_len);
+	zassert_equal(out[0], '\0', "result not terminated");
+
+	zdb_kv_close(&kv);
+}
+
+/* A short buffer must still yield a valid string, plus a way to spot the cut. */
+ZTEST(kv_suite, test_kv_string_truncation_is_terminated)
+{
+	zdb_kv_t kv;
+	char out[4];
+	size_t out_len = 0U;
+	zdb_status_t rc = zdb_kv_open(&g_db, "ns_str_trunc", &kv);
+
+	zassert_equal(rc, ZDB_OK, "open failed: %d", rc);
+
+	rc = zdb_kv_set_str(&kv, "long", "abcdefgh");
+	zassert_equal(rc, ZDB_OK, "set_str failed: %d", rc);
+
+	rc = zdb_kv_get_str(&kv, "long", out, sizeof(out), &out_len);
+	zassert_equal(rc, ZDB_OK, "get_str failed: %d", rc);
+	zassert_equal(out[sizeof(out) - 1U], '\0', "truncated result not terminated");
+	zassert_str_equal(out, "abc", "unexpected truncated prefix");
+	zassert_true(out_len + 1U > sizeof(out), "truncation not detectable: %zu", out_len);
+
+	zdb_kv_close(&kv);
+}
+
+/* get_str must cope with values written through the raw API. */
+ZTEST(kv_suite, test_kv_string_reads_unterminated_blob)
+{
+	zdb_kv_t kv;
+	const char raw[3] = {'x', 'y', 'z'};
+	char out[16];
+	size_t out_len = 0U;
+	zdb_status_t rc = zdb_kv_open(&g_db, "ns_str_raw", &kv);
+
+	zassert_equal(rc, ZDB_OK, "open failed: %d", rc);
+
+	rc = zdb_kv_set(&kv, "raw", raw, sizeof(raw));
+	zassert_equal(rc, ZDB_OK, "set failed: %d", rc);
+
+	rc = zdb_kv_get_str(&kv, "raw", out, sizeof(out), &out_len);
+	zassert_equal(rc, ZDB_OK, "get_str failed: %d", rc);
+	zassert_str_equal(out, "xyz", "unterminated blob mishandled");
+	zassert_equal(out_len, 3U, "expected length 3, got %zu", out_len);
+
+	zdb_kv_close(&kv);
+}
+
 /* zdb_kv_set has always documented zero-length values as allowed. */
 ZTEST(kv_suite, test_kv_set_zero_length_value)
 {

@@ -636,6 +636,51 @@ extern "C"
 							size_t out_capacity, size_t *out_len);
 
 	/**
+	 * @brief Store a NUL-terminated string.
+	 *
+	 * Convenience wrapper over zdb_kv_set() that stores `strlen(value) + 1`
+	 * bytes, so the terminator is part of the stored value. An empty string
+	 * is stored as a single NUL byte.
+	 *
+	 * @param kv    Open namespace handle.
+	 * @param key   Key string.
+	 * @param value NUL-terminated value to store.
+	 * @retval ZDB_OK             Success.
+	 * @retval ZDB_ERR_INVAL      NULL argument or over-long key.
+	 * @retval ZDB_ERR_NOMEM      Record exceeds the KV IO slab block size, or
+	 *                            no slab block was free.
+	 * @retval ZDB_ERR_COLLISION  The record ID slot holds a different key.
+	 * @retval ZDB_ERR_IO         Backend write failure.
+	 */
+	zdb_status_t zdb_kv_set_str(zdb_kv_t *kv, const char *key, const char *value);
+
+	/**
+	 * @brief Read a value as a NUL-terminated string.
+	 *
+	 * Never fails on a too-small buffer and always terminates @p out_str,
+	 * copying at most `out_capacity - 1` bytes. Detect truncation with
+	 * `*out_len + 1 > out_capacity`.
+	 *
+	 * Values written by zdb_kv_set_str() round-trip exactly. A value written
+	 * through zdb_kv_set() without a terminator is also returned as a
+	 * terminated string.
+	 *
+	 * @param kv           Open namespace handle.
+	 * @param key          Key string.
+	 * @param out_str      Destination buffer; must be at least 1 byte.
+	 * @param out_capacity Destination capacity in bytes, including the terminator.
+	 * @param out_len      Set to the string length excluding the terminator. If
+	 *                     the value did not fit, set to the stored byte count,
+	 *                     which bounds the buffer size needed.
+	 * @retval ZDB_OK            Success.
+	 * @retval ZDB_ERR_INVAL     NULL argument, zero capacity, or over-long key.
+	 * @retval ZDB_ERR_NOT_FOUND No record for this (namespace, key).
+	 * @retval ZDB_ERR_IO        Backend read failure.
+	 */
+	zdb_status_t zdb_kv_get_str(zdb_kv_t *kv, const char *key, char *out_str,
+								size_t out_capacity, size_t *out_len);
+
+	/**
 	 * @brief Delete the record stored under a key.
 	 *
 	 * Verifies the stored record's identity first, so a colliding record
