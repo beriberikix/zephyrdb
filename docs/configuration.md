@@ -126,4 +126,4 @@ This page covers the complete option surface, grouped as in the Kconfig menus.
   backends need (see `tests/*/boards/native_sim.overlay` for a LittleFS
   example and `samples/shell_basic` for ZMS on `storage_partition`).
 - Planned-but-unimplemented features are tracked in
-  [roadmap.md](roadmap.md), not as Kconfig symbols.
+  GitHub issues, not as Kconfig symbols.

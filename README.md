@@ -80,7 +80,9 @@ For a complete standalone application example, see [zephyrdb-example](https://gi
 - [Configuration](docs/configuration.md)
 - [Testing Guide](docs/testing.md)
 - [Samples Guide](docs/samples.md)
-- [Roadmap](docs/roadmap.md)
+
+Planned and declined enhancements are tracked as
+[GitHub issues](https://github.com/beriberikix/zephyrdb/issues).
 
 ## Eventing and zbus Adapter
 

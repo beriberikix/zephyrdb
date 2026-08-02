@@ -2,7 +2,7 @@
 # Scope: Core, KV (NVS/ZMS), TS (LittleFS/FCB), DOC (LittleFS),
 # eventing (+zbus), stats, shell, and FlatBuffers helpers.
 # Every symbol here is consumed by code; planned features live in
-# docs/roadmap.md, not in Kconfig.
+# GitHub issues, not in Kconfig.
 
 menuconfig ZEPHYRDB
 	bool "ZephyrDB embedded multi-model database"

@@ -14,10 +14,11 @@ repository root (output in `doxygen/html`).
 - [Configuration](configuration.md)
 - [Testing Guide](testing.md)
 - [Samples Guide](samples.md)
-- [Roadmap](roadmap.md)
 
 ## Quick Links
 
 - Project overview and quick start: [../README.md](../README.md)
 - Public API declarations: [../zephyrdb.h](../zephyrdb.h)
 - Zephyr module options: [../Kconfig.zephyrdb](../Kconfig.zephyrdb)
+- Planned and declined enhancements:
+  [GitHub issues](https://github.com/beriberikix/zephyrdb/issues)
