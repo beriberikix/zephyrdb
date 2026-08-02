@@ -236,20 +236,22 @@ menu "Diagnostics"
 config ZDB_EVENTING
 	bool "Enable ZephyrDB event emitter/listener hooks"
 	default n
-	depends on ZDB_KV
+	depends on ZDB_KV || ZDB_TS || ZDB_DOC
 	help
-	  Enables lightweight local mutation events for KV operations.
-	  This feature is intended for in-process listeners and does not
-	  provide durability or distributed delivery guarantees.
+	  Enables lightweight local mutation events for key-value,
+	  time-series, and document operations. Events are emitted for
+	  whichever modules are enabled. This feature is intended for
+	  in-process listeners and does not provide durability or
+	  distributed delivery guarantees.
 
 config ZDB_EVENTING_ZBUS
-	bool "Publish KV events to zbus"
+	bool "Publish events to zbus"
 	default n
 	depends on ZDB_EVENTING && ZBUS
 	help
-	  Publishes ZephyrDB KV mutation events to a zbus channel.
-	  This is an optional adapter layer and does not change write-path
-	  behavior if publish fails.
+	  Publishes ZephyrDB mutation events to zbus channels, one per
+	  enabled module. This is an optional adapter layer and does not
+	  change write-path behavior if publish fails.
 
 config ZDB_STATS
 	bool "Enable ZephyrDB statistics counters"

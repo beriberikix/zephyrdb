@@ -73,7 +73,8 @@ This page covers the complete option surface, grouped as in the Kconfig menus.
 ## Diagnostics
 
 - `CONFIG_ZDB_EVENTING`: local KV/TS/DOC mutation events (in-process
-  listeners; best-effort, no durability guarantees)
+  listeners; best-effort, no durability guarantees). Available whenever any of
+  KV, TS, or DOC is enabled; events are emitted for the enabled modules.
 - `CONFIG_ZDB_EVENTING_ZBUS`: publish events to zbus channels (requires
   `CONFIG_ZDB_EVENTING` and `CONFIG_ZBUS`); best-effort, never changes
   operation return values
