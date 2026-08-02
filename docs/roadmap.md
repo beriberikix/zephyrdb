@@ -9,10 +9,6 @@ reverse traversal, which remains below.
 
 ## Next — structural features
 
-- **TS rollover / circular buffer mode** — Explicit, backend-agnostic
-  overwrite-oldest-when-full option. FCB nearly provides it via sector
-  rotation; the LittleFS backend needs segmented files with oldest-segment
-  deletion. Highest-value TS feature; medium effort.
 - **FlatBuffers document export** — `zdb_doc_export_flatbuffer()` is a stub
   returning `ZDB_ERR_UNSUPPORTED`; the flatcc dependency is already available
   as a sibling Zephyr module (`flatcc-zephyr`).

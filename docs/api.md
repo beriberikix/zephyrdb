@@ -208,6 +208,15 @@ Notes:
   backwards to force re-processing, and it is independent of which samples the
   stream still holds. A watermark that fails its integrity check reads as
   unset, so a consumer replays instead of skipping.
+- With `CONFIG_ZDB_TS_ROLLOVER` a stream is **bounded**: once it reaches
+  capacity the oldest samples are discarded so new ones keep being accepted,
+  which suits a long-running logger that wants a recent window rather than a
+  full partition. Without it a full stream preserves what it holds and reports
+  an error instead. On LittleFS the stream is stored as up to
+  `CONFIG_ZDB_TS_ROLLOVER_MAX_SEGMENTS` segment files of about
+  `CONFIG_ZDB_TS_ROLLOVER_SEGMENT_BYTES` each, and the oldest whole segment is
+  what gets discarded; cursors, aggregates, and recovery span them. A stream
+  previously stored as a single file is adopted as the first segment.
 - Backend differences (FCB): appends are written through synchronously, so
   `flush_*` are no-ops returning `ZDB_OK`; `zdb_ts_query_aggregate` returns
   `ZDB_ERR_UNSUPPORTED`; `zdb_ts_recover_stream` is a no-op reporting zero

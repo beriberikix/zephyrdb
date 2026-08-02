@@ -55,6 +55,15 @@ This page covers the complete option surface, grouped as in the Kconfig menus.
 ## TS Boundaries
 
 - `CONFIG_ZDB_TS_STREAM_NAME_MAX_LEN` (default 24)
+- `CONFIG_ZDB_TS_ROLLOVER` (default y for FCB, n otherwise): bound a stream by
+  discarding its oldest samples when it is full, instead of refusing new ones.
+- `CONFIG_ZDB_TS_ROLLOVER_SEGMENT_BYTES` (range 256–1048576, default 4096,
+  LittleFS): record bytes per segment file, excluding its 16-byte header. A
+  segment is closed once a write takes it past this, so it can overshoot by up
+  to one ingest buffer.
+- `CONFIG_ZDB_TS_ROLLOVER_MAX_SEGMENTS` (range 2–64, default 4, LittleFS):
+  segments retained per stream, so a stream holds roughly
+  `SEGMENT_BYTES × MAX_SEGMENTS` bytes of records.
 - `CONFIG_ZDB_TS_MAX_STREAMS` (range 1–16, default 1): streams open at once.
   Each open stream takes one ingest slab block and a slot in the core context,
   so raising this needs `CONFIG_ZDB_TS_INGEST_SLAB_BLOCK_COUNT` at least as
