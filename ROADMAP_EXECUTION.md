@@ -51,7 +51,7 @@ under Notes with its reason, keeps its roadmap bullet, and the loop moves on.
 
 - [x] 0. Setup: roadmap commit, doc debt, tracker, VM, baseline — `6756b5d`, `a1aa968`
 - [x] 1. Atomic document saves + full-payload CRC (§5.1, M) — `bd5fabf`
-- [ ] 2. TS COUNT correctness & cost (§5.2, M) — folds: flush_async work_q fallback, slab BUILD_ASSERTs
+- [x] 2. TS COUNT correctness & cost (§5.2, M) — `8889103`; folded fixes `a063025` (slab asserts), `bbcb5c4` (work_q)
 - [ ] 3. KV string convenience API (§5.3, S) — folds: zero-length value fix
 - [ ] 4. KV defaults with auto-init (§5.4, M) — folds: ZDB_EVENTING dependency fix
 - [ ] 5. Persistent KV iteration (§5.5, L) — topic branch
@@ -78,15 +78,11 @@ under Notes with its reason, keeps its roadmap bullet, and the loop moves on.
 - The west workspace's own `zephyrdb` clone was replaced with a symlink to
   `/home/ubuntu/zdb-src/zephyrdb`; otherwise Zephyr sees two modules named
   `zephyrdb` (the west project and the test's `EXTRA_ZEPHYR_MODULES`).
-- **Pre-existing failure, not caused by this work**:
-  `zephyrdb.integration.workflows` aborts on `native_sim/native/64` with a
-  kernel mem-slab assertion (`mem_slab.c:247`, corrupted `free_list`),
-  reproduced on a pristine checkout. Almost certainly the missing slab-fit
-  guard: on 64-bit `struct zdb_ts_core_ctx` overflows the 128-byte
-  `CONFIG_ZDB_CORE_SLAB_BLOCK_SIZE` block. CI does not catch it because it
-  runs the 32-bit `native_sim`. **Item 2's folded BUILD_ASSERT fix targets
-  exactly this** — verify it turns the runtime corruption into a compile-time
-  error, and bump the Kconfig defaults.
+- **RESOLVED in item 2**: the pre-existing `zephyrdb.integration.workflows`
+  mem-slab assertion on `native_sim/native/64` was the *cursor* slab, not the
+  core slab: `zdb_ts_cursor_ctx` is 120 bytes on 64-bit against a 96-byte
+  `CONFIG_ZDB_CURSOR_SLAB_BLOCK_SIZE`. (`zdb_ts_core_ctx` is 112 and fit.)
+  Fixed by `a063025`; the whole suite passes now.
 - Baseline (iteration 0, pristine tree): KV group 3/3 suites, 36/36 cases pass;
   `ts_basic`, `doc_basic`, `samples/verify` pass; `integration/workflows` fails
   as above.
