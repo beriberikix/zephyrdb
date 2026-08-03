@@ -19,10 +19,38 @@
 
 #define MAX_STREAMS CONFIG_ZDB_TS_MAX_STREAMS
 
+#if defined(CONFIG_ZDB_EVENTING) && (CONFIG_ZDB_EVENTING)
+static uint32_t g_flush_events;
+static size_t g_flushed_bytes_total;
+static char g_flush_stream[CONFIG_ZDB_TS_STREAM_NAME_MAX_LEN + 1U];
+
+static void ms_event_capture(const zdb_ts_event_t *event, void *user_ctx)
+{
+	ARG_UNUSED(user_ctx);
+
+	if ((event == NULL) || (event->type != ZDB_TS_EVENT_FLUSH)) {
+		return;
+	}
+
+	g_flush_events++;
+	g_flushed_bytes_total += event->flushed_bytes;
+	(void)strncpy(g_flush_stream, event->stream_name, sizeof(g_flush_stream) - 1U);
+	g_flush_stream[sizeof(g_flush_stream) - 1U] = '\0';
+}
+
+static const zdb_ts_event_listener_t g_ms_listeners[] = {
+	{ .notify = ms_event_capture, .user_ctx = NULL },
+};
+#endif
+
 static const zdb_cfg_t g_cfg = {
 	.kv_backend_fs = NULL,
 	.lfs_mount_point = "/lfs",
 	.work_q = &k_sys_work_q,
+#if defined(CONFIG_ZDB_EVENTING) && (CONFIG_ZDB_EVENTING)
+	.ts_event_listeners = g_ms_listeners,
+	.ts_event_listener_count = ARRAY_SIZE(g_ms_listeners),
+#endif
 };
 
 ZDB_DEFINE_STATIC(g_db, g_cfg);
@@ -30,6 +58,11 @@ ZDB_DEFINE_STATIC(g_db, g_cfg);
 static void ms_before(void *fixture)
 {
 	ARG_UNUSED(fixture);
+#if defined(CONFIG_ZDB_EVENTING) && (CONFIG_ZDB_EVENTING)
+	g_flush_events = 0U;
+	g_flushed_bytes_total = 0U;
+	(void)memset(g_flush_stream, 0xFF, sizeof(g_flush_stream));
+#endif
 	zassert_equal(zdb_init(&g_db, &g_cfg), ZDB_OK, "zdb_init failed");
 }
 
@@ -114,6 +147,40 @@ ZTEST(ts_multistream, test_flush_covers_all_streams)
 	(void)zdb_ts_close(&a);
 	(void)zdb_ts_close(&b);
 }
+
+#if defined(CONFIG_ZDB_EVENTING) && (CONFIG_ZDB_EVENTING)
+/*
+ * One flush drains every stream, so it reports the combined byte count and
+ * names none of them. This is the case zdb_event_copy_name() tolerates a NULL
+ * for — with a single stream open the name is always set, so nothing else in
+ * the suite reaches it.
+ */
+ZTEST(ts_multistream, test_flush_spanning_streams_names_none)
+{
+	zdb_ts_t a;
+	zdb_ts_t b;
+
+	zassert_equal(zdb_ts_open(&g_db, "ms_e_a", &a), ZDB_OK, "open a failed");
+	zassert_equal(zdb_ts_open(&g_db, "ms_e_b", &b), ZDB_OK, "open b failed");
+
+	append_one(&a, 4000U, 10);
+	append_one(&b, 4000U, 20);
+
+	g_flush_events = 0U;
+	g_flushed_bytes_total = 0U;
+	zassert_equal(zdb_ts_flush_sync(&a, K_SECONDS(2)), ZDB_OK, "flush failed");
+
+	zassert_true(g_flush_events > 0U, "no flush event delivered");
+	zassert_true(g_flushed_bytes_total > 0U, "flush event reported no bytes");
+
+	/* Empty, and terminated — a listener must be able to print it safely. */
+	zassert_equal(g_flush_stream[0], '\0',
+		      "a flush covering two streams named one of them: %s", g_flush_stream);
+
+	(void)zdb_ts_close(&a);
+	(void)zdb_ts_close(&b);
+}
+#endif
 
 /* Opening more streams than slots reports BUSY rather than evicting one. */
 ZTEST(ts_multistream, test_exhausting_slots_reports_busy)

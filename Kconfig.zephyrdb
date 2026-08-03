@@ -322,21 +322,23 @@ menu "Diagnostics"
 config ZDB_EVENTING
 	bool "Enable ZephyrDB event emitter/listener hooks"
 	default n
-	depends on ZDB_KV || ZDB_TS || ZDB_DOC
+	depends on ZDB_CORE
 	help
-	  Enables lightweight local mutation events for key-value,
-	  time-series, and document operations. Events are emitted for
-	  whichever modules are enabled. This feature is intended for
-	  in-process listeners and does not provide durability or
-	  distributed delivery guarantees.
+	  Enables lightweight local events for key-value, time-series, and
+	  document operations, plus instance-level events covering lifecycle
+	  and health changes. Mutation events are emitted for whichever
+	  modules are enabled; the core events are available even with no
+	  data model selected. This feature is intended for in-process
+	  listeners and does not provide durability or distributed delivery
+	  guarantees.
 
 config ZDB_EVENTING_ZBUS
 	bool "Publish events to zbus"
 	default n
 	depends on ZDB_EVENTING && ZBUS
 	help
-	  Publishes ZephyrDB mutation events to zbus channels, one per
-	  enabled module. This is an optional adapter layer and does not
+	  Publishes ZephyrDB events to zbus channels: one per enabled module
+	  plus a core channel. This is an optional adapter layer and does not
 	  change write-path behavior if publish fails.
 
 config ZDB_STATS

@@ -771,6 +771,10 @@ zdb_status_t zdb_doc_create(zdb_t *db, const char *collection_name,
 		out_doc->created_ms = 0U;
 		out_doc->updated_ms = 0U;
 		out_doc->valid = false;
+#if defined(CONFIG_ZDB_EVENTING) && (CONFIG_ZDB_EVENTING)
+		zdb_emit_doc_event(db, ZDB_DOC_EVENT_CREATE, collection_name, document_id, 0U, 0U,
+				   ZDB_ERR_NOMEM);
+#endif
 		return ZDB_ERR_NOMEM;
 	}
 
@@ -960,27 +964,28 @@ zdb_status_t zdb_doc_save(zdb_doc_t *doc)
 
 	lock_rc = zdb_lock_write(doc->db);
 	if (lock_rc != ZDB_OK) {
-		return lock_rc;
+		ret = lock_rc;
+		goto emit;
 	}
 
 	rc = zdb_doc_ensure_dirs(doc->db->cfg, doc->collection_name);
 	if (rc < 0) {
-		zdb_unlock_write(doc->db);
-		return zdb_status_from_errno(rc);
+		ret = zdb_status_from_errno(rc);
+		goto fail_locked;
 	}
 
 	rc = zdb_doc_build_doc_path(doc->db->cfg, doc->collection_name, doc->document_id,
 				    ZDB_DOC_FILE_EXT, path, sizeof(path));
 	if (rc < 0) {
-		zdb_unlock_write(doc->db);
-		return zdb_status_from_errno(rc);
+		ret = zdb_status_from_errno(rc);
+		goto fail_locked;
 	}
 
 	rc = zdb_doc_build_doc_path(doc->db->cfg, doc->collection_name, doc->document_id,
 				    ZDB_DOC_TMP_EXT, tmp_path, sizeof(tmp_path));
 	if (rc < 0) {
-		zdb_unlock_write(doc->db);
-		return zdb_status_from_errno(rc);
+		ret = zdb_status_from_errno(rc);
+		goto fail_locked;
 	}
 
 	/* Build document header with magic, version, counts, and timestamps */
@@ -994,8 +999,7 @@ zdb_status_t zdb_doc_save(zdb_doc_t *doc)
 	crc = crc32_ieee((const uint8_t *)&hdr, offsetof(struct zdb_doc_hdr_v1, crc_le));
 	ret = zdb_doc_fields_emit(doc, zdb_doc_sink_crc, &crc);
 	if (ret != ZDB_OK) {
-		zdb_unlock_write(doc->db);
-		return ret;
+		goto fail_locked;
 	}
 	hdr.crc_le = sys_cpu_to_le32(crc);
 
@@ -1003,8 +1007,8 @@ zdb_status_t zdb_doc_save(zdb_doc_t *doc)
 	fs_file_t_init(&file);
 	rc = fs_open(&file, tmp_path, FS_O_CREATE | FS_O_WRITE | FS_O_TRUNC);
 	if (rc < 0) {
-		zdb_unlock_write(doc->db);
-		return zdb_status_from_errno(rc);
+		ret = zdb_status_from_errno(rc);
+		goto fail_locked;
 	}
 
 	wr = fs_write(&file, &hdr, sizeof(hdr));
@@ -1031,8 +1035,7 @@ zdb_status_t zdb_doc_save(zdb_doc_t *doc)
 	if (rc < 0) {
 		ret = zdb_status_from_errno(rc);
 		(void)fs_unlink(tmp_path);
-		zdb_unlock_write(doc->db);
-		return ret;
+		goto fail_locked;
 	}
 
 	rc = fs_rename(tmp_path, path);
@@ -1043,22 +1046,29 @@ zdb_status_t zdb_doc_save(zdb_doc_t *doc)
 	}
 	if (rc < 0) {
 		(void)fs_unlink(tmp_path);
-		zdb_unlock_write(doc->db);
-		return zdb_status_from_errno(rc);
+		ret = zdb_status_from_errno(rc);
+		goto fail_locked;
 	}
 
 	zdb_unlock_write(doc->db);
-#if defined(CONFIG_ZDB_EVENTING) && (CONFIG_ZDB_EVENTING)
-	/* Emit save event with serialized size for monitoring */
-	zdb_emit_doc_event(doc->db, ZDB_DOC_EVENT_SAVE, doc->collection_name, doc->document_id,
-			   doc->field_count, serialized_bytes, ZDB_OK);
-#endif
-	return ZDB_OK;
+	ret = ZDB_OK;
+	goto emit;
 
 fail:
 	(void)fs_close(&file);
 	(void)fs_unlink(tmp_path);
+fail_locked:
 	zdb_unlock_write(doc->db);
+emit:
+#if defined(CONFIG_ZDB_EVENTING) && (CONFIG_ZDB_EVENTING)
+	/*
+	 * Reported for failures too: a save that never reached storage is
+	 * exactly what a listener watching durability needs to hear about.
+	 * The serialized size is only meaningful once the bytes landed.
+	 */
+	zdb_emit_doc_event(doc->db, ZDB_DOC_EVENT_SAVE, doc->collection_name, doc->document_id,
+			   doc->field_count, (ret == ZDB_OK) ? serialized_bytes : 0U, ret);
+#endif
 	return ret;
 }
 
@@ -1083,6 +1093,7 @@ zdb_status_t zdb_doc_delete(zdb_t *db, const char *collection_name,
 	char path[ZDB_DOC_PATH_MAX];
 	char tmp_path[ZDB_DOC_PATH_MAX];
 	zdb_status_t lock_rc;
+	zdb_status_t status;
 	int rc;
 
 	if ((db == NULL) || (collection_name == NULL) || (document_id == NULL)) {
@@ -1105,14 +1116,16 @@ zdb_status_t zdb_doc_delete(zdb_t *db, const char *collection_name,
 	/* Acquire write lock to prevent races with open/query */
 	lock_rc = zdb_lock_write(db);
 	if (lock_rc != ZDB_OK) {
-		return lock_rc;
+		status = lock_rc;
+		goto emit;
 	}
 
 	rc = zdb_doc_build_doc_path(db->cfg, collection_name, document_id, ZDB_DOC_FILE_EXT, path,
 				    sizeof(path));
 	if (rc < 0) {
 		zdb_unlock_write(db);
-		return zdb_status_from_errno(rc);
+		status = zdb_status_from_errno(rc);
+		goto emit;
 	}
 
 	rc = fs_unlink(path);
@@ -1127,14 +1140,14 @@ zdb_status_t zdb_doc_delete(zdb_t *db, const char *collection_name,
 	}
 
 	zdb_unlock_write(db);
-	if (rc < 0) {
-		return zdb_status_from_errno(rc);
-	}
+	status = (rc < 0) ? zdb_status_from_errno(rc) : ZDB_OK;
 
+emit:
 #if defined(CONFIG_ZDB_EVENTING) && (CONFIG_ZDB_EVENTING)
-	zdb_emit_doc_event(db, ZDB_DOC_EVENT_DELETE, collection_name, document_id, 0U, 0U, ZDB_OK);
+	/* Reported for failures too, so a document that outlived its delete is visible. */
+	zdb_emit_doc_event(db, ZDB_DOC_EVENT_DELETE, collection_name, document_id, 0U, 0U, status);
 #endif
-	return ZDB_OK;
+	return status;
 }
 
 zdb_status_t zdb_doc_close(zdb_doc_t *doc)

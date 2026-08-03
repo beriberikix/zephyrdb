@@ -28,10 +28,38 @@
 #define SEG_RECORDS   (CONFIG_ZDB_TS_ROLLOVER_SEGMENT_BYTES / RECORD_BYTES)
 #define MAX_SEGMENTS  CONFIG_ZDB_TS_ROLLOVER_MAX_SEGMENTS
 
+#if defined(CONFIG_ZDB_EVENTING) && (CONFIG_ZDB_EVENTING)
+static uint32_t g_rollover_events;
+static size_t g_discarded_bytes_total;
+static char g_rollover_stream[CONFIG_ZDB_TS_STREAM_NAME_MAX_LEN + 1U];
+
+static void ro_event_capture(const zdb_ts_event_t *event, void *user_ctx)
+{
+	ARG_UNUSED(user_ctx);
+
+	if ((event == NULL) || (event->type != ZDB_TS_EVENT_ROLLOVER)) {
+		return;
+	}
+
+	g_rollover_events++;
+	g_discarded_bytes_total += event->truncated_bytes;
+	(void)strncpy(g_rollover_stream, event->stream_name, sizeof(g_rollover_stream) - 1U);
+	g_rollover_stream[sizeof(g_rollover_stream) - 1U] = '\0';
+}
+
+static const zdb_ts_event_listener_t g_ro_listeners[] = {
+	{ .notify = ro_event_capture, .user_ctx = NULL },
+};
+#endif
+
 static const zdb_cfg_t g_cfg = {
 	.kv_backend_fs = NULL,
 	.lfs_mount_point = "/lfs",
 	.work_q = &k_sys_work_q,
+#if defined(CONFIG_ZDB_EVENTING) && (CONFIG_ZDB_EVENTING)
+	.ts_event_listeners = g_ro_listeners,
+	.ts_event_listener_count = ARRAY_SIZE(g_ro_listeners),
+#endif
 };
 
 ZDB_DEFINE_STATIC(g_db, g_cfg);
@@ -39,6 +67,11 @@ ZDB_DEFINE_STATIC(g_db, g_cfg);
 static void ro_before(void *fixture)
 {
 	ARG_UNUSED(fixture);
+#if defined(CONFIG_ZDB_EVENTING) && (CONFIG_ZDB_EVENTING)
+	g_rollover_events = 0U;
+	g_discarded_bytes_total = 0U;
+	g_rollover_stream[0] = '\0';
+#endif
 	zassert_equal(zdb_init(&g_db, &g_cfg), ZDB_OK, "zdb_init failed");
 }
 
@@ -137,6 +170,35 @@ ZTEST(ts_rollover, test_stream_stays_bounded_and_keeps_newest)
 
 	(void)zdb_ts_close(&ts);
 }
+
+#if defined(CONFIG_ZDB_EVENTING) && (CONFIG_ZDB_EVENTING)
+/*
+ * Discarding the oldest segments is the one place ZephyrDB destroys data on
+ * purpose, so it says so — and says how much went, which is what lets an
+ * application notice its retention window is too small.
+ */
+ZTEST(ts_rollover, test_rollover_reports_discarded_history)
+{
+	zdb_ts_t ts;
+	const size_t total = SEG_RECORDS * (MAX_SEGMENTS + 2U);
+
+	zassert_equal(zdb_ts_open(&g_db, "ro_evt", &ts), ZDB_OK, "open failed");
+
+	append_ramp(&ts, SEG_RECORDS);
+	zassert_equal(zdb_ts_flush_sync(&ts, K_SECONDS(2)), ZDB_OK, "flush failed");
+	zassert_equal(g_rollover_events, 0U, "reported rollover before the bound was reached");
+
+	append_ramp(&ts, total);
+	zassert_equal(zdb_ts_flush_sync(&ts, K_SECONDS(2)), ZDB_OK, "flush failed");
+
+	zassert_true(g_rollover_events > 0U, "discarded segments without reporting");
+	zassert_true(g_discarded_bytes_total > 0U, "rollover event reported no bytes");
+	zassert_equal(strcmp(g_rollover_stream, "ro_evt"), 0, "rollover named the wrong stream: %s",
+		      g_rollover_stream);
+
+	(void)zdb_ts_close(&ts);
+}
+#endif
 
 /* A forward walk must cross segment boundaries and stay in order. */
 ZTEST(ts_rollover, test_cursor_spans_segments_in_order)

@@ -91,13 +91,35 @@ void zdb_health_check(zdb_t *db)
 		return;
 	}
 
-	if ((db->ts_stats.corrupt_records > 0U) ||
-	    (db->ts_stats.crc_failures > 0U) ||
-	    (db->ts_stats.recover_failures > 0U)) {
-		if (db->health < ZDB_HEALTH_DEGRADED) {
-			db->health = ZDB_HEALTH_DEGRADED;
-		}
+	/*
+	 * Every caller reports a fault it has just detected, so the durability
+	 * counters are deliberately not consulted: ZDB_STAT_INC compiles away
+	 * with CONFIG_ZDB_STATS=n, and reading them would leave such a build
+	 * permanently healthy no matter how much corruption it met.
+	 */
+	if (db->health >= ZDB_HEALTH_DEGRADED) {
+		return;
 	}
+
+#if defined(CONFIG_ZDB_EVENTING) && (CONFIG_ZDB_EVENTING)
+	db->health_prev = db->health;
+#endif
+	db->health = ZDB_HEALTH_DEGRADED;
+
+#if defined(CONFIG_ZDB_EVENTING) && (CONFIG_ZDB_EVENTING)
+	/*
+	 * Corruption is detected both under the instance lock (record decoding
+	 * during a walk) and outside it (stream recovery). Listeners must never
+	 * run inside the lock, so a change spotted while this thread owns it is
+	 * handed to the matching unlock instead of published here.
+	 */
+	if (db->lock.owner == k_current_get()) {
+		db->health_event_pending = true;
+	} else {
+		zdb_emit_core_event(db, ZDB_CORE_EVENT_HEALTH, db->health_prev, db->health,
+				    ZDB_OK);
+	}
+#endif
 }
 #endif /* CONFIG_ZDB_TS */
 
@@ -113,14 +135,67 @@ zdb_status_t zdb_lock_write(zdb_t *db)
 	return (rc == 0) ? ZDB_OK : ZDB_ERR_BUSY;
 }
 
+/*
+ * Release the instance lock, then publish anything the locked section deferred.
+ *
+ * The pending flag is consumed before the unlock so two threads cannot both
+ * claim the same transition.
+ */
+static void zdb_unlock_common(zdb_t *db)
+{
+#if defined(CONFIG_ZDB_EVENTING) && (CONFIG_ZDB_EVENTING)
+	zdb_health_t prev = ZDB_HEALTH_OK;
+	zdb_health_t now = ZDB_HEALTH_OK;
+	bool health_changed = db->health_event_pending;
+#if defined(CONFIG_ZDB_TS) && (CONFIG_ZDB_TS)
+	char stream[CONFIG_ZDB_TS_STREAM_NAME_MAX_LEN + 1U];
+	size_t flushed_bytes;
+	size_t discarded_bytes;
+#endif
+
+	if (health_changed) {
+		prev = db->health_prev;
+		now = db->health;
+		db->health_event_pending = false;
+	}
+#if defined(CONFIG_ZDB_TS) && (CONFIG_ZDB_TS)
+	/*
+	 * Flushing and rollover happen wherever a buffer fills, a stream
+	 * closes, or the work queue drains — all under this lock. Draining
+	 * them here is what lets every one of those paths report, rather than
+	 * only the periodic flush.
+	 */
+	zdb_ts_take_deferred_events(db, &flushed_bytes, &discarded_bytes, stream, sizeof(stream));
+#endif
+#endif
+
+	k_mutex_unlock(&db->lock);
+
+#if defined(CONFIG_ZDB_EVENTING) && (CONFIG_ZDB_EVENTING)
+	if (health_changed) {
+		zdb_emit_core_event(db, ZDB_CORE_EVENT_HEALTH, prev, now, ZDB_OK);
+	}
+#if defined(CONFIG_ZDB_TS) && (CONFIG_ZDB_TS)
+	if (flushed_bytes > 0U) {
+		zdb_emit_ts_event(db, ZDB_TS_EVENT_FLUSH, stream, 0U, 0, flushed_bytes, 0U,
+				  ZDB_OK);
+	}
+	if (discarded_bytes > 0U) {
+		zdb_emit_ts_event(db, ZDB_TS_EVENT_ROLLOVER, stream, 0U, 0, 0U, discarded_bytes,
+				  ZDB_OK);
+	}
+#endif
+#endif
+}
+
 void zdb_unlock_read(zdb_t *db)
 {
-	k_mutex_unlock(&db->lock);
+	zdb_unlock_common(db);
 }
 
 void zdb_unlock_write(zdb_t *db)
 {
-	k_mutex_unlock(&db->lock);
+	zdb_unlock_common(db);
 }
 
 #if defined(CONFIG_ZDB_EVENTING) && (CONFIG_ZDB_EVENTING)
@@ -253,6 +328,37 @@ void zdb_emit_doc_event(zdb_t *db, zdb_doc_event_type_t type,
 	}
 }
 #endif /* CONFIG_ZDB_DOC */
+
+void zdb_emit_core_event(zdb_t *db, zdb_core_event_type_t type, zdb_health_t prev_health,
+			 zdb_health_t health, zdb_status_t status)
+{
+	zdb_core_event_t event;
+	size_t i;
+
+	if (db == NULL) {
+		return;
+	}
+
+	event.type = type;
+	event.timestamp_ms = (uint64_t)k_uptime_get();
+	event.prev_health = prev_health;
+	event.health = health;
+	event.status = status;
+
+#if defined(CONFIG_ZDB_EVENTING_ZBUS) && (CONFIG_ZDB_EVENTING_ZBUS)
+	(void)zdb_eventing_zbus_publish_core(&event);
+#endif
+
+	if ((db->core_event_listeners != NULL) && (db->core_event_listener_count > 0U)) {
+		for (i = 0U; i < db->core_event_listener_count; i++) {
+			const zdb_core_event_listener_t *listener = &db->core_event_listeners[i];
+
+			if (listener->notify != NULL) {
+				listener->notify(&event, listener->user_ctx);
+			}
+		}
+	}
+}
 #endif
 
 zdb_status_t zdb_init(zdb_t *db, const zdb_cfg_t *cfg)
@@ -283,6 +389,10 @@ zdb_status_t zdb_init(zdb_t *db, const zdb_cfg_t *cfg)
 	db->doc_event_listeners = cfg->doc_event_listeners;
 	db->doc_event_listener_count = cfg->doc_event_listener_count;
 #endif
+	db->core_event_listeners = cfg->core_event_listeners;
+	db->core_event_listener_count = cfg->core_event_listener_count;
+	db->health_prev = ZDB_HEALTH_OK;
+	db->health_event_pending = false;
 #endif
 
 #if defined(CONFIG_ZDB_KV) && (CONFIG_ZDB_KV)
@@ -296,9 +406,22 @@ zdb_status_t zdb_init(zdb_t *db, const zdb_cfg_t *cfg)
 		zdb_status_t defaults_rc = zdb_kv_defaults_apply_ns(db, NULL);
 
 		if (defaults_rc != ZDB_OK) {
+#if defined(CONFIG_ZDB_EVENTING) && (CONFIG_ZDB_EVENTING)
+			zdb_emit_core_event(db, ZDB_CORE_EVENT_INIT, db->health, db->health,
+					    defaults_rc);
+#endif
 			return defaults_rc;
 		}
 	}
+#endif
+
+#if defined(CONFIG_ZDB_EVENTING) && (CONFIG_ZDB_EVENTING)
+	/*
+	 * Listeners are bound above, so seeding failures are reported too. An
+	 * instance rejected before that point (bad arguments, missing slabs)
+	 * has nobody bound yet and stays silent by construction.
+	 */
+	zdb_emit_core_event(db, ZDB_CORE_EVENT_INIT, db->health, db->health, ZDB_OK);
 #endif
 
 	return ZDB_OK;
@@ -317,6 +440,15 @@ zdb_status_t zdb_deinit(zdb_t *db)
 #if defined(CONFIG_ZDB_TS) && (CONFIG_ZDB_TS)
 	if ((db->core_slab != NULL) && (db->ts_ctx != NULL)) {
 		struct zdb_ts_core_ctx *ctx = (struct zdb_ts_core_ctx *)db->ts_ctx;
+		struct k_work_sync sync;
+
+		/*
+		 * An append can leave a flush queued. The work item lives in the
+		 * context block about to be returned to the slab, so it has to
+		 * be settled first — otherwise the work queue later runs a
+		 * handler out of memory that has since been reused.
+		 */
+		(void)k_work_cancel_sync(&ctx->flush_work, &sync);
 
 		/* Return every open stream's ingest buffer. */
 		for (size_t i = 0U; i < ARRAY_SIZE(ctx->streams); i++) {
@@ -326,6 +458,11 @@ zdb_status_t zdb_deinit(zdb_t *db)
 		}
 		k_mem_slab_free(db->core_slab, ctx);
 	}
+#endif
+
+#if defined(CONFIG_ZDB_EVENTING) && (CONFIG_ZDB_EVENTING)
+	/* Teardown is done; announce it while the listeners are still bound. */
+	zdb_emit_core_event(db, ZDB_CORE_EVENT_DEINIT, db->health, db->health, ZDB_OK);
 #endif
 
 	db->cfg = NULL;
@@ -343,6 +480,9 @@ zdb_status_t zdb_deinit(zdb_t *db)
 	db->doc_event_listeners = NULL;
 	db->doc_event_listener_count = 0U;
 #endif
+	db->core_event_listeners = NULL;
+	db->core_event_listener_count = 0U;
+	db->health_event_pending = false;
 #endif
 
 	return ZDB_OK;

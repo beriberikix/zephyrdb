@@ -98,14 +98,17 @@ This page covers the complete option surface, grouped as in the Kconfig menus.
 
 ## Diagnostics
 
-- `CONFIG_ZDB_EVENTING`: local KV/TS/DOC mutation events (in-process
-  listeners; best-effort, no durability guarantees). Available whenever any of
-  KV, TS, or DOC is enabled; events are emitted for the enabled modules.
-- `CONFIG_ZDB_EVENTING_ZBUS`: publish events to zbus channels (requires
-  `CONFIG_ZDB_EVENTING` and `CONFIG_ZBUS`); best-effort, never changes
-  operation return values
+- `CONFIG_ZDB_EVENTING`: KV/TS/DOC mutation events plus instance-level events
+  for lifecycle and health (in-process listeners; best-effort, no durability
+  guarantees). Mutation events are emitted for whichever modules are enabled;
+  the instance events need no data model, so this can be enabled on its own.
+- `CONFIG_ZDB_EVENTING_ZBUS`: publish events to zbus channels — one per
+  enabled module plus `zdb_core_event_chan` (requires `CONFIG_ZDB_EVENTING`
+  and `CONFIG_ZBUS`); best-effort, never changes operation return values
 - `CONFIG_ZDB_STATS`: TS statistics counters (recover runs/failures,
-  CRC failures, corrupt records)
+  CRC failures, corrupt records). Health degradation does **not** depend on
+  this: an instance reports `ZDB_HEALTH_DEGRADED` after corruption whether or
+  not the counters are being kept.
 
 ## Shell
 

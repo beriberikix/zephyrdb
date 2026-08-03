@@ -379,33 +379,36 @@ static int zdb_kv_ctx_find_entry(const struct zdb_kv_ctx *ctx, const char *names
 	return -1;
 }
 
-static void zdb_kv_ctx_track_set(zdb_t *db, const char *namespace_name, const char *key, uint32_t id)
+/* Returns false when the key was stored but could not be indexed. */
+static bool zdb_kv_ctx_track_set(zdb_t *db, const char *namespace_name, const char *key,
+				 uint32_t id)
 {
 	struct zdb_kv_ctx *ctx;
 	int idx;
 
 	if ((db == NULL) || (namespace_name == NULL) || (key == NULL)) {
-		return;
+		return true;
 	}
 
 	ctx = zdb_kv_ctx_get_or_alloc(db);
 	if (ctx == NULL) {
-		return;
+		return true;
 	}
 
 	idx = zdb_kv_ctx_find_entry(ctx, namespace_name, key);
 	if (idx >= 0) {
 		ctx->entries[idx].id = id;
-		return;
+		return true;
 	}
 
 	if (ctx->entry_count >= ZDB_KV_INDEX_MAX_ENTRIES) {
 		/*
 		 * The key is still stored and readable, it just cannot be
 		 * enumerated. Raise CONFIG_ZDB_KV_INDEX_MAX_ENTRIES if a
-		 * deployment needs every key iterable.
+		 * deployment needs every key iterable. Reported to the caller
+		 * so it can announce the limit once it has unlocked.
 		 */
-		return;
+		return false;
 	}
 
 	idx = (int)ctx->entry_count;
@@ -421,6 +424,7 @@ static void zdb_kv_ctx_track_set(zdb_t *db, const char *namespace_name, const ch
 	/* Only a new key changes the stored set; overwrites cost no extra write. */
 	zdb_kv_index_store(db, ctx);
 #endif
+	return true;
 }
 
 static void zdb_kv_ctx_track_delete(zdb_t *db, const char *namespace_name, const char *key)
@@ -584,6 +588,7 @@ zdb_status_t zdb_kv_set(zdb_kv_t *kv, const char *key, const void *value, size_t
 	size_t block_size;
 	size_t total_len;
 	bool slot_matched = false;
+	bool indexed = true;
 
 	/*
 	 * A zero-length value is allowed, as documented; the record still
@@ -653,7 +658,7 @@ zdb_status_t zdb_kv_set(zdb_kv_t *kv, const char *key, const void *value, size_t
 	 * iteration skips and the next rebuild prunes. The reverse order would
 	 * leave a stored key that nothing knows how to enumerate.
 	 */
-	zdb_kv_ctx_track_set(kv->db, kv->namespace_name, key, id);
+	indexed = zdb_kv_ctx_track_set(kv->db, kv->namespace_name, key, id);
 
 	(void)zdb_kv_record_build(io_buf, kv->namespace_name, key, value, value_len);
 
@@ -681,6 +686,16 @@ zdb_status_t zdb_kv_set(zdb_kv_t *kv, const char *key, const void *value, size_t
 emit:
 #if defined(CONFIG_ZDB_EVENTING) && (CONFIG_ZDB_EVENTING)
 	zdb_emit_kv_event(kv->db, ZDB_EVENT_KV_SET, kv->namespace_name, key, value_len, status);
+
+	/*
+	 * The value landed but nothing can enumerate it. Announced separately
+	 * from the set so a listener sees both what was stored and that the
+	 * index has stopped keeping up.
+	 */
+	if (!indexed && (status == ZDB_OK)) {
+		zdb_emit_kv_event(kv->db, ZDB_EVENT_KV_INDEX_FULL, kv->namespace_name, key,
+				  value_len, ZDB_OK);
+	}
 #endif
 
 	return status;

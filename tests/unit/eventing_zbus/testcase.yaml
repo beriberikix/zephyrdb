@@ -1,0 +1,10 @@
+tests:
+  zephyrdb.unit.eventing_zbus:
+    harness: ztest
+    tags:
+      - zephyrdb
+      - unit
+      - eventing
+      - zbus
+    platform_allow:
+      - native_sim

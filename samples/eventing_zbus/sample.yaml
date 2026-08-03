@@ -1,0 +1,28 @@
+sample:
+  name: ZephyrDB eventing over zbus sample
+
+common:
+  tags:
+    - zephyrdb
+    - samples
+    - eventing
+    - zbus
+  integration_platforms:
+    - native_sim
+
+tests:
+  zephyrdb.samples.eventing_zbus:
+    harness: console
+    harness_config:
+      type: multi_line
+      regex:
+        - "eventing_zbus: event after kv set"
+        - "eventing_zbus: event after kv delete"
+        - "eventing_zbus: event after ts append"
+        - "eventing_zbus: event after ts flush"
+        - "eventing_zbus: event after doc save"
+        - "eventing_zbus: event after doc delete"
+        - "eventing_zbus: PASS"
+    platform_allow:
+      - native_sim
+    timeout: 30

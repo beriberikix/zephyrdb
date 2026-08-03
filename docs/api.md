@@ -136,9 +136,31 @@ Notes:
 
 Listener types (each embeds a `notify` function pointer and `user_ctx`):
 
-- `zdb_event_listener_t` for `zdb_kv_event_t` (types `ZDB_EVENT_KV_SET`/`ZDB_EVENT_KV_DELETE`)
-- `zdb_ts_event_listener_t` for `zdb_ts_event_t` (append/flush/recover)
-- `zdb_doc_event_listener_t` for `zdb_doc_event_t` (create/save/delete)
+- `zdb_event_listener_t` for `zdb_kv_event_t` — `ZDB_EVENT_KV_SET`,
+  `ZDB_EVENT_KV_DELETE`, `ZDB_EVENT_KV_INDEX_FULL`
+- `zdb_ts_event_listener_t` for `zdb_ts_event_t` — append, flush, recover,
+  rollover, watermark
+- `zdb_doc_event_listener_t` for `zdb_doc_event_t` — create, save, delete
+- `zdb_core_event_listener_t` for `zdb_core_event_t` — init, deinit, health
+
+Notes on the less obvious ones:
+
+- `ZDB_EVENT_KV_INDEX_FULL` follows a successful set whose key did not fit
+  `CONFIG_ZDB_KV_INDEX_MAX_ENTRIES`. The value is readable by name but cannot
+  be enumerated.
+- `ZDB_TS_EVENT_FLUSH` covers every flush — the periodic work-queue drain, a
+  full ingest buffer during append, and `zdb_ts_close()` — so `flushed_bytes`
+  reflects what actually reached storage. A flush spanning several streams
+  reports the total and leaves `stream_name` empty.
+- `ZDB_TS_EVENT_ROLLOVER` fires when a bounded stream
+  (`CONFIG_ZDB_TS_ROLLOVER`) discards its oldest segments, reporting the bytes
+  dropped in `truncated_bytes`. This is the only place ZephyrDB destroys data
+  on purpose.
+- `ZDB_TS_EVENT_WATERMARK` reports the consumed position in `sample_ts_ms`,
+  or 0 when the watermark was cleared.
+- `ZDB_CORE_EVENT_HEALTH` fires once per change, carrying `prev_health` and
+  `health`. Health only ever worsens, and is derived from time-series
+  integrity checks — see `zdb_health_t`.
 
 Register listener arrays through `zdb_cfg_t` before `zdb_init()`:
 
@@ -163,15 +185,28 @@ static const zdb_cfg_t cfg = {
 Events fire after each operation with its real status (including failures
 and `ZDB_ERR_COLLISION`); entries with a NULL `notify` are skipped.
 Corresponding `ts_event_listeners`/`doc_event_listeners` fields exist when
-TS/DOC are enabled.
+TS/DOC are enabled, and `core_event_listeners` is always available.
+
+Callbacks run in the calling thread and are never invoked while an internal
+lock is held, so a listener may call back into the same instance — but it
+must not block, since it is running on the caller's time.
+
+An operation rejected before `zdb_init()` binds the listeners cannot report;
+everything after that does.
 
 ## zbus Adapter
 
 Header: `zephyrdb_eventing_zbus.h`
 
-- Channels: `zdb_kv_event_chan`, `zdb_ts_event_chan`, `zdb_doc_event_chan`
-  (payloads `zdb_kv_event_t`/`zdb_ts_event_t`/`zdb_doc_event_t`)
-- `zdb_eventing_zbus_publish(event)` / `_publish_ts(event)` / `_publish_doc(event)`
+- Channels: `zdb_kv_event_chan`, `zdb_ts_event_chan`, `zdb_doc_event_chan`,
+  `zdb_core_event_chan` (payloads `zdb_kv_event_t`/`zdb_ts_event_t`/
+  `zdb_doc_event_t`/`zdb_core_event_t`)
+- Enabling `CONFIG_ZDB_EVENTING_ZBUS` is enough: ZephyrDB publishes every
+  event it emits. Attach zbus observers to consume them.
+- `zdb_eventing_zbus_publish(event)` / `_publish_ts(event)` /
+  `_publish_doc(event)` / `_publish_core(event)` are exported for
+  applications that want to put their own messages on the same channels.
+  Calling one from a listener callback would publish the event twice.
 
 Publication is best-effort and never changes operation return values.
 

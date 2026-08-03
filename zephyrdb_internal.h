@@ -276,6 +276,15 @@ struct zdb_ts_stream_ctx {
 	 */
 	uint8_t open_count;
 	bool in_use;
+#if defined(CONFIG_ZDB_EVENTING) && (CONFIG_ZDB_EVENTING)
+	/*
+	 * Flushing and segment rollover both happen deep inside locked
+	 * sections, but listeners must never run there. What happened is
+	 * recorded here and published by the caller once it has unlocked.
+	 */
+	size_t pending_flush_bytes;
+	size_t pending_discarded_bytes;
+#endif
 #if ZDB_TS_USE_LITTLEFS && ZDB_TS_SEGMENTED
 	/*
 	 * Segment window. Records live in <stream>.NNNN.zts files so the
@@ -306,6 +315,16 @@ struct zdb_ts_core_ctx {
 	struct zdb_ts_stream_ctx streams[CONFIG_ZDB_TS_MAX_STREAMS];
 	bool flush_pending;
 	bool ts_dir_ready;
+#if defined(CONFIG_ZDB_EVENTING) && (CONFIG_ZDB_EVENTING)
+	/*
+	 * Closing a stream flushes it and then wipes the slot, so anything the
+	 * slot still owed a listener is moved here first and published with the
+	 * rest when the lock is released.
+	 */
+	size_t released_flush_bytes;
+	size_t released_discarded_bytes;
+	char released_stream[CONFIG_ZDB_TS_STREAM_NAME_MAX_LEN + 1U];
+#endif
 #if ZDB_TS_USE_FCB
 	struct fcb ts_fcb;
 	struct flash_sector ts_fcb_sectors[CONFIG_ZDB_TS_FCB_SECTOR_COUNT];
@@ -352,6 +371,17 @@ void zdb_emit_doc_event(zdb_t *db, zdb_doc_event_type_t type,
 			const char *collection_name, const char *document_id,
 			size_t field_count, size_t serialized_bytes,
 			zdb_status_t status);
+#endif
+void zdb_emit_core_event(zdb_t *db, zdb_core_event_type_t type, zdb_health_t prev_health,
+			 zdb_health_t health, zdb_status_t status);
+#if defined(CONFIG_ZDB_TS) && (CONFIG_ZDB_TS)
+/*
+ * Collect flush and rollover activity recorded while the instance lock was
+ * held, clearing it so it is reported once. Call with the lock held; the
+ * caller publishes after releasing it (see zdb_unlock_read()/zdb_unlock_write()).
+ */
+void zdb_ts_take_deferred_events(zdb_t *db, size_t *out_flushed, size_t *out_discarded,
+				 char *out_stream, size_t out_stream_size);
 #endif
 #endif /* CONFIG_ZDB_EVENTING */
 

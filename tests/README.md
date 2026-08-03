@@ -12,7 +12,7 @@ the real Kconfig — no source-inclusion or fake `CONFIG_*` definitions.
 | `unit/kv_zms` | `zephyrdb.unit.kv.zms` | ZMS on `storage_partition` (flash simulator) | KV set/get/delete round-trips, overwrite, zero-length values, size limits, namespace isolation, iterators, index persistence across re-init (namespace separation, deletes, overwrites), string helpers (round-trip, empty, truncation termination, unterminated blobs) |
 | `unit/kv_nvs` | `zephyrdb.unit.kv.nvs` | NVS on `storage_partition` | Same suite source as `kv_zms`, plus the deterministic 16-bit record-ID collision test |
 | `unit/kv_defaults` | `zephyrdb.unit.kv.defaults` | ZMS | Defaults table: first-boot seeding, modified values surviving re-init, new entries added on upgrade, deleted keys re-seeded, standalone apply, invalid-entry reporting; namespace reset (defaults restored, other namespaces untouched, empty namespace, keys from a previous boot) |
-| `unit/kv_events` | `zephyrdb.unit.kv.events` | ZMS | Event listener dispatch: success statuses, multi-listener, null-notify slots, no-event-on-failure paths |
+| `unit/kv_events` | `zephyrdb.unit.kv.events` | ZMS | Event listener dispatch: success statuses, multi-listener, null-notify slots, no event when an operation is rejected before validation (operations that fail later *do* emit, carrying the failure status) |
 | `unit/ts_basic` | `zephyrdb.unit.ts_basic` | LittleFS (`boards/native_sim.overlay`) | Append (single + batch API), flush sync, aggregates with exact values, time windows, cursors (file + unflushed RAM), recovery truncation, stats, cursor reset rewind, descending traversal (reverse order, unflushed samples, windows, empty stream), consumed watermark (round-trip, persistence across re-init, corruption reads as unset, resumed drain) |
 | `unit/ts_agg` | `zephyrdb.unit.ts_agg` | LittleFS | Aggregate queries with `CONFIG_ZDB_TS_MAX_AGG_POINTS=8`: uncapped COUNT (fast path and windowed scan), unflushed samples counted, empty-window semantics per aggregate, truncation reporting |
 | `unit/ts_multistream` | `zephyrdb.unit.ts_multistream` | LittleFS | Four concurrent streams: interleaved appends stay separate, one flush covers every stream, slot exhaustion reports BUSY, close releases and flushes, shared handles, independent cursors, per-stream watermarks |
@@ -64,6 +64,14 @@ container or VM for the native_sim suites; the hardware suite cross-compiles
 anywhere the Zephyr SDK runs. On a 64-bit-only host toolchain (for example an
 arm64 VM) build `native_sim/native/64` and add `-K`, since the suites list
 `native_sim` in `platform_allow`.
+
+Zephyr matches `boards/<board-target>.overlay`, and `native_sim.overlay` only
+matches an unqualified target — so `native_sim/native/64` would not find it,
+leaving the LittleFS partition absent and `/lfs` unmounted. Every suite that
+needs a filesystem therefore ships a `boards/native_sim_native_64.overlay`
+alongside it, a one-line `#include` of the shared overlay. Add one to any new
+suite that carries a `native_sim.overlay`, or it will pass on CI and fail on a
+64-bit-only host.
 
 Several suites build with non-default Kconfig values so a bound is reachable
 in a test — the aggregate cap, stream slots, and segment sizes, among others.

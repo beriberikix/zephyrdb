@@ -1,0 +1,7 @@
+/*
+ * Zephyr matches boards/<board-target>.overlay, and native_sim.overlay only
+ * matches an unqualified target. A 64-bit-only host (an arm64 VM, say) has to
+ * build native_sim/native/64, which looks for this name instead — without it
+ * the LittleFS partition is absent and /lfs never mounts.
+ */
+#include "native_sim.overlay"
