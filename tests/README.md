@@ -65,20 +65,13 @@ anywhere the Zephyr SDK runs. On a 64-bit-only host toolchain (for example an
 arm64 VM) build `native_sim/native/64` and add `-K`, since the suites list
 `native_sim` in `platform_allow`.
 
-On that board target Zephyr does **not** pick up `boards/native_sim.overlay`
-automatically — it matches the plain `native_sim` name. Without the overlay the
-LittleFS partition is absent, `/lfs` never mounts, and every filesystem-backed
-suite fails with `fs: mount point not found`. Pass the overlay explicitly, one
-suite at a time:
-
-```bash
-python3 $ZEPHYR_BASE/scripts/twister -T tests/unit/doc_basic \
-        -p native_sim/native/64 -K \
-        -x=DTC_OVERLAY_FILE=$PWD/tests/unit/doc_basic/boards/native_sim.overlay
-```
-
-CI runs the 32-bit `native_sim`, where auto-discovery works, so this only
-affects local arm64 runs.
+Zephyr matches `boards/<board-target>.overlay`, and `native_sim.overlay` only
+matches an unqualified target — so `native_sim/native/64` would not find it,
+leaving the LittleFS partition absent and `/lfs` unmounted. Every suite that
+needs a filesystem therefore ships a `boards/native_sim_native_64.overlay`
+alongside it, a one-line `#include` of the shared overlay. Add one to any new
+suite that carries a `native_sim.overlay`, or it will pass on CI and fail on a
+64-bit-only host.
 
 Several suites build with non-default Kconfig values so a bound is reachable
 in a test — the aggregate cap, stream slots, and segment sizes, among others.
