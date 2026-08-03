@@ -68,6 +68,22 @@ const char *zdb_status_str(zdb_status_t status)
 	}
 }
 
+const char *zdb_health_str(zdb_health_t health)
+{
+	switch (health) {
+	case ZDB_HEALTH_OK:
+		return "OK";
+	case ZDB_HEALTH_DEGRADED:
+		return "DEGRADED";
+	case ZDB_HEALTH_READONLY:
+		return "READONLY";
+	case ZDB_HEALTH_FAULT:
+		return "FAULT";
+	default:
+		return "UNKNOWN";
+	}
+}
+
 #if defined(CONFIG_ZDB_TS) && (CONFIG_ZDB_TS)
 void zdb_health_check(zdb_t *db)
 {

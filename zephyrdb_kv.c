@@ -851,7 +851,16 @@ zdb_status_t zdb_kv_iter_open(zdb_kv_t *kv, zdb_kv_iter_t *out_iter)
 		return ZDB_ERR_INVAL;
 	}
 
+	/*
+	 * The key index is heap-allocated and sized by
+	 * CONFIG_ZDB_KV_INDEX_MAX_ENTRIES, so a small CONFIG_HEAP_MEM_POOL_SIZE
+	 * can leave it unavailable. Report that instead of opening an iterator
+	 * that would report an empty namespace no matter what it holds.
+	 */
 	ctx = zdb_kv_ctx_get_or_alloc(kv->db);
+	if (ctx == NULL) {
+		return ZDB_ERR_NOMEM;
+	}
 
 	(void)memset(out_iter, 0, sizeof(*out_iter));
 	out_iter->kv = kv;

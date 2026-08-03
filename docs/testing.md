@@ -125,5 +125,6 @@ picocom --baud 115200 /dev/ttyACM0
 ## Related
 
 - [Samples Guide](samples.md)
+- [Shell Guide](shell.md)
 - [Configuration](configuration.md)
 - [Project README](../README.md)

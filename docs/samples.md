@@ -89,7 +89,7 @@ Notes:
 
 ### shell_basic
 
-Developer-oriented Zephyr shell sample that exposes the `zdb` command tree for common runtime operations.
+Developer-oriented Zephyr shell sample that exposes the `zdb` command tree for common runtime operations. See the [Shell Guide](shell.md) for the command reference.
 
 Build:
 
@@ -100,9 +100,9 @@ west build -t run
 
 Notes:
 
-- Uses ZMS on `storage_partition` for KV backend on `native_sim`.
-- Runs a startup KV smoke check (`set/get/delete`) before enabling interactive shell usage.
-- Useful for validating command behavior such as `zdb health`, `zdb stats`, and `zdb kv ...`.
+- Uses ZMS on `storage_partition` for the KV backend and LittleFS (`boards/native_sim.overlay`) for time-series and documents, so all three subtrees are present.
+- Runs a startup KV smoke check (`set/get/delete`), then seeds a `cfg` namespace, a `temp` stream, and a `sensors/s1` document so every command has something to report.
+- Try `zdb info`, `zdb kv list cfg`, `zdb ts read temp`, and `zdb doc get sensors s1`.
 
 ### eventing_zbus
 
@@ -190,6 +190,7 @@ Notes:
 
 ## Related
 
+- [Shell Guide](shell.md)
 - [Testing Guide](testing.md)
 - [Configuration](configuration.md)
 - [Project README](../README.md)

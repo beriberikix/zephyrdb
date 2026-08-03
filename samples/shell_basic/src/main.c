@@ -93,6 +93,46 @@ static int shell_basic_kv_selftest(zdb_t *db)
 	return 0;
 }
 
+/*
+ * Seed one namespace, one stream, and one document so every command in the
+ * tree has something to report the first time it is run.
+ */
+static void shell_basic_seed(zdb_t *db)
+{
+	static const zdb_ts_sample_i64_t samples[] = {
+		{.ts_ms = 1000U, .value = 20},
+		{.ts_ms = 1001U, .value = 21},
+		{.ts_ms = 1002U, .value = 22},
+	};
+	zdb_kv_t kv;
+	zdb_ts_t ts;
+	zdb_doc_t doc;
+
+	if (zdb_kv_open(db, "cfg", &kv) == ZDB_OK) {
+		(void)zdb_kv_set_str(&kv, "name", "kitchen");
+		(void)zdb_kv_set(&kv, "cal", "\x00\xff\x10", 3U);
+		(void)zdb_kv_close(&kv);
+	}
+
+	if (zdb_ts_open(db, "temp", &ts) == ZDB_OK) {
+		for (size_t i = 0U; i < ARRAY_SIZE(samples); i++) {
+			(void)zdb_ts_append_i64(&ts, &samples[i]);
+		}
+		/* Closing writes out whatever is buffered. */
+		(void)zdb_ts_close(&ts);
+	}
+
+	if (zdb_doc_create(db, "sensors", "s1", &doc) == ZDB_OK) {
+		(void)zdb_doc_field_set_i64(&doc, "temp", 21);
+		(void)zdb_doc_field_set_string(&doc, "label", "kitchen");
+		(void)zdb_doc_field_set_bool(&doc, "active", true);
+		(void)zdb_doc_save(&doc);
+		(void)zdb_doc_close(&doc);
+	}
+
+	printk("shell_basic: seeded kv/cfg, ts/temp, doc/sensors/s1\n");
+}
+
 int main(void)
 {
 	zdb_status_t rc;
@@ -117,8 +157,12 @@ int main(void)
 		return 1;
 	}
 
+	shell_basic_seed(&g_db);
+
 	zdb_shell_register(&g_db);
-	printk("shell_basic: ZephyrDB shell ready. Try: zdb health, zdb stats\n");
+	printk("shell_basic: ZephyrDB shell ready.\n");
+	printk("shell_basic: try zdb info, zdb kv list cfg, zdb ts read temp, "
+	       "zdb doc get sensors s1\n");
 
 	while (1) {
 		k_sleep(K_SECONDS(1));

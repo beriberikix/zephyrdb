@@ -1,240 +1,121 @@
-#include "zephyrdb.h"
+/*
+ * Copyright (c) 2026 ZephyrDB contributors
+ *
+ * SPDX-License-Identifier: Apache-2.0
+ *
+ * Root of the `zdb` command tree, the core commands, and the parsing and
+ * formatting helpers the per-model shell sources share. Command reference:
+ * docs/shell.md.
+ */
+
+#include "zephyrdb_shell.h"
 
 #include <errno.h>
 #include <stdlib.h>
 #include <string.h>
 
-#include <zephyr/kernel.h>
-#include <zephyr/shell/shell.h>
+#include <zephyr/sys/printk.h>
 
-static zdb_t *g_shell_db;
+/*
+ * The scratch buffer and the bound instance are shared across every command,
+ * and shell_execute_cmd() can be driven from any thread with several backends
+ * active at once. One mutex around the whole surface makes it single-threaded
+ * by construction.
+ */
+static K_MUTEX_DEFINE(zdb_shell_mtx);
+static zdb_t *zdb_shell_db;
+
+uint8_t zdb_shell_scratch[ZDB_SHELL_SCRATCH_SIZE];
 
 void zdb_shell_register(zdb_t *db)
 {
-	g_shell_db = db;
+	(void)k_mutex_lock(&zdb_shell_mtx, K_FOREVER);
+	zdb_shell_db = db;
+	(void)k_mutex_unlock(&zdb_shell_mtx);
 }
 
-static zdb_t *zdb_shell_db_get(const struct shell *sh)
+int zdb_shell_lock(const struct shell *sh, zdb_t **out_db)
 {
-	if (g_shell_db == NULL) {
-		shell_error(sh, "ZephyrDB not registered. Call zdb_shell_register() after zdb_init().");
-		return NULL;
+	(void)k_mutex_lock(&zdb_shell_mtx, K_FOREVER);
+
+	if (zdb_shell_db == NULL) {
+		(void)k_mutex_unlock(&zdb_shell_mtx);
+		shell_error(sh, "error: ZephyrDB not registered; call zdb_shell_register() "
+				"after zdb_init()");
+		return -ENODEV;
 	}
 
-	return g_shell_db;
+	*out_db = zdb_shell_db;
+	return 0;
 }
 
-static const char *zdb_health_str(zdb_health_t health)
+void zdb_shell_unlock(void)
 {
-	switch (health) {
-	case ZDB_HEALTH_OK:
-		return "OK";
-	case ZDB_HEALTH_DEGRADED:
-		return "DEGRADED";
-	case ZDB_HEALTH_READONLY:
-		return "READONLY";
-	case ZDB_HEALTH_FAULT:
-		return "FAULT";
+	(void)k_mutex_unlock(&zdb_shell_mtx);
+}
+
+/*
+ * The inverse of zdb_status_from_errno() in zephyrdb_core.c, extended for the
+ * two statuses that call has no errno preimage for.
+ */
+int zdb_shell_errno(zdb_status_t status)
+{
+	switch (status) {
+	case ZDB_OK:
+		return 0;
+	case ZDB_ERR_INVAL:
+		return -EINVAL;
+	case ZDB_ERR_NOMEM:
+		return -ENOMEM;
+	case ZDB_ERR_NOT_FOUND:
+		return -ENOENT;
+	case ZDB_ERR_BUSY:
+		return -EBUSY;
+	case ZDB_ERR_TIMEOUT:
+		return -ETIMEDOUT;
+	case ZDB_ERR_UNSUPPORTED:
+		return -ENOTSUP;
+	case ZDB_ERR_CORRUPT:
+		return -EBADMSG;
+	case ZDB_ERR_COLLISION:
+		return -EEXIST;
+	case ZDB_ERR_IO:
+	case ZDB_ERR_INTERNAL:
 	default:
-		return "UNKNOWN";
+		return -EIO;
 	}
 }
 
-static int cmd_zdb_health(const struct shell *sh, size_t argc, char **argv)
+int zdb_shell_fail(const struct shell *sh, const char *op, zdb_status_t status)
 {
-	ARG_UNUSED(argc);
-	ARG_UNUSED(argv);
+	shell_error(sh, "error: %s failed: %s", op, zdb_status_str(status));
 
-	zdb_t *db = zdb_shell_db_get(sh);
-	zdb_health_t health;
-
-	if (db == NULL) {
-		return -ENODEV;
+	switch (status) {
+	case ZDB_ERR_UNSUPPORTED:
+		shell_print(sh, "hint: not supported by the active backend (see \"zdb info\")");
+		break;
+	case ZDB_ERR_BUSY:
+		shell_print(sh, "hint: another handle is still open; "
+				"see CONFIG_ZDB_TS_MAX_STREAMS");
+		break;
+	case ZDB_ERR_NOMEM:
+		shell_print(sh, "hint: a slab or the heap is exhausted, or the value "
+				"exceeds its bound (see \"zdb info\")");
+		break;
+	default:
+		break;
 	}
 
-	health = zdb_health(db);
-	shell_print(sh, "health: %s", zdb_health_str(health));
-
-	return 0;
+	return zdb_shell_errno(status);
 }
 
-static int cmd_zdb_stats(const struct shell *sh, size_t argc, char **argv)
+int zdb_shell_bad_arg(const struct shell *sh, const char *what, const char *got)
 {
-	ARG_UNUSED(argc);
-	ARG_UNUSED(argv);
-
-	zdb_t *db = zdb_shell_db_get(sh);
-	zdb_ts_stats_t stats;
-
-	if (db == NULL) {
-		return -ENODEV;
-	}
-
-	zdb_ts_stats_get(db, &stats);
-	shell_print(sh, "recover_runs: %u", stats.recover_runs);
-	shell_print(sh, "recover_failures: %u", stats.recover_failures);
-	shell_print(sh, "recover_truncated_bytes: %llu",
-		    (unsigned long long)stats.recover_truncated_bytes);
-	shell_print(sh, "crc_failures: %u", stats.crc_failures);
-	shell_print(sh, "corrupt_records: %u", stats.corrupt_records);
-	shell_print(sh, "unsupported_versions: %u", stats.unsupported_versions);
-
-	return 0;
+	shell_error(sh, "error: invalid %s: %s", what, (got != NULL) ? got : "");
+	return -EINVAL;
 }
 
-#if defined(CONFIG_ZDB_KV) && (CONFIG_ZDB_KV)
-static int cmd_zdb_kv_set(const struct shell *sh, size_t argc, char **argv)
-{
-	zdb_t *db = zdb_shell_db_get(sh);
-	zdb_kv_t kv;
-	zdb_status_t status;
-
-	if (db == NULL) {
-		return -ENODEV;
-	}
-
-	ARG_UNUSED(argc);
-	status = zdb_kv_open(db, argv[1], &kv);
-	if (status != ZDB_OK) {
-		shell_error(sh, "kv open failed: %s", zdb_status_str(status));
-		return -EIO;
-	}
-
-	status = zdb_kv_set(&kv, argv[2], argv[3], strlen(argv[3]));
-	(void)zdb_kv_close(&kv);
-	if (status != ZDB_OK) {
-		shell_error(sh, "kv set failed: %s", zdb_status_str(status));
-		return -EIO;
-	}
-
-	shell_print(sh, "kv set ok");
-	return 0;
-}
-
-static int cmd_zdb_kv_get(const struct shell *sh, size_t argc, char **argv)
-{
-	zdb_t *db = zdb_shell_db_get(sh);
-	zdb_kv_t kv;
-	zdb_status_t status;
-	uint8_t value[256];
-	size_t out_len = 0U;
-
-	if (db == NULL) {
-		return -ENODEV;
-	}
-
-	ARG_UNUSED(argc);
-	status = zdb_kv_open(db, argv[1], &kv);
-	if (status != ZDB_OK) {
-		shell_error(sh, "kv open failed: %s", zdb_status_str(status));
-		return -EIO;
-	}
-
-	status = zdb_kv_get(&kv, argv[2], value, sizeof(value), &out_len);
-	(void)zdb_kv_close(&kv);
-	if (status != ZDB_OK) {
-		shell_error(sh, "kv get failed: %s", zdb_status_str(status));
-		return -EIO;
-	}
-
-	shell_print(sh, "len: %u", (unsigned int)out_len);
-	shell_hexdump(sh, value, out_len);
-
-	return 0;
-}
-
-static int cmd_zdb_kv_delete(const struct shell *sh, size_t argc, char **argv)
-{
-	zdb_t *db = zdb_shell_db_get(sh);
-	zdb_kv_t kv;
-	zdb_status_t status;
-
-	if (db == NULL) {
-		return -ENODEV;
-	}
-
-	ARG_UNUSED(argc);
-	status = zdb_kv_open(db, argv[1], &kv);
-	if (status != ZDB_OK) {
-		shell_error(sh, "kv open failed: %s", zdb_status_str(status));
-		return -EIO;
-	}
-
-	status = zdb_kv_delete(&kv, argv[2]);
-	(void)zdb_kv_close(&kv);
-	if (status != ZDB_OK) {
-		shell_error(sh, "kv delete failed: %s", zdb_status_str(status));
-		return -EIO;
-	}
-
-	shell_print(sh, "kv delete ok");
-	return 0;
-}
-
-static int cmd_zdb_kv_list(const struct shell *sh, size_t argc, char **argv)
-{
-	zdb_t *db = zdb_shell_db_get(sh);
-	zdb_kv_t kv;
-	zdb_kv_iter_t iter;
-	zdb_status_t status;
-	uint8_t value[256];
-	char key[CONFIG_ZDB_MAX_KEY_LEN + 1U];
-	size_t key_len = 0U;
-	size_t value_len = 0U;
-	unsigned int listed = 0U;
-
-	if (db == NULL) {
-		return -ENODEV;
-	}
-
-	ARG_UNUSED(argc);
-	status = zdb_kv_open(db, argv[1], &kv);
-	if (status != ZDB_OK) {
-		shell_error(sh, "kv open failed: %s", zdb_status_str(status));
-		return -EIO;
-	}
-
-	status = zdb_kv_iter_open(&kv, &iter);
-	if (status != ZDB_OK) {
-		(void)zdb_kv_close(&kv);
-		shell_error(sh, "kv iter open failed: %s", zdb_status_str(status));
-		return -EIO;
-	}
-
-	while (true) {
-		status = zdb_kv_iter_next(&iter, key, sizeof(key), &key_len,
-					value, sizeof(value), &value_len);
-		if (status == ZDB_ERR_NOT_FOUND) {
-			break;
-		}
-		if (status != ZDB_OK) {
-			(void)zdb_kv_iter_close(&iter);
-			(void)zdb_kv_close(&kv);
-			shell_error(sh, "kv iter failed: %s", zdb_status_str(status));
-			return -EIO;
-		}
-
-		listed++;
-		shell_print(sh, "key[%u]: %s (key_len=%u value_len=%u)", listed, key,
-			    (unsigned int)key_len, (unsigned int)value_len);
-
-		if (value_len > sizeof(value)) {
-			shell_print(sh, "value truncated to %u bytes", (unsigned int)sizeof(value));
-			shell_hexdump(sh, value, sizeof(value));
-		} else {
-			shell_hexdump(sh, value, value_len);
-		}
-	}
-
-	(void)zdb_kv_iter_close(&iter);
-	(void)zdb_kv_close(&kv);
-	shell_print(sh, "kv list done: %u entries", listed);
-	return 0;
-}
-#endif
-
-#if defined(CONFIG_ZDB_TS) && (CONFIG_ZDB_TS)
-static int parse_u64(const char *s, uint64_t *out)
+int zdb_shell_parse_u64(const char *s, uint64_t *out)
 {
 	char *end = NULL;
 	unsigned long long v;
@@ -253,7 +134,7 @@ static int parse_u64(const char *s, uint64_t *out)
 	return 0;
 }
 
-static int parse_i64(const char *s, int64_t *out)
+int zdb_shell_parse_i64(const char *s, int64_t *out)
 {
 	char *end = NULL;
 	long long v;
@@ -272,221 +153,405 @@ static int parse_i64(const char *s, int64_t *out)
 	return 0;
 }
 
-static int zdb_shell_parse_agg(const char *s, zdb_ts_agg_t *agg)
+int zdb_shell_parse_f64(const char *s, double *out)
 {
-	if ((s == NULL) || (agg == NULL)) {
+	char *end = NULL;
+	double v;
+
+	if ((s == NULL) || (out == NULL)) {
 		return -EINVAL;
 	}
 
-	if (strcmp(s, "min") == 0) {
-		*agg = ZDB_TS_AGG_MIN;
-	} else if (strcmp(s, "max") == 0) {
-		*agg = ZDB_TS_AGG_MAX;
-	} else if (strcmp(s, "avg") == 0) {
-		*agg = ZDB_TS_AGG_AVG;
-	} else if (strcmp(s, "sum") == 0) {
-		*agg = ZDB_TS_AGG_SUM;
-	} else if (strcmp(s, "count") == 0) {
-		*agg = ZDB_TS_AGG_COUNT;
-	} else {
+	errno = 0;
+	v = strtod(s, &end);
+	if ((errno != 0) || (end == s) || (*end != '\0')) {
 		return -EINVAL;
 	}
 
+	*out = v;
 	return 0;
 }
 
-static int cmd_zdb_ts_append(const struct shell *sh, size_t argc, char **argv)
+int zdb_shell_parse_bool(const char *s, bool *out)
 {
-	zdb_t *db = zdb_shell_db_get(sh);
-	zdb_ts_t ts;
-	zdb_ts_sample_i64_t sample;
-	zdb_status_t status;
+	static const char *const yes[] = {"1", "true", "yes", "on"};
+	static const char *const no[] = {"0", "false", "no", "off"};
 
-	if (db == NULL) {
-		return -ENODEV;
-	}
-
-	ARG_UNUSED(argc);
-	if (parse_u64(argv[2], &sample.ts_ms) != 0) {
-		shell_error(sh, "invalid ts_ms: %s", argv[2]);
-		return -EINVAL;
-	}
-	if (parse_i64(argv[3], &sample.value) != 0) {
-		shell_error(sh, "invalid value: %s", argv[3]);
+	if ((s == NULL) || (out == NULL)) {
 		return -EINVAL;
 	}
 
-	status = zdb_ts_open(db, argv[1], &ts);
-	if (status != ZDB_OK) {
-		shell_error(sh, "ts open failed: %s", zdb_status_str(status));
-		return -EIO;
+	for (size_t i = 0U; i < ARRAY_SIZE(yes); i++) {
+		if (strcmp(s, yes[i]) == 0) {
+			*out = true;
+			return 0;
+		}
 	}
 
-	status = zdb_ts_append_i64(&ts, &sample);
-	if (status == ZDB_OK) {
-		status = zdb_ts_flush_sync(&ts, K_SECONDS(2));
-	}
-	(void)zdb_ts_close(&ts);
-
-	if (status != ZDB_OK) {
-		shell_error(sh, "ts append failed: %s", zdb_status_str(status));
-		return -EIO;
+	for (size_t i = 0U; i < ARRAY_SIZE(no); i++) {
+		if (strcmp(s, no[i]) == 0) {
+			*out = false;
+			return 0;
+		}
 	}
 
-	shell_print(sh, "ts append ok");
-	return 0;
+	/* Anything else is rejected rather than quietly reading as false. */
+	return -EINVAL;
 }
 
-static int cmd_zdb_ts_query(const struct shell *sh, size_t argc, char **argv)
+static int zdb_shell_hex_nibble(char c)
 {
-	zdb_t *db = zdb_shell_db_get(sh);
-	zdb_ts_t ts;
-	zdb_ts_window_t window = ZDB_TS_WINDOW_ALL;
-	zdb_ts_agg_t agg;
-	zdb_ts_agg_result_t result;
-	zdb_status_t status;
-
-	if (db == NULL) {
-		return -ENODEV;
+	if ((c >= '0') && (c <= '9')) {
+		return c - '0';
+	}
+	if ((c >= 'a') && (c <= 'f')) {
+		return (c - 'a') + 10;
+	}
+	if ((c >= 'A') && (c <= 'F')) {
+		return (c - 'A') + 10;
 	}
 
-	if (zdb_shell_parse_agg(argv[2], &agg) != 0) {
-		shell_error(sh, "invalid agg: %s (use: min|max|avg|sum|count)", argv[2]);
+	return -1;
+}
+
+/*
+ * Decode "deadbeef" or "0xdeadbeef". An odd digit count is rejected rather
+ * than zero-padded: padding changes the value the operator typed and there is
+ * no way to know which end they meant.
+ */
+int zdb_shell_parse_hex(const char *s, uint8_t *out, size_t capacity, size_t *out_len)
+{
+	size_t digits;
+
+	if ((s == NULL) || (out == NULL) || (out_len == NULL)) {
 		return -EINVAL;
 	}
 
-	if (argc == 5U) {
-		if (parse_u64(argv[3], &window.from_ts_ms) != 0) {
-			shell_error(sh, "invalid from_ms: %s", argv[3]);
+	if ((s[0] == '0') && ((s[1] == 'x') || (s[1] == 'X'))) {
+		s += 2;
+	}
+
+	digits = strlen(s);
+	if ((digits == 0U) || ((digits % 2U) != 0U)) {
+		return -EINVAL;
+	}
+	if ((digits / 2U) > capacity) {
+		return -ENOSPC;
+	}
+
+	for (size_t i = 0U; i < digits; i += 2U) {
+		int hi = zdb_shell_hex_nibble(s[i]);
+		int lo = zdb_shell_hex_nibble(s[i + 1U]);
+
+		if ((hi < 0) || (lo < 0)) {
 			return -EINVAL;
 		}
-		if (parse_u64(argv[4], &window.to_ts_ms) != 0) {
-			shell_error(sh, "invalid to_ms: %s", argv[4]);
-			return -EINVAL;
-		}
-	} else if (argc != 3U) {
-		shell_error(sh, "usage: zdb ts query <stream> <agg> [from_ms to_ms]");
+
+		out[i / 2U] = (uint8_t)(((uint32_t)hi << 4) | (uint32_t)lo);
+	}
+
+	*out_len = digits / 2U;
+	return 0;
+}
+
+int zdb_shell_parse_timeout(const char *s, k_timeout_t *out)
+{
+	uint64_t ms;
+
+	if ((s == NULL) || (out == NULL)) {
 		return -EINVAL;
 	}
 
-	status = zdb_ts_open(db, argv[1], &ts);
-	if (status != ZDB_OK) {
-		shell_error(sh, "ts open failed: %s", zdb_status_str(status));
-		return -EIO;
+	if (strcmp(s, "forever") == 0) {
+		*out = K_FOREVER;
+		return 0;
 	}
 
-	status = zdb_ts_query_aggregate(&ts, window, agg, &result);
-	(void)zdb_ts_close(&ts);
-	if (status != ZDB_OK) {
-		shell_error(sh, "ts query failed: %s", zdb_status_str(status));
-		return -EIO;
+	if (zdb_shell_parse_u64(s, &ms) != 0) {
+		return -EINVAL;
 	}
 
-	shell_print(sh, "agg: %s", argv[2]);
-	shell_print(sh, "points: %u", result.points);
-	shell_print(sh, "value: %f", result.value);
+	*out = (ms == 0U) ? K_NO_WAIT : K_MSEC(ms);
+	return 0;
+}
+
+bool zdb_shell_printable(const uint8_t *data, size_t len)
+{
+	if ((data == NULL) || (len == 0U)) {
+		return false;
+	}
+
+	/* A value written by zdb_kv_set_str() carries its terminator. */
+	if (data[len - 1U] == 0x00) {
+		len--;
+		if (len == 0U) {
+			return false;
+		}
+	}
+
+	for (size_t i = 0U; i < len; i++) {
+		if ((data[i] < 0x20U) || (data[i] > 0x7eU)) {
+			return false;
+		}
+	}
+
+	return true;
+}
+
+/* 16 bytes is 32 characters, which keeps a line well inside the print buffer. */
+#define ZDB_SHELL_HEX_PER_LINE 16U
+
+void zdb_shell_print_hex(const struct shell *sh, const char *label, const uint8_t *data, size_t len)
+{
+	char line[(ZDB_SHELL_HEX_PER_LINE * 2U) + 1U];
+	size_t off = 0U;
+
+	if ((data == NULL) || (len == 0U)) {
+		shell_print(sh, "%s:", label);
+		return;
+	}
+
+	while (off < len) {
+		size_t n = MIN(len - off, (size_t)ZDB_SHELL_HEX_PER_LINE);
+
+		for (size_t i = 0U; i < n; i++) {
+			(void)snprintk(&line[i * 2U], 3U, "%02x", data[off + i]);
+		}
+		line[n * 2U] = '\0';
+
+		/* Repeat the label so every line of a long value greps alone. */
+		shell_print(sh, "%s: %s", label, line);
+		off += n;
+	}
+}
+
+int zdb_shell_parse_listing_args(const struct shell *sh, size_t argc, char **argv, size_t first,
+				 uint64_t *limit, uint64_t *from_ms, uint64_t *to_ms,
+				 bool *windowed)
+{
+	size_t extra = argc - first;
+	size_t window_first = first;
+
+	if (windowed != NULL) {
+		*windowed = false;
+	}
+
+	/* A NULL limit means this command takes only the window pair. */
+	if (limit != NULL) {
+		if (extra >= 1U) {
+			if (zdb_shell_parse_u64(argv[first], limit) != 0) {
+				return zdb_shell_bad_arg(sh, "limit", argv[first]);
+			}
+			extra--;
+		}
+		window_first = first + 1U;
+	}
+
+	if (extra == 0U) {
+		return 0;
+	}
+
+	/*
+	 * SHELL_CMD_ARG optional counts cannot express "these two go together",
+	 * so this is the one arity rule the handlers check by hand.
+	 */
+	if (extra != 2U) {
+		shell_error(sh, "error: from_ms and to_ms must be given together");
+		return -EINVAL;
+	}
+
+	if ((from_ms != NULL) && (zdb_shell_parse_u64(argv[window_first], from_ms) != 0)) {
+		return zdb_shell_bad_arg(sh, "from_ms", argv[window_first]);
+	}
+	if ((to_ms != NULL) && (zdb_shell_parse_u64(argv[window_first + 1U], to_ms) != 0)) {
+		return zdb_shell_bad_arg(sh, "to_ms", argv[window_first + 1U]);
+	}
+
+	if (windowed != NULL) {
+		*windowed = true;
+	}
 
 	return 0;
 }
 
-static int cmd_zdb_ts_flush(const struct shell *sh, size_t argc, char **argv)
+static int cmd_zdb_health(const struct shell *sh, size_t argc, char **argv)
 {
-	zdb_t *db = zdb_shell_db_get(sh);
-	zdb_ts_t ts;
-	zdb_status_t status;
-
-	if (db == NULL) {
-		return -ENODEV;
-	}
+	zdb_t *db;
+	int rc;
 
 	ARG_UNUSED(argc);
-	status = zdb_ts_open(db, argv[1], &ts);
-	if (status != ZDB_OK) {
-		shell_error(sh, "ts open failed: %s", zdb_status_str(status));
-		return -EIO;
+	ARG_UNUSED(argv);
+
+	rc = zdb_shell_lock(sh, &db);
+	if (rc != 0) {
+		return rc;
 	}
 
-	status = zdb_ts_flush_sync(&ts, K_SECONDS(2));
-	(void)zdb_ts_close(&ts);
-	if (status != ZDB_OK) {
-		shell_error(sh, "ts flush failed: %s", zdb_status_str(status));
-		return -EIO;
-	}
+	shell_print(sh, "health: %s", zdb_health_str(zdb_health(db)));
 
-	shell_print(sh, "ts flush ok");
+	zdb_shell_unlock();
 	return 0;
 }
-#endif
 
-#if defined(CONFIG_ZDB_DOC) && (CONFIG_ZDB_DOC)
-static int cmd_zdb_doc_open(const struct shell *sh, size_t argc, char **argv)
+static const char *zdb_shell_kv_backend(void)
 {
-	zdb_t *db = zdb_shell_db_get(sh);
-	zdb_doc_t doc;
-	zdb_status_t status;
-
-	if (db == NULL) {
-		return -ENODEV;
+	if (IS_ENABLED(CONFIG_ZDB_KV_BACKEND_ZMS)) {
+		return "zms";
 	}
+	if (IS_ENABLED(CONFIG_ZDB_KV_BACKEND_NVS)) {
+		return "nvs";
+	}
+
+	return "none";
+}
+
+static const char *zdb_shell_ts_backend(void)
+{
+	if (IS_ENABLED(CONFIG_ZDB_TS_BACKEND_FCB)) {
+		return "fcb";
+	}
+	if (IS_ENABLED(CONFIG_ZDB_TS_BACKEND_LITTLEFS)) {
+		return "littlefs";
+	}
+
+	return "none";
+}
+
+/*
+ * There is no API to enumerate namespaces, streams, or collections, so tab
+ * completion cannot offer them. This command is the substitute: it reports what
+ * the build can do and the bounds an operator will hit.
+ */
+static int cmd_zdb_info(const struct shell *sh, size_t argc, char **argv)
+{
+	zdb_t *db;
+	int rc;
 
 	ARG_UNUSED(argc);
-	status = zdb_doc_open(db, argv[1], argv[2], &doc);
-	if (status != ZDB_OK) {
-		shell_error(sh, "doc open failed: %s", zdb_status_str(status));
-		return -EIO;
+	ARG_UNUSED(argv);
+
+	rc = zdb_shell_lock(sh, &db);
+	if (rc != 0) {
+		return rc;
 	}
 
-	(void)zdb_doc_close(&doc);
-	shell_print(sh, "doc open ok");
+	shell_print(sh, "version: %s", ZDB_VERSION_STRING);
+	shell_print(sh, "health: %s", zdb_health_str(zdb_health(db)));
+	shell_print(sh, "kv: %s", IS_ENABLED(CONFIG_ZDB_KV) ? "yes" : "no");
+	shell_print(sh, "ts: %s", IS_ENABLED(CONFIG_ZDB_TS) ? "yes" : "no");
+	shell_print(sh, "doc: %s", IS_ENABLED(CONFIG_ZDB_DOC) ? "yes" : "no");
+	shell_print(sh, "eventing: %s", IS_ENABLED(CONFIG_ZDB_EVENTING) ? "yes" : "no");
+	shell_print(sh, "stats: %s", IS_ENABLED(CONFIG_ZDB_STATS) ? "yes" : "no");
+	shell_print(sh, "kv_backend: %s", zdb_shell_kv_backend());
+	shell_print(sh, "ts_backend: %s", zdb_shell_ts_backend());
+	shell_print(sh, "max_key_len: %d", CONFIG_ZDB_MAX_KEY_LEN);
+	shell_print(sh, "kv_value_max: %d", ZDB_SHELL_KV_VALUE_MAX);
+	shell_print(sh, "hex_input_max: %d", ZDB_SHELL_HEX_MAX);
 
+	zdb_shell_unlock();
 	return 0;
 }
-#endif
 
-#if defined(CONFIG_ZDB_KV) && (CONFIG_ZDB_KV)
-SHELL_STATIC_SUBCMD_SET_CREATE(
-	sub_zdb_kv,
-	SHELL_CMD_ARG(set, NULL, "Set KV value: <namespace> <key> <value>", cmd_zdb_kv_set, 4, 0),
-	SHELL_CMD_ARG(get, NULL, "Get KV value: <namespace> <key>", cmd_zdb_kv_get, 3, 0),
-	SHELL_CMD_ARG(delete, NULL, "Delete KV key: <namespace> <key>", cmd_zdb_kv_delete, 3, 0),
-	SHELL_CMD_ARG(list, NULL, "List KV entries: <namespace>", cmd_zdb_kv_list, 2, 0),
-	SHELL_SUBCMD_SET_END
-);
-#endif
+static int cmd_zdb_stats_show(const struct shell *sh, size_t argc, char **argv)
+{
+	zdb_t *db;
+	zdb_ts_stats_t stats;
+	int rc;
 
-#if defined(CONFIG_ZDB_TS) && (CONFIG_ZDB_TS)
-SHELL_STATIC_SUBCMD_SET_CREATE(
-	sub_zdb_ts,
-	SHELL_CMD_ARG(append, NULL, "Append sample: <stream> <ts_ms> <value>", cmd_zdb_ts_append, 4, 0),
-	SHELL_CMD_ARG(query, NULL, "Aggregate query: <stream> <agg> [from_ms to_ms]", cmd_zdb_ts_query,
-		      3, 2),
-	SHELL_CMD_ARG(flush, NULL, "Flush stream: <stream>", cmd_zdb_ts_flush, 2, 0),
-	SHELL_SUBCMD_SET_END
-);
-#endif
+	ARG_UNUSED(argc);
+	ARG_UNUSED(argv);
 
-#if defined(CONFIG_ZDB_DOC) && (CONFIG_ZDB_DOC)
-SHELL_STATIC_SUBCMD_SET_CREATE(
-	sub_zdb_doc,
-	SHELL_CMD_ARG(open, NULL, "Open document: <collection> <doc_id>", cmd_zdb_doc_open, 3, 0),
-	SHELL_SUBCMD_SET_END
-);
-#endif
+	rc = zdb_shell_lock(sh, &db);
+	if (rc != 0) {
+		return rc;
+	}
 
-SHELL_STATIC_SUBCMD_SET_CREATE(
-	sub_zdb,
-	SHELL_CMD(health, NULL, "Show DB health", cmd_zdb_health),
-	SHELL_CMD(stats, NULL, "Show TS stats", cmd_zdb_stats),
-#if defined(CONFIG_ZDB_KV) && (CONFIG_ZDB_KV)
-	SHELL_CMD(kv, &sub_zdb_kv, "KV commands", NULL),
-#endif
-#if defined(CONFIG_ZDB_TS) && (CONFIG_ZDB_TS)
-	SHELL_CMD(ts, &sub_zdb_ts, "Time-series commands", NULL),
-#endif
-#if defined(CONFIG_ZDB_DOC) && (CONFIG_ZDB_DOC)
-	SHELL_CMD(doc, &sub_zdb_doc, "Document commands", NULL),
-#endif
-	SHELL_SUBCMD_SET_END
-);
+	zdb_ts_stats_get(db, &stats);
+	shell_print(sh, "recover_runs: %u", stats.recover_runs);
+	shell_print(sh, "recover_failures: %u", stats.recover_failures);
+	shell_print(sh, "recover_truncated_bytes: %llu",
+		    (unsigned long long)stats.recover_truncated_bytes);
+	shell_print(sh, "crc_failures: %u", stats.crc_failures);
+	shell_print(sh, "corrupt_records: %u", stats.corrupt_records);
+	shell_print(sh, "unsupported_versions: %u", stats.unsupported_versions);
 
-SHELL_CMD_REGISTER(zdb, &sub_zdb, "ZephyrDB commands", NULL);
+	zdb_shell_unlock();
+	return 0;
+}
+
+static int cmd_zdb_stats_reset(const struct shell *sh, size_t argc, char **argv)
+{
+	zdb_t *db;
+	int rc;
+
+	ARG_UNUSED(argc);
+	ARG_UNUSED(argv);
+
+	rc = zdb_shell_lock(sh, &db);
+	if (rc != 0) {
+		return rc;
+	}
+
+	zdb_ts_stats_reset(db);
+	shell_print(sh, "status: ok");
+
+	zdb_shell_unlock();
+	return 0;
+}
+
+/*
+ * Prints the exact byte string an operator would paste into a bug report, and
+ * validates it on the way out so the report says whether it survived.
+ */
+static int cmd_zdb_stats_export(const struct shell *sh, size_t argc, char **argv)
+{
+	zdb_t *db;
+	zdb_ts_stats_export_t export_data;
+	zdb_status_t st;
+	int rc;
+
+	ARG_UNUSED(argc);
+	ARG_UNUSED(argv);
+
+	rc = zdb_shell_lock(sh, &db);
+	if (rc != 0) {
+		return rc;
+	}
+
+	st = zdb_ts_stats_export(db, &export_data);
+	if (st != ZDB_OK) {
+		rc = zdb_shell_fail(sh, "stats export", st);
+		goto out;
+	}
+
+	shell_print(sh, "version: %u", (unsigned int)export_data.version);
+	shell_print(sh, "crc: %08x", (unsigned int)export_data.crc);
+	shell_print(sh, "bytes: %u", (unsigned int)sizeof(export_data));
+	zdb_shell_print_hex(sh, "hex", (const uint8_t *)&export_data, sizeof(export_data));
+	shell_print(sh, "valid: %s",
+		    (zdb_ts_stats_export_validate(&export_data) == ZDB_OK) ? "yes" : "no");
+
+out:
+	zdb_shell_unlock();
+	return rc;
+}
+
+#define ZDB_HELP_HEALTH SHELL_HELP("Report instance health.", NULL)
+#define ZDB_HELP_INFO   SHELL_HELP("Report enabled models, backends, and compile-time limits.", NULL)
+#define ZDB_HELP_STATS  SHELL_HELP("Time-series durability counters.", NULL)
+#define ZDB_HELP_STATS_SHOW   SHELL_HELP("Print the durability counters.", NULL)
+#define ZDB_HELP_STATS_RESET  SHELL_HELP("Zero the durability counters.", NULL)
+#define ZDB_HELP_STATS_EXPORT \
+	SHELL_HELP("Print the packed CRC-protected counter export, hex and decoded.", NULL)
+
+SHELL_SUBCMD_SET_CREATE(zdb_stats_cmds, (zdb, stats));
+SHELL_SUBCMD_ADD((zdb, stats), show, NULL, ZDB_HELP_STATS_SHOW, cmd_zdb_stats_show, 1, 0);
+SHELL_SUBCMD_ADD((zdb, stats), reset, NULL, ZDB_HELP_STATS_RESET, cmd_zdb_stats_reset, 1, 0);
+SHELL_SUBCMD_ADD((zdb, stats), export, NULL, ZDB_HELP_STATS_EXPORT, cmd_zdb_stats_export, 1, 0);
+
+ZDB_SHELL_CMD_ADD(health, NULL, ZDB_HELP_HEALTH, cmd_zdb_health, 1, 0);
+ZDB_SHELL_CMD_ADD(info, NULL, ZDB_HELP_INFO, cmd_zdb_info, 1, 0);
+ZDB_SHELL_CMD_ADD(stats, &zdb_stats_cmds, ZDB_HELP_STATS, NULL, 1, 0);
+
+SHELL_SUBCMD_SET_CREATE(zdb_cmds, (zdb));
+SHELL_CMD_REGISTER(zdb, &zdb_cmds, "ZephyrDB commands", NULL);

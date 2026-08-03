@@ -2130,7 +2130,6 @@ zdb_status_t zdb_ts_query_aggregate(zdb_ts_t *ts, zdb_ts_window_t window,
 	return ZDB_ERR_UNSUPPORTED;
 #else
 	zdb_cursor_t cursor;
-	zdb_bytes_t record;
 	uint32_t points = 0U;
 	double acc = 0.0;
 	bool truncated = false;
@@ -2175,9 +2174,9 @@ zdb_status_t zdb_ts_query_aggregate(zdb_ts_t *ts, zdb_ts_window_t window,
 	 * and now report that they hit it.
 	 */
 	while ((agg == ZDB_TS_AGG_COUNT) || (points < CONFIG_ZDB_TS_MAX_AGG_POINTS)) {
-		int64_t val;
+		zdb_ts_sample_i64_t sample;
 
-		rc = zdb_cursor_next(&cursor, &record);
+		rc = zdb_ts_cursor_next_sample(&cursor, &sample);
 		if (rc == ZDB_ERR_NOT_FOUND) {
 			break;
 		}
@@ -2186,14 +2185,7 @@ zdb_status_t zdb_ts_query_aggregate(zdb_ts_t *ts, zdb_ts_window_t window,
 			return rc;
 		}
 
-		/*
-		 * The cursor already decoded this record to apply the window,
-		 * and knows which format it was in; take its result rather than
-		 * decoding the raw bytes again.
-		 */
-		val = ((const struct zdb_ts_cursor_ctx *)cursor.impl)->last_value;
-
-		if (!zdb_ts_agg_update(agg, (double)val, &points, &acc)) {
+		if (!zdb_ts_agg_update(agg, (double)sample.value, &points, &acc)) {
 			(void)zdb_cursor_close(&cursor);
 			return ZDB_ERR_INVAL;
 		}
@@ -2204,7 +2196,9 @@ zdb_status_t zdb_ts_query_aggregate(zdb_ts_t *ts, zdb_ts_window_t window,
 	 * more matching record before declaring the result truncated.
 	 */
 	if ((agg != ZDB_TS_AGG_COUNT) && (points == CONFIG_ZDB_TS_MAX_AGG_POINTS)) {
-		if (zdb_cursor_next(&cursor, &record) == ZDB_OK) {
+		zdb_ts_sample_i64_t peek;
+
+		if (zdb_ts_cursor_next_sample(&cursor, &peek) == ZDB_OK) {
 			truncated = true;
 		}
 	}
@@ -2505,6 +2499,10 @@ zdb_status_t zdb_cursor_next(zdb_cursor_t *cursor, zdb_bytes_t *out_record)
 {
 	struct zdb_ts_cursor_ctx *cctx;
 	zdb_bytes_t candidate;
+#if ZDB_TS_USE_FCB
+	struct zdb_ts_core_ctx *tctx;
+	struct zdb_ts_record_i64 rec;
+#endif
 
 	if ((cursor == NULL) || (out_record == NULL)) {
 		return ZDB_ERR_INVAL;
@@ -2642,6 +2640,33 @@ zdb_status_t zdb_cursor_next(zdb_cursor_t *cursor, zdb_bytes_t *out_record)
 	out_record->len = 0U;
 	return ZDB_ERR_UNSUPPORTED;
 #endif
+}
+
+zdb_status_t zdb_ts_cursor_next_sample(zdb_cursor_t *cursor, zdb_ts_sample_i64_t *out_sample)
+{
+	const struct zdb_ts_cursor_ctx *cctx;
+	zdb_bytes_t record;
+	zdb_status_t rc;
+
+	if ((cursor == NULL) || (out_sample == NULL)) {
+		return ZDB_ERR_INVAL;
+	}
+
+	rc = zdb_cursor_next(cursor, &record);
+	if (rc != ZDB_OK) {
+		return rc;
+	}
+
+	/*
+	 * zdb_cursor_next() had to decode the record to apply the window and
+	 * predicate; take its result rather than decoding the bytes again, which
+	 * is also what keeps callers from needing to know the record format.
+	 */
+	cctx = (const struct zdb_ts_cursor_ctx *)cursor->impl;
+	out_sample->ts_ms = cctx->last_ts_ms;
+	out_sample->value = cctx->last_value;
+
+	return ZDB_OK;
 }
 
 /*

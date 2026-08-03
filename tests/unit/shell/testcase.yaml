@@ -1,0 +1,9 @@
+tests:
+  zephyrdb.unit.shell:
+    harness: ztest
+    tags:
+      - zephyrdb
+      - unit
+      - shell
+    platform_allow:
+      - native_sim
