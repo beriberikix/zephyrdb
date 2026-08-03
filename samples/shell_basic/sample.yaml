@@ -16,6 +16,7 @@ tests:
       type: multi_line
       regex:
         - "shell_basic: KV selftest PASS"
+        - "shell_basic: seeded kv/cfg, ts/temp, doc/sensors/s1"
         - "shell_basic: ZephyrDB shell ready"
     platform_allow:
       - native_sim

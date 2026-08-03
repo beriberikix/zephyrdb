@@ -110,7 +110,9 @@ This page covers the complete option surface, grouped as in the Kconfig menus.
 ## Shell
 
 - `CONFIG_ZDB_SHELL`: `zdb` command tree (requires `CONFIG_SHELL`);
-  register an instance with `zdb_shell_register()`
+  register an instance with `zdb_shell_register()`. The `zdb ts agg` and
+  `f64` document commands print doubles, so they also need
+  `CONFIG_CBPRINTF_FP_SUPPORT`. See the [Shell Guide](shell.md).
 
 ## Stage 2 (Experimental)
 

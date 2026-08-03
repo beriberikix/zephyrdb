@@ -14,6 +14,7 @@ repository root (output in `doxygen/html`).
 - [Configuration](configuration.md)
 - [Testing Guide](testing.md)
 - [Samples Guide](samples.md)
+- [Shell Guide](shell.md)
 
 ## Quick Links
 

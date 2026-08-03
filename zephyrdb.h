@@ -24,6 +24,24 @@ extern "C"
 #endif
 
 /**
+ * @defgroup zdb_version Version
+ * @brief Compile-time library version.
+ * @{
+ */
+
+/** @brief Major version of this library. */
+#define ZDB_VERSION_MAJOR 0
+/** @brief Minor version of this library. */
+#define ZDB_VERSION_MINOR 6
+/** @brief Patch version of this library. */
+#define ZDB_VERSION_PATCH 0
+
+/** @brief Version as a printable "MAJOR.MINOR.PATCH" string. */
+#define ZDB_VERSION_STRING "0.6.0"
+
+/** @} */ /* zdb_version */
+
+/**
  * @defgroup zdb_mem Memory helpers
  * @brief Static slab declaration macros for fragmentation-free allocation.
  *
@@ -505,6 +523,14 @@ extern "C"
 	 * @return Static string such as "OK" or "COLLISION"; never NULL.
 	 */
 	const char *zdb_status_str(zdb_status_t status);
+
+	/**
+	 * @brief Return a short printable name for a health value.
+	 *
+	 * @param health Any ::zdb_health_t value.
+	 * @return Static string such as "OK" or "DEGRADED"; never NULL.
+	 */
+	const char *zdb_health_str(zdb_health_t health);
 
 	/**
 	 * @brief Copy the live time-series durability counters.
@@ -1152,6 +1178,27 @@ extern "C"
 	 * @retval ZDB_ERR_IO        Backend read failure.
 	 */
 	zdb_status_t zdb_cursor_next(zdb_cursor_t *cursor, zdb_bytes_t *out_record);
+
+	/**
+	 * @brief Fetch the next sample from a time-series cursor.
+	 *
+	 * Advances the cursor and reports the decoded sample. On-disk record
+	 * layout depends on the build (@c CONFIG_ZDB_TS_DELTA_ENCODING) and part
+	 * of the timestamp lives in the segment header, so the bytes handed back
+	 * by zdb_cursor_next() cannot be decoded portably by a caller. Use this
+	 * instead when walking a stream opened with zdb_ts_cursor_open() or
+	 * zdb_ts_cursor_open_desc().
+	 *
+	 * @param cursor     Open time-series cursor.
+	 * @param out_sample Set to the next sample.
+	 * @retval ZDB_OK              A sample was produced.
+	 * @retval ZDB_ERR_NOT_FOUND   Scan is exhausted.
+	 * @retval ZDB_ERR_INVAL       NULL argument or cursor not open.
+	 * @retval ZDB_ERR_UNSUPPORTED Cursor does not belong to the TS model.
+	 * @retval ZDB_ERR_IO          Backend read failure.
+	 */
+	zdb_status_t zdb_ts_cursor_next_sample(zdb_cursor_t *cursor,
+										   zdb_ts_sample_i64_t *out_sample);
 #endif /* CONFIG_ZDB_TS */
 
 /**
@@ -1571,11 +1618,14 @@ extern "C"
 	 * @brief Bind an instance to the `zdb` shell command tree
 	 *        (@c CONFIG_ZDB_SHELL).
 	 *
-	 * Registers @p db as the target of `zdb health`, `zdb stats`,
-	 * `zdb kv ...`, `zdb ts ...`, and `zdb doc ...`. One instance at a
-	 * time; a later call replaces the binding.
+	 * Registers @p db as the target of every `zdb` command. Call it after
+	 * zdb_init(); until then the commands report that no instance is
+	 * registered. One instance at a time; a later call replaces the
+	 * binding, and passing NULL unbinds.
 	 *
-	 * @param db Initialized instance.
+	 * See docs/shell.md for the command reference.
+	 *
+	 * @param db Initialized instance, or NULL to unbind.
 	 */
 	void zdb_shell_register(zdb_t *db);
 #endif /* CONFIG_ZDB_SHELL */

@@ -5,6 +5,11 @@ compile-time guards, see [../zephyrdb.h](../zephyrdb.h) — the header is the
 source of truth. A browsable Doxygen reference generated from the headers
 is hosted at <https://beriberikix.github.io/zephyrdb/>.
 
+## Version
+
+`ZDB_VERSION_MAJOR`, `ZDB_VERSION_MINOR`, `ZDB_VERSION_PATCH`, and
+`ZDB_VERSION_STRING` report the library version at compile time.
+
 ## Build-Time Guards
 
 - Core APIs are available when `CONFIG_ZEPHYRDB=y`.
@@ -38,6 +43,7 @@ All APIs return `zdb_status_t`: `ZDB_OK`, `ZDB_ERR_INVAL`, `ZDB_ERR_NOMEM`,
 - `zdb_init(db, cfg)` / `zdb_deinit(db)`
 - `zdb_health(db)` — returns `zdb_health_t` (`OK`/`DEGRADED`/`READONLY`/`FAULT`)
 - `zdb_status_str(status)` — printable status name
+- `zdb_health_str(health)` — printable health name
 - `zdb_ts_stats_get(db, out)` / `zdb_ts_stats_reset(db)`
 - `zdb_ts_stats_export(db, out_export)` — fills a packed, CRC-protected
   telemetry record; the CRC covers every byte except the crc field itself
@@ -47,8 +53,17 @@ All APIs return `zdb_status_t`: `ZDB_OK`, `ZDB_ERR_INVAL`, `ZDB_ERR_NOMEM`,
 ### Cursors (core framework, currently used by TS)
 
 - `zdb_cursor_next(cursor, out_record)` — declared with the TS module today
+- `zdb_ts_cursor_next_sample(cursor, out_sample)` — the decoded form of the
+  above, and the one to use when walking a stream
 - `zdb_cursor_reset(cursor)`
 - `zdb_cursor_close(cursor)`
+
+Notes:
+
+- On-disk record layout depends on `CONFIG_ZDB_TS_DELTA_ENCODING` and part of
+  a sample's timestamp lives in the segment header, so the raw bytes from
+  `zdb_cursor_next()` are not portably decodable by a caller.
+  `zdb_ts_cursor_next_sample()` reports the sample the cursor already decoded.
 
 ## Key-Value
 
@@ -171,6 +186,7 @@ Publication is best-effort and never changes operation return values.
   `zdb_ts_watermark_clear(ts)`
 - `zdb_ts_cursor_open(ts, window, predicate, predicate_ctx, out_cursor)`
 - `zdb_ts_cursor_open_desc(ts, window, predicate, predicate_ctx, out_cursor)` — newest-first
+- `zdb_ts_cursor_next_sample(cursor, out_sample)` — next decoded sample
 
 Helpers: `ZDB_TS_WINDOW_ALL` — a `zdb_ts_window_t` covering all timestamps.
 
@@ -185,7 +201,8 @@ Notes:
   stream's buffered samples, and `zdb_ts_close` flushes the stream it closes.
 - Cursors iterate flushed records from storage plus samples still in the
   RAM ingest buffer. `zdb_cursor_reset` rewinds a cursor so it can be walked
-  again.
+  again. Read samples with `zdb_ts_cursor_next_sample`; `zdb_cursor_next`
+  hands back raw record bytes whose layout depends on the build.
 - `zdb_ts_cursor_open_desc` walks the same records newest-first: unflushed
   samples first, then stored records from the end backwards. Order follows
   storage, which matches timestamp order when samples are appended as they are
@@ -283,6 +300,7 @@ Notes:
 
 ## Shell
 
-- `zdb_shell_register(db)` — registers the `zdb` command tree
-  (`zdb health`, `zdb stats`, `zdb kv set|get|delete|list`,
-  `zdb ts append|query|flush`, `zdb doc open`). One instance at a time.
+- `zdb_shell_register(db)` — binds an instance to the `zdb` command tree.
+  One instance at a time; `NULL` unbinds.
+
+See the [Shell Guide](shell.md) for the command reference.

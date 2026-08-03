@@ -29,7 +29,7 @@ document intact rather than a truncated one.
 **Across all models** — bounded, statically sized allocation on the core and
 time-series paths; corruption detection with recovery; optional mutation
 events, with a zbus adapter; optional FlatBuffers export for transport; and a
-`zdb` shell command tree.
+[`zdb` shell command tree](docs/shell.md).
 
 ## Quick Start
 
@@ -41,7 +41,7 @@ manifest:
     - name: zephyrdb
       url: https://github.com/beriberikix/zephyrdb
       path: modules/lib/zephyrdb
-      revision: v0.5.0
+      revision: v0.6.0
 ```
 
 ### 2. Enable in prj.conf
@@ -93,6 +93,7 @@ For a complete standalone application example, see [zephyrdb-example](https://gi
 - [Configuration](docs/configuration.md)
 - [Testing Guide](docs/testing.md)
 - [Samples Guide](docs/samples.md)
+- [Shell Guide](docs/shell.md)
 
 Planned and declined enhancements are tracked as
 [GitHub issues](https://github.com/beriberikix/zephyrdb/issues).

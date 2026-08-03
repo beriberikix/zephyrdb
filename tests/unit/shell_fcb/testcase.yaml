@@ -1,0 +1,15 @@
+tests:
+  zephyrdb.unit.shell_fcb:
+    harness: ztest
+    # Build-only: the FCB backend needs a real flash area, which native_sim's
+    # partition layout does not provide, so zdb_ts_open reports NOMEM there.
+    # Building still guards the FCB code paths, which no other configuration in
+    # this repository compiles.
+    build_only: true
+    tags:
+      - zephyrdb
+      - unit
+      - shell
+      - fcb
+    platform_allow:
+      - native_sim
