@@ -106,7 +106,8 @@ Notes:
 
 ### eventing_zbus
 
-Demonstrates KV, TS, and DOC mutation event emission published to zbus through the optional adapter.
+Demonstrates all four event categories — KV, TS, DOC and instance-level —
+published to zbus through the optional adapter.
 
 Build:
 
@@ -118,8 +119,12 @@ west build -t run
 Notes:
 
 - Enables `CONFIG_ZDB_EVENTING` and `CONFIG_ZDB_EVENTING_ZBUS`.
-- Uses ZMS on `storage_partition` for KV backend on `native_sim`.
-- Prints latest zbus events for KV (`zdb_kv_event_chan`), TS (`zdb_ts_event_chan`), and DOC (`zdb_doc_event_chan`).
+- Uses ZMS on `storage_partition` for the KV backend, and a LittleFS partition
+  from `boards/native_sim.overlay` for the time-series and document models.
+- Prints the latest zbus message on each of `zdb_kv_event_chan`,
+  `zdb_ts_event_chan`, `zdb_doc_event_chan` and `zdb_core_event_chan`.
+- Every step is a hard failure, so the sample cannot pass while silently
+  skipping the models it exists to demonstrate.
 
 ### doc_kv_blob
 

@@ -429,6 +429,63 @@ static uint64_t zdb_ts_slot_base_ts(const struct zdb_ts_stream_ctx *slot)
 }
 #endif /* ZDB_TS_USE_LITTLEFS */
 
+#if defined(CONFIG_ZDB_EVENTING) && (CONFIG_ZDB_EVENTING)
+void zdb_ts_take_deferred_events(zdb_t *db, size_t *out_flushed, size_t *out_discarded,
+				 char *out_stream, size_t out_stream_size)
+{
+	struct zdb_ts_core_ctx *ctx;
+	const char *only_stream = NULL;
+	size_t naming_streams = 0U;
+	size_t i;
+
+	*out_flushed = 0U;
+	*out_discarded = 0U;
+	if ((out_stream != NULL) && (out_stream_size > 0U)) {
+		out_stream[0] = '\0';
+	}
+
+	if ((db == NULL) || (db->ts_ctx == NULL)) {
+		return;
+	}
+
+	ctx = (struct zdb_ts_core_ctx *)db->ts_ctx;
+
+	for (i = 0U; i < ARRAY_SIZE(ctx->streams); i++) {
+		struct zdb_ts_stream_ctx *slot = &ctx->streams[i];
+
+		if ((slot->pending_flush_bytes == 0U) && (slot->pending_discarded_bytes == 0U)) {
+			continue;
+		}
+
+		*out_flushed += slot->pending_flush_bytes;
+		*out_discarded += slot->pending_discarded_bytes;
+		slot->pending_flush_bytes = 0U;
+		slot->pending_discarded_bytes = 0U;
+		naming_streams++;
+		only_stream = slot->name;
+	}
+
+	if ((ctx->released_flush_bytes > 0U) || (ctx->released_discarded_bytes > 0U)) {
+		*out_flushed += ctx->released_flush_bytes;
+		*out_discarded += ctx->released_discarded_bytes;
+		ctx->released_flush_bytes = 0U;
+		ctx->released_discarded_bytes = 0U;
+		naming_streams++;
+		only_stream = ctx->released_stream;
+	}
+
+	/*
+	 * Name the stream only when one is unambiguous; work spanning several
+	 * names none of them, matching how the periodic drain reports.
+	 */
+	if ((naming_streams == 1U) && (only_stream != NULL) && (out_stream != NULL) &&
+	    (out_stream_size > 0U)) {
+		(void)strncpy(out_stream, only_stream, out_stream_size - 1U);
+		out_stream[out_stream_size - 1U] = '\0';
+	}
+}
+#endif /* CONFIG_ZDB_EVENTING */
+
 static int zdb_ts_flush_buffer_locked(struct zdb_ts_core_ctx *ctx,
 				      struct zdb_ts_stream_ctx *slot)
 {
@@ -473,6 +530,13 @@ static int zdb_ts_flush_buffer_locked(struct zdb_ts_core_ctx *ctx,
 
 #if ZDB_TS_SEGMENTED
 	slot->cur_seg_bytes += slot->ingest_used;
+#endif
+#if defined(CONFIG_ZDB_EVENTING) && (CONFIG_ZDB_EVENTING)
+	/*
+	 * Every flush is recorded, not just the ones the work queue drives, so
+	 * the bytes a listener sees match what actually reached storage.
+	 */
+	slot->pending_flush_bytes += slot->ingest_used;
 #endif
 	slot->ingest_used = 0U;
 
@@ -529,6 +593,15 @@ static int zdb_ts_flush_all_locked(struct zdb_ts_core_ctx *ctx, size_t *out_flus
 		if (out_flushed_bytes != NULL) {
 			*out_flushed_bytes += pending;
 		}
+
+#if defined(CONFIG_ZDB_EVENTING) && (CONFIG_ZDB_EVENTING)
+		/*
+		 * This drain reports its own total below, so the per-slot
+		 * record is cleared to keep the bytes from being counted twice.
+		 * Any rollover it triggered is left for the caller to publish.
+		 */
+		slot->pending_flush_bytes = 0U;
+#endif
 
 		/*
 		 * Name the stream when exactly one was flushed, which is the
@@ -1232,11 +1305,25 @@ static int zdb_ts_start_segment(zdb_t *db, struct zdb_ts_stream_ctx *slot,
 	/* Discarding the oldest segment is rollover's job, not segmentation's. */
 	while ((slot->cur_seg - slot->oldest_seg + 1U) >
 	       (uint32_t)CONFIG_ZDB_TS_ROLLOVER_MAX_SEGMENTS) {
+#if defined(CONFIG_ZDB_EVENTING) && (CONFIG_ZDB_EVENTING)
+		struct fs_dirent discarded;
+#endif
+
 		rc = zdb_ts_build_segment_path(db->cfg, slot->name, slot->oldest_seg, seg_path,
 					       sizeof(seg_path));
 		if (rc < 0) {
 			return rc;
 		}
+#if defined(CONFIG_ZDB_EVENTING) && (CONFIG_ZDB_EVENTING)
+		/*
+		 * Size the file before it goes, so the event can say how much
+		 * history the bound cost. Published by the caller once the lock
+		 * is released.
+		 */
+		if (fs_stat(seg_path, &discarded) == 0) {
+			slot->pending_discarded_bytes += (size_t)discarded.size;
+		}
+#endif
 		rc = fs_unlink(seg_path);
 		if ((rc < 0) && (rc != -ENOENT)) {
 			return rc;
@@ -1371,6 +1458,11 @@ static void zdb_ts_flush_work_handler(struct k_work *work)
 #endif
 	ctx->flush_pending = false;
 	k_sem_give(&ctx->flush_done);
+	/*
+	 * Unlocking publishes any rollover this drain caused. The flush itself
+	 * is reported below instead, because only this path knows whether a
+	 * stream failed to write.
+	 */
 	zdb_unlock_write(ctx->db);
 
 #if defined(CONFIG_ZDB_EVENTING) && (CONFIG_ZDB_EVENTING)
@@ -1476,6 +1568,16 @@ static bool zdb_ts_slot_release(struct zdb_ts_core_ctx *ctx, struct zdb_ts_strea
 #if ZDB_TS_USE_LITTLEFS
 	if ((slot->ingest_buf != NULL) && (ctx->db->ts_ingest_slab != NULL)) {
 		k_mem_slab_free(ctx->db->ts_ingest_slab, slot->ingest_buf);
+	}
+#endif
+#if defined(CONFIG_ZDB_EVENTING) && (CONFIG_ZDB_EVENTING)
+	/* Rescue what this slot still owes a listener before the wipe. */
+	if ((slot->pending_flush_bytes > 0U) || (slot->pending_discarded_bytes > 0U)) {
+		ctx->released_flush_bytes += slot->pending_flush_bytes;
+		ctx->released_discarded_bytes += slot->pending_discarded_bytes;
+		(void)strncpy(ctx->released_stream, slot->name,
+			      sizeof(ctx->released_stream) - 1U);
+		ctx->released_stream[sizeof(ctx->released_stream) - 1U] = '\0';
 	}
 #endif
 	(void)memset(slot, 0, sizeof(*slot));
@@ -1619,6 +1721,7 @@ zdb_status_t zdb_ts_close(zdb_ts_t *ts)
 				if (slot != NULL) {
 					(void)zdb_ts_slot_release(ctx, slot);
 				}
+				/* Unlocking publishes whatever the flush recorded. */
 				zdb_unlock_write(ts->db);
 			}
 		}
@@ -2709,6 +2812,7 @@ zdb_status_t zdb_ts_watermark_set(zdb_ts_t *ts, uint64_t consumed_ts_ms)
 	struct fs_file_t file;
 	struct zdb_ts_core_ctx *ctx;
 	zdb_status_t lock_rc;
+	zdb_status_t status;
 	ssize_t wr;
 	int rc;
 
@@ -2755,10 +2859,16 @@ zdb_status_t zdb_ts_watermark_set(zdb_ts_t *ts, uint64_t consumed_ts_ms)
 	zdb_unlock_write(ts->db);
 
 	if (wr < 0) {
-		return zdb_status_from_errno((int)wr);
+		status = zdb_status_from_errno((int)wr);
+	} else {
+		status = (wr == (ssize_t)sizeof(rec)) ? ZDB_OK : ZDB_ERR_IO;
 	}
 
-	return (wr == (ssize_t)sizeof(rec)) ? ZDB_OK : ZDB_ERR_IO;
+#if defined(CONFIG_ZDB_EVENTING) && (CONFIG_ZDB_EVENTING)
+	zdb_emit_ts_event(ts->db, ZDB_TS_EVENT_WATERMARK, ts->stream_name, consumed_ts_ms, 0, 0U,
+			  0U, status);
+#endif
+	return status;
 #endif
 }
 
@@ -2837,6 +2947,7 @@ zdb_status_t zdb_ts_watermark_clear(zdb_ts_t *ts)
 #else
 	char path[ZDB_TS_PATH_MAX];
 	zdb_status_t lock_rc;
+	zdb_status_t status;
 	int rc;
 
 	if ((ts == NULL) || (ts->db == NULL) || (ts->db->cfg == NULL)) {
@@ -2857,11 +2968,13 @@ zdb_status_t zdb_ts_watermark_clear(zdb_ts_t *ts)
 	zdb_unlock_write(ts->db);
 
 	/* Clearing an unset watermark is the state the caller asked for. */
-	if ((rc < 0) && (rc != -ENOENT)) {
-		return zdb_status_from_errno(rc);
-	}
+	status = ((rc < 0) && (rc != -ENOENT)) ? zdb_status_from_errno(rc) : ZDB_OK;
 
-	return ZDB_OK;
+#if defined(CONFIG_ZDB_EVENTING) && (CONFIG_ZDB_EVENTING)
+	/* A cleared watermark reports 0, the position a fresh consumer resumes from. */
+	zdb_emit_ts_event(ts->db, ZDB_TS_EVENT_WATERMARK, ts->stream_name, 0U, 0, 0U, 0U, status);
+#endif
+	return status;
 #endif
 }
 
@@ -2887,10 +3000,12 @@ zdb_status_t zdb_ts_recover_stream(zdb_ts_t *ts, size_t *out_truncated_bytes)
 	size_t rec_size;
 	size_t good_end;
 	size_t truncated_bytes = 0U;
+	zdb_status_t status;
 	int rc;
 	ssize_t rd;
 
 	if ((ts == NULL) || (ts->db == NULL) || (ts->stream_name == NULL)) {
+		/* No instance to report against; nothing can be listening yet. */
 		return ZDB_ERR_INVAL;
 	}
 
@@ -2911,7 +3026,8 @@ zdb_status_t zdb_ts_recover_stream(zdb_ts_t *ts, size_t *out_truncated_bytes)
 			(tctx != NULL) ? zdb_ts_slot_find(tctx, ts->stream_name) : NULL;
 
 		if (slot == NULL) {
-			return ZDB_ERR_INVAL;
+			status = ZDB_ERR_INVAL;
+			goto fail;
 		}
 		rc = zdb_ts_active_path(ts->db, slot, path, sizeof(path));
 	}
@@ -2919,9 +3035,8 @@ zdb_status_t zdb_ts_recover_stream(zdb_ts_t *ts, size_t *out_truncated_bytes)
 	rc = zdb_ts_build_path(ts->db->cfg, ts->stream_name, path, sizeof(path));
 #endif
 	if (rc < 0) {
-		ZDB_STAT_INC(ts->db, recover_failures);
-		zdb_health_check(ts->db);
-		return zdb_status_from_errno(rc);
+		status = zdb_status_from_errno(rc);
+		goto fail;
 	}
 
 	/*
@@ -2944,9 +3059,8 @@ zdb_status_t zdb_ts_recover_stream(zdb_ts_t *ts, size_t *out_truncated_bytes)
 	fs_file_t_init(&file);
 	rc = fs_open(&file, path, FS_O_CREATE | FS_O_RDWR);
 	if (rc < 0) {
-		ZDB_STAT_INC(ts->db, recover_failures);
-		zdb_health_check(ts->db);
-		return zdb_status_from_errno(rc);
+		status = zdb_status_from_errno(rc);
+		goto fail;
 	}
 
 	rd = fs_read(&file, &hdr, sizeof(hdr));
@@ -2955,16 +3069,14 @@ zdb_status_t zdb_ts_recover_stream(zdb_ts_t *ts, size_t *out_truncated_bytes)
 		rc = fs_seek(&file, 0, FS_SEEK_SET);
 		if (rc < 0) {
 			(void)fs_close(&file);
-			ZDB_STAT_INC(ts->db, recover_failures);
-			zdb_health_check(ts->db);
-			return zdb_status_from_errno(rc);
+			status = zdb_status_from_errno(rc);
+			goto fail;
 		}
 		rd = fs_write(&file, &hdr, sizeof(hdr));
 		(void)fs_close(&file);
 		if ((rd < 0) || ((size_t)rd != sizeof(hdr))) {
-			ZDB_STAT_INC(ts->db, recover_failures);
-			zdb_health_check(ts->db);
-			return (rd < 0) ? zdb_status_from_errno((int)rd) : ZDB_ERR_IO;
+			status = (rd < 0) ? zdb_status_from_errno((int)rd) : ZDB_ERR_IO;
+			goto fail;
 		}
 #if defined(CONFIG_ZDB_EVENTING) && (CONFIG_ZDB_EVENTING)
 		zdb_emit_ts_event(ts->db, ZDB_TS_EVENT_RECOVER, ts->stream_name, 0U, 0, 0U, 0U,
@@ -2975,18 +3087,16 @@ zdb_status_t zdb_ts_recover_stream(zdb_ts_t *ts, size_t *out_truncated_bytes)
 
 	if ((rd < 0) || ((size_t)rd != sizeof(hdr))) {
 		(void)fs_close(&file);
-		ZDB_STAT_INC(ts->db, recover_failures);
-		zdb_health_check(ts->db);
-		return (rd < 0) ? zdb_status_from_errno((int)rd) : ZDB_ERR_CORRUPT;
+		status = (rd < 0) ? zdb_status_from_errno((int)rd) : ZDB_ERR_CORRUPT;
+		goto fail;
 	}
 
 	if (hdr_size == sizeof(struct zdb_ts_stream_header)) {
 		zdb_status_t dec = zdb_ts_stream_header_decode(ts->db, &hdr, ts->stream_name);
 		if (dec != ZDB_OK) {
 			(void)fs_close(&file);
-			ZDB_STAT_INC(ts->db, recover_failures);
-			zdb_health_check(ts->db);
-			return dec;
+			status = dec;
+			goto fail;
 		}
 	}
 
@@ -2995,9 +3105,8 @@ zdb_status_t zdb_ts_recover_stream(zdb_ts_t *ts, size_t *out_truncated_bytes)
 	rc = fs_seek(&file, (off_t)hdr_size, FS_SEEK_SET);
 	if (rc < 0) {
 		(void)fs_close(&file);
-		ZDB_STAT_INC(ts->db, recover_failures);
-		zdb_health_check(ts->db);
-		return zdb_status_from_errno(rc);
+		status = zdb_status_from_errno(rc);
+		goto fail;
 	}
 
 	while (true) {
@@ -3011,9 +3120,8 @@ zdb_status_t zdb_ts_recover_stream(zdb_ts_t *ts, size_t *out_truncated_bytes)
 		}
 		if (rd < 0) {
 			(void)fs_close(&file);
-			ZDB_STAT_INC(ts->db, recover_failures);
-			zdb_health_check(ts->db);
-			return zdb_status_from_errno((int)rd);
+			status = zdb_status_from_errno((int)rd);
+			goto fail;
 		}
 		if ((size_t)rd != rec_size) {
 			break;
@@ -3035,18 +3143,16 @@ zdb_status_t zdb_ts_recover_stream(zdb_ts_t *ts, size_t *out_truncated_bytes)
 		off_t end_pos = fs_tell(&file);
 		if (end_pos < 0) {
 			(void)fs_close(&file);
-			ZDB_STAT_INC(ts->db, recover_failures);
-			zdb_health_check(ts->db);
-			return zdb_status_from_errno((int)end_pos);
+			status = zdb_status_from_errno((int)end_pos);
+			goto fail;
 		}
 
 		if ((size_t)end_pos > good_end) {
 			rc = fs_truncate(&file, (off_t)good_end);
 			if (rc < 0) {
 				(void)fs_close(&file);
-				ZDB_STAT_INC(ts->db, recover_failures);
-				zdb_health_check(ts->db);
-				return zdb_status_from_errno(rc);
+				status = zdb_status_from_errno(rc);
+				goto fail;
 			}
 
 			truncated_bytes = (size_t)end_pos - good_end;
@@ -3063,6 +3169,19 @@ zdb_status_t zdb_ts_recover_stream(zdb_ts_t *ts, size_t *out_truncated_bytes)
 			  truncated_bytes, ZDB_OK);
 #endif
 	return ZDB_OK;
+
+fail:
+	/*
+	 * One exit for every way recovery can fail, so a listener hears about
+	 * an unrecoverable stream instead of only the runs that succeeded.
+	 * The file is already closed on each path that opened it.
+	 */
+	ZDB_STAT_INC(ts->db, recover_failures);
+	zdb_health_check(ts->db);
+#if defined(CONFIG_ZDB_EVENTING) && (CONFIG_ZDB_EVENTING)
+	zdb_emit_ts_event(ts->db, ZDB_TS_EVENT_RECOVER, ts->stream_name, 0U, 0, 0U, 0U, status);
+#endif
+	return status;
 #endif
 }
 

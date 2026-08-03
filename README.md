@@ -41,7 +41,7 @@ manifest:
     - name: zephyrdb
       url: https://github.com/beriberikix/zephyrdb
       path: modules/lib/zephyrdb
-      revision: v0.6.0
+      revision: v0.7.0
 ```
 
 ### 2. Enable in prj.conf
@@ -100,15 +100,31 @@ Planned and declined enhancements are tracked as
 
 ## Eventing and zbus Adapter
 
-ZephyrDB can emit lightweight KV mutation events when enabled:
+ZephyrDB can report what it is doing, in four categories:
 
-- `CONFIG_ZDB_EVENTING=y` enables local KV event emission
-- `CONFIG_ZDB_EVENTING_ZBUS=y` bridges those events to a zbus channel
+| Category | Payload | Events |
+|---|---|---|
+| Key-value | `zdb_kv_event_t` | set, delete, index-full |
+| Time-series | `zdb_ts_event_t` | append, flush, recover, rollover, watermark |
+| Document | `zdb_doc_event_t` | create, save, delete |
+| Instance | `zdb_core_event_t` | init, deinit, health change |
 
-The zbus channel carries `zdb_kv_event_t` messages and is intended as an
-optional adapter layer for local subscribers.
+- `CONFIG_ZDB_EVENTING=y` delivers them to listener callbacks registered
+  through `zdb_cfg_t` before `zdb_init()`. Callbacks run in the calling
+  thread, never with an internal lock held, and must not block.
+- `CONFIG_ZDB_EVENTING_ZBUS=y` additionally publishes each event on its own
+  zbus channel — `zdb_kv_event_chan`, `zdb_ts_event_chan`,
+  `zdb_doc_event_chan`, `zdb_core_event_chan` — for subscribers elsewhere in
+  the application. Publication is best-effort and never changes an
+  operation's return value.
 
-See sample:
+Events carry the operation's real status, so failures are reported as well as
+successes. They are worth wiring up for the things that are otherwise
+invisible: a bounded stream discarding its oldest samples, an instance
+degrading after corruption, or a key that stored fine but no longer fits the
+iteration index.
+
+See [docs/api.md](docs/api.md#eventing) and the sample:
 
 - [samples/eventing_zbus](samples/eventing_zbus)
 

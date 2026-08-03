@@ -1,0 +1,10 @@
+tests:
+  zephyrdb.unit.doc_events:
+    harness: ztest
+    tags:
+      - zephyrdb
+      - unit
+      - doc
+      - eventing
+    platform_allow:
+      - native_sim

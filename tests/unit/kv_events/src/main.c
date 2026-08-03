@@ -24,12 +24,20 @@ static bool g_zms_mounted;
 
 static zdb_kv_event_t g_last_event;
 static uint32_t g_event_count;
+static uint32_t g_index_full_count;
+static zdb_kv_event_t g_last_index_full;
 
 static void capture_listener(const zdb_kv_event_t *event, void *user_ctx)
 {
 	ARG_UNUSED(user_ctx);
 
 	if (event == NULL) {
+		return;
+	}
+
+	if (event->type == ZDB_EVENT_KV_INDEX_FULL) {
+		g_index_full_count++;
+		g_last_index_full = *event;
 		return;
 	}
 
@@ -95,8 +103,10 @@ static void setup(void *fixture)
 	ARG_UNUSED(fixture);
 	zms_backend_mount_once();
 	(void)memset(&g_last_event, 0, sizeof(g_last_event));
+	(void)memset(&g_last_index_full, 0, sizeof(g_last_index_full));
 	g_event_count = 0U;
 	g_second_count = 0U;
+	g_index_full_count = 0U;
 }
 
 /* ===== Tests ===== */
@@ -250,6 +260,73 @@ ZTEST(zephyrdb_kv_events, test_empty_listener_list_no_crash)
 	zassert_equal(rc, ZDB_OK, "kv_set failed: %d", rc);
 
 	zassert_equal(g_event_count, 0U, "no event expected with empty listener list");
+
+	zdb_kv_close(&kv);
+	zdb_deinit(&g_db);
+}
+
+/*
+ * Past CONFIG_ZDB_KV_INDEX_MAX_ENTRIES a key is still written and still
+ * readable by name, but nothing can enumerate it. That used to be completely
+ * silent, which made a full index look identical to a working one.
+ */
+ZTEST(zephyrdb_kv_events, test_index_full_is_reported)
+{
+	zdb_kv_t kv;
+	zdb_status_t rc;
+	char key[16];
+	uint32_t val = 7U;
+	uint32_t i;
+
+	g_cfg.kv_backend_fs = &g_zms;
+	rc = zdb_init(&g_db, &g_cfg);
+	zassert_equal(rc, ZDB_OK, "init failed: %d", rc);
+
+	rc = zdb_kv_open(&g_db, "fullns", &kv);
+	zassert_equal(rc, ZDB_OK, "kv_open failed: %d", rc);
+
+	/*
+	 * Write past the bound rather than assuming how many entries earlier
+	 * tests left behind — the index is persisted and shared by the backend.
+	 */
+	for (i = 0U; i < (CONFIG_ZDB_KV_INDEX_MAX_ENTRIES + 8U); i++) {
+		(void)snprintk(key, sizeof(key), "k%u", i);
+		rc = zdb_kv_set(&kv, key, &val, sizeof(val));
+		zassert_equal(rc, ZDB_OK, "set %s failed: %d", key, rc);
+
+		if (g_index_full_count > 0U) {
+			break;
+		}
+	}
+
+	zassert_true(g_index_full_count > 0U,
+		     "filled the index past %d entries without reporting it",
+		     CONFIG_ZDB_KV_INDEX_MAX_ENTRIES);
+	zassert_equal(g_last_index_full.type, ZDB_EVENT_KV_INDEX_FULL, "wrong event type");
+	zassert_equal(g_last_index_full.status, ZDB_OK,
+		      "the value was stored, so the event reports success");
+	zassert_equal(strcmp(g_last_index_full.namespace_name, "fullns"), 0, "wrong namespace");
+
+	/* The value that triggered it must still be readable by name. */
+	{
+		uint32_t read_back = 0U;
+		size_t out_len = 0U;
+
+		rc = zdb_kv_get(&kv, g_last_index_full.key, &read_back, sizeof(read_back),
+				&out_len);
+		zassert_equal(rc, ZDB_OK, "unindexed key is not readable: %d", rc);
+		zassert_equal(read_back, val, "unindexed key read back wrong");
+	}
+
+	/*
+	 * The index is persisted and shared by the backend, so leaving it full
+	 * would make every later test run against a saturated index — and see
+	 * an extra INDEX_FULL event on each set. Give the capacity back.
+	 */
+	for (uint32_t k = 0U; k <= i; k++) {
+		(void)snprintk(key, sizeof(key), "k%u", k);
+		(void)zdb_kv_delete(&kv, key);
+	}
 
 	zdb_kv_close(&kv);
 	zdb_deinit(&g_db);

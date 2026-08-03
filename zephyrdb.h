@@ -32,12 +32,12 @@ extern "C"
 /** @brief Major version of this library. */
 #define ZDB_VERSION_MAJOR 0
 /** @brief Minor version of this library. */
-#define ZDB_VERSION_MINOR 6
+#define ZDB_VERSION_MINOR 7
 /** @brief Patch version of this library. */
 #define ZDB_VERSION_PATCH 0
 
 /** @brief Version as a printable "MAJOR.MINOR.PATCH" string. */
-#define ZDB_VERSION_STRING "0.6.0"
+#define ZDB_VERSION_STRING "0.7.0"
 
 /** @} */ /* zdb_version */
 
@@ -152,7 +152,19 @@ extern "C"
 		ZDB_BACKEND_FCB,      /**< Flash Circular Buffer (TS). */
 	} zdb_backend_t;
 
-	/** @brief Instance health as reported by zdb_health(). */
+	/**
+	 * @brief Instance health as reported by zdb_health().
+	 *
+	 * Health is derived from time-series integrity checks: a stream whose
+	 * records fail framing or CRC validation, or which cannot be recovered,
+	 * moves the instance to ::ZDB_HEALTH_DEGRADED. A build without
+	 * @c CONFIG_ZDB_TS therefore stays ::ZDB_HEALTH_OK for its lifetime.
+	 *
+	 * Health only ever worsens. Nothing restores an instance to
+	 * ::ZDB_HEALTH_OK, because the faults it records are evidence that data
+	 * was already lost or rewritten; re-run zdb_init() for a fresh verdict.
+	 * Each change is reported once as a ::ZDB_CORE_EVENT_HEALTH event.
+	 */
 	typedef enum
 	{
 		ZDB_HEALTH_OK = 0,   /**< Fully operational. */
@@ -216,11 +228,15 @@ extern "C"
  * @brief Synchronous per-operation event notification
  *        (@c CONFIG_ZDB_EVENTING).
  *
- * Listener arrays are registered through ::zdb_cfg_t before zdb_init().
+ * Four independent listener arrays are registered through ::zdb_cfg_t
+ * before zdb_init(): one per data model (KV, time-series, document) and
+ * one for instance-level events (::zdb_core_event_t) covering lifecycle
+ * and health.
+ *
  * Events fire after each operation with the operation's real status
  * (including failures); listener entries with a NULL @c notify are
- * skipped. Callbacks run in the calling thread's context and must not
- * block.
+ * skipped. Callbacks run in the calling thread's context, are never
+ * invoked while an internal lock is held, and must not block.
  * @{
  */
 #if defined(CONFIG_ZDB_EVENTING) && (CONFIG_ZDB_EVENTING)
@@ -230,6 +246,14 @@ extern "C"
 	{
 		ZDB_EVENT_KV_SET = 0, /**< A zdb_kv_set() completed. */
 		ZDB_EVENT_KV_DELETE,  /**< A zdb_kv_delete() completed. */
+		/**
+		 * @brief A key was stored but the index is full.
+		 *
+		 * The value is readable by name, but the key cannot be
+		 * enumerated and will not survive as an index entry. Raise
+		 * @c CONFIG_ZDB_KV_INDEX_MAX_ENTRIES to make room.
+		 */
+		ZDB_EVENT_KV_INDEX_FULL,
 	} zdb_event_type_t;
 
 	/** @brief Payload delivered to KV event listeners. */
@@ -264,6 +288,8 @@ extern "C"
 		ZDB_TS_EVENT_APPEND = 0, /**< A sample append completed. */
 		ZDB_TS_EVENT_FLUSH,      /**< A flush completed. */
 		ZDB_TS_EVENT_RECOVER,    /**< A zdb_ts_recover_stream() run completed. */
+		ZDB_TS_EVENT_ROLLOVER,   /**< A bounded stream discarded its oldest samples. */
+		ZDB_TS_EVENT_WATERMARK,  /**< A consumed watermark was set or cleared. */
 	} zdb_ts_event_type_t;
 
 	/** @brief Payload delivered to time-series event listeners. */
@@ -272,10 +298,10 @@ extern "C"
 		zdb_ts_event_type_t type;                                  /**< Operation kind. */
 		char stream_name[CONFIG_ZDB_TS_STREAM_NAME_MAX_LEN + 1];   /**< Stream the operation targeted. */
 		uint64_t timestamp_ms;   /**< Uptime when the event fired (k_uptime_get()). */
-		uint64_t sample_ts_ms;   /**< Appended sample's timestamp (append events). */
+		uint64_t sample_ts_ms;   /**< Appended sample's timestamp (append events); consumed watermark (watermark events, 0 when cleared). */
 		int64_t sample_value;    /**< Appended sample's value (append events). */
 		size_t flushed_bytes;    /**< Bytes written (flush events). */
-		size_t truncated_bytes;  /**< Bytes truncated (recover events). */
+		size_t truncated_bytes;  /**< Bytes discarded: truncated (recover events) or dropped with the oldest segments (rollover events). */
 		zdb_status_t status;     /**< Result of the operation. */
 	} zdb_ts_event_t;
 
@@ -318,6 +344,36 @@ extern "C"
 	} zdb_doc_event_listener_t;
 
 #endif /* CONFIG_ZDB_DOC */
+
+	/**
+	 * @brief Instance-level event kinds.
+	 *
+	 * Unlike the model events, these are not tied to a single key, stream,
+	 * or document, and are delivered whichever models are enabled.
+	 */
+	typedef enum
+	{
+		ZDB_CORE_EVENT_INIT = 0, /**< A zdb_init() completed successfully. */
+		ZDB_CORE_EVENT_DEINIT,   /**< A zdb_deinit() completed. */
+		ZDB_CORE_EVENT_HEALTH,   /**< Instance health changed value. */
+	} zdb_core_event_type_t;
+
+	/** @brief Payload delivered to core event listeners. */
+	typedef struct
+	{
+		zdb_core_event_type_t type; /**< Event kind. */
+		uint64_t timestamp_ms;      /**< Uptime when the event fired (k_uptime_get()). */
+		zdb_health_t health;        /**< Health once the event fired. */
+		zdb_health_t prev_health;   /**< Health before the change (health events). */
+		zdb_status_t status;        /**< Result of the operation. */
+	} zdb_core_event_t;
+
+	/** @brief Core event listener registration entry. */
+	typedef struct
+	{
+		void (*notify)(const zdb_core_event_t *event, void *user_ctx); /**< Callback; NULL entries are skipped. */
+		void *user_ctx;                                                /**< Opaque pointer passed back to @ref notify. */
+	} zdb_core_event_listener_t;
 
 #endif /* CONFIG_ZDB_EVENTING */
 
@@ -372,6 +428,8 @@ extern "C"
 		const zdb_doc_event_listener_t *doc_event_listeners; /**< Document event listener array (may be NULL). */
 		size_t doc_event_listener_count;                     /**< Entries in @ref doc_event_listeners. */
 #endif
+		const zdb_core_event_listener_t *core_event_listeners; /**< Core event listener array (may be NULL). */
+		size_t core_event_listener_count;                      /**< Entries in @ref core_event_listeners. */
 #endif
 	} zdb_cfg_t;
 
@@ -406,6 +464,15 @@ extern "C"
 		const zdb_doc_event_listener_t *doc_event_listeners; /**< Bound document listeners (internal). */
 		size_t doc_event_listener_count;                     /**< Bound document listener count (internal). */
 #endif
+		const zdb_core_event_listener_t *core_event_listeners; /**< Bound core listeners (internal). */
+		size_t core_event_listener_count;                      /**< Bound core listener count (internal). */
+		/*
+		 * A health change detected while the instance lock is held is
+		 * published when that lock is released, so listeners never run
+		 * inside it (see zdb_health_check()).
+		 */
+		zdb_health_t health_prev;        /**< Health before a pending change (internal). */
+		bool health_event_pending;       /**< A health change awaits publication (internal). */
 #endif
 	} zdb_t;
 

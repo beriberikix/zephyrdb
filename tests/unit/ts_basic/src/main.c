@@ -97,7 +97,25 @@ ZTEST(ts_suite, test_ts_flush_async_without_configured_work_q)
 
 #if defined(CONFIG_ZDB_EVENTING) && (CONFIG_ZDB_EVENTING)
 static uint32_t g_flush_events;
+static uint32_t g_append_events;
+static uint32_t g_watermark_events;
+static uint32_t g_recover_events;
+static size_t g_flushed_bytes_total;
 static bool g_flush_name_ok = true;
+static zdb_ts_event_t g_last_append;
+static zdb_ts_event_t g_last_watermark;
+
+static void ts_events_reset(void)
+{
+	g_flush_events = 0U;
+	g_append_events = 0U;
+	g_watermark_events = 0U;
+	g_recover_events = 0U;
+	g_flushed_bytes_total = 0U;
+	g_flush_name_ok = true;
+	(void)memset(&g_last_append, 0, sizeof(g_last_append));
+	(void)memset(&g_last_watermark, 0, sizeof(g_last_watermark));
+}
 
 static void ts_event_capture(const zdb_ts_event_t *event, void *user_ctx)
 {
@@ -107,14 +125,32 @@ static void ts_event_capture(const zdb_ts_event_t *event, void *user_ctx)
 		return;
 	}
 
-	if (event->type == ZDB_TS_EVENT_FLUSH) {
+	/*
+	 * The name is optional — a flush covering several streams names none —
+	 * but it must always be a readable, terminated string.
+	 */
+	if (memchr(event->stream_name, '\0', sizeof(event->stream_name)) == NULL) {
+		g_flush_name_ok = false;
+	}
+
+	switch (event->type) {
+	case ZDB_TS_EVENT_FLUSH:
 		g_flush_events++;
-		/* A flush spans streams, so it names none — but the field must
-		 * still be a readable, terminated string.
-		 */
-		if (memchr(event->stream_name, '\0', sizeof(event->stream_name)) == NULL) {
-			g_flush_name_ok = false;
-		}
+		g_flushed_bytes_total += event->flushed_bytes;
+		break;
+	case ZDB_TS_EVENT_APPEND:
+		g_append_events++;
+		g_last_append = *event;
+		break;
+	case ZDB_TS_EVENT_WATERMARK:
+		g_watermark_events++;
+		g_last_watermark = *event;
+		break;
+	case ZDB_TS_EVENT_RECOVER:
+		g_recover_events++;
+		break;
+	default:
+		break;
 	}
 }
 
@@ -122,27 +158,27 @@ static const zdb_ts_event_listener_t g_ts_listeners[] = {
 	{ .notify = ts_event_capture, .user_ctx = NULL },
 };
 
+static const zdb_cfg_t g_ev_cfg = {
+	.kv_backend_fs = NULL,
+	.lfs_mount_point = "/lfs",
+	.work_q = &k_sys_work_q,
+	.ts_event_listeners = g_ts_listeners,
+	.ts_event_listener_count = ARRAY_SIZE(g_ts_listeners),
+};
+
 /*
- * A flush with listeners attached must deliver an event rather than fault on
- * the stream name it does not have.
+ * An explicit flush reports the bytes it wrote. With one stream open it names
+ * it; the unnamed case needs several streams and lives in unit/ts_multistream.
  */
 ZTEST(ts_suite, test_ts_flush_event_delivered_to_listener)
 {
-	static const zdb_cfg_t ev_cfg = {
-		.kv_backend_fs = NULL,
-		.lfs_mount_point = "/lfs",
-		.work_q = &k_sys_work_q,
-		.ts_event_listeners = g_ts_listeners,
-		.ts_event_listener_count = ARRAY_SIZE(g_ts_listeners),
-	};
-	ZDB_DEFINE_STATIC(ev_db, ev_cfg);
+	ZDB_DEFINE_STATIC(ev_db, g_ev_cfg);
 	zdb_ts_t ts;
 	int64_t values[] = {1, 2, 3};
 
-	g_flush_events = 0U;
-	g_flush_name_ok = true;
+	ts_events_reset();
 
-	zassert_equal(zdb_init(&ev_db, &ev_cfg), ZDB_OK, "init failed");
+	zassert_equal(zdb_init(&ev_db, &g_ev_cfg), ZDB_OK, "init failed");
 	zassert_equal(zdb_ts_open(&ev_db, "t_evt", &ts), ZDB_OK, "open failed");
 
 	ts_append_fixed(&ts, values, ARRAY_SIZE(values), 1000U);
@@ -150,6 +186,130 @@ ZTEST(ts_suite, test_ts_flush_event_delivered_to_listener)
 
 	zassert_true(g_flush_events > 0U, "no flush event delivered");
 	zassert_true(g_flush_name_ok, "flush event stream name is not a valid string");
+	zassert_true(g_flushed_bytes_total > 0U, "flush event reported no bytes");
+
+	(void)zdb_ts_close(&ts);
+	(void)zdb_deinit(&ev_db);
+}
+
+/*
+ * A batch append reports once for the call, describing its first sample —
+ * not once per sample.
+ */
+ZTEST(ts_suite, test_ts_append_events_single_and_batch)
+{
+	ZDB_DEFINE_STATIC(ev_db, g_ev_cfg);
+	zdb_ts_t ts;
+	zdb_ts_sample_i64_t one = { .ts_ms = 5000U, .value = 41 };
+	zdb_ts_sample_i64_t batch[] = {
+		{ .ts_ms = 6000U, .value = 61 },
+		{ .ts_ms = 6001U, .value = 62 },
+		{ .ts_ms = 6002U, .value = 63 },
+	};
+
+	ts_events_reset();
+
+	zassert_equal(zdb_init(&ev_db, &g_ev_cfg), ZDB_OK, "init failed");
+	zassert_equal(zdb_ts_open(&ev_db, "t_app", &ts), ZDB_OK, "open failed");
+
+	zassert_equal(zdb_ts_append_i64(&ts, &one), ZDB_OK, "single append failed");
+	zassert_equal(g_append_events, 1U, "expected 1 append event, got %u", g_append_events);
+	zassert_equal(g_last_append.sample_ts_ms, one.ts_ms, "wrong sample timestamp");
+	zassert_equal(g_last_append.sample_value, one.value, "wrong sample value");
+	zassert_equal(g_last_append.status, ZDB_OK, "append event status not OK");
+	zassert_equal(strcmp(g_last_append.stream_name, "t_app"), 0, "wrong stream named");
+
+	zassert_equal(zdb_ts_append_batch_i64(&ts, batch, ARRAY_SIZE(batch)), ZDB_OK,
+		      "batch append failed");
+	zassert_equal(g_append_events, 2U, "batch should emit one event, got %u total",
+		      g_append_events);
+	zassert_equal(g_last_append.sample_ts_ms, batch[0].ts_ms,
+		      "batch event should describe its first sample");
+	zassert_equal(g_last_append.sample_value, batch[0].value,
+		      "batch event should describe its first sample");
+
+	(void)zdb_ts_close(&ts);
+	(void)zdb_deinit(&ev_db);
+}
+
+/*
+ * Closing a stream flushes whatever it still holds. That write is as real as
+ * any other, so it is reported rather than going unseen because no explicit
+ * flush was asked for.
+ */
+ZTEST(ts_suite, test_ts_close_flush_emits_event)
+{
+	ZDB_DEFINE_STATIC(ev_db, g_ev_cfg);
+	zdb_ts_t ts;
+	int64_t values[] = {7, 8};
+
+	ts_events_reset();
+
+	zassert_equal(zdb_init(&ev_db, &g_ev_cfg), ZDB_OK, "init failed");
+	zassert_equal(zdb_ts_open(&ev_db, "t_cls", &ts), ZDB_OK, "open failed");
+
+	ts_append_fixed(&ts, values, ARRAY_SIZE(values), 2000U);
+	zassert_equal(g_flush_events, 0U, "nothing should have been flushed yet");
+
+	zassert_equal(zdb_ts_close(&ts), ZDB_OK, "close failed");
+
+	zassert_true(g_flush_events > 0U, "close flushed buffered samples without reporting it");
+	zassert_true(g_flushed_bytes_total > 0U, "close-time flush reported no bytes");
+	zassert_true(g_flush_name_ok, "flush event stream name is not a valid string");
+
+	(void)zdb_deinit(&ev_db);
+}
+
+/*
+ * The consumed watermark is a persistent write, so setting and clearing it
+ * are both reported; a cleared watermark reads as position 0.
+ */
+ZTEST(ts_suite, test_ts_watermark_events)
+{
+	ZDB_DEFINE_STATIC(ev_db, g_ev_cfg);
+	zdb_ts_t ts;
+
+	ts_events_reset();
+
+	zassert_equal(zdb_init(&ev_db, &g_ev_cfg), ZDB_OK, "init failed");
+	zassert_equal(zdb_ts_open(&ev_db, "t_wm", &ts), ZDB_OK, "open failed");
+
+	zassert_equal(zdb_ts_watermark_set(&ts, 4242U), ZDB_OK, "watermark set failed");
+	zassert_equal(g_watermark_events, 1U, "expected 1 watermark event, got %u",
+		      g_watermark_events);
+	zassert_equal(g_last_watermark.sample_ts_ms, 4242U, "wrong consumed position reported");
+	zassert_equal(g_last_watermark.status, ZDB_OK, "watermark event status not OK");
+	zassert_equal(strcmp(g_last_watermark.stream_name, "t_wm"), 0, "wrong stream named");
+
+	zassert_equal(zdb_ts_watermark_clear(&ts), ZDB_OK, "watermark clear failed");
+	zassert_equal(g_watermark_events, 2U, "clear should emit an event too");
+	zassert_equal(g_last_watermark.sample_ts_ms, 0U, "cleared watermark should report 0");
+
+	(void)zdb_ts_close(&ts);
+	(void)zdb_deinit(&ev_db);
+}
+
+/*
+ * Recovery reports whether or not it had anything to truncate, so an operator
+ * can tell "checked, clean" from "never ran".
+ */
+ZTEST(ts_suite, test_ts_recover_emits_event)
+{
+	ZDB_DEFINE_STATIC(ev_db, g_ev_cfg);
+	zdb_ts_t ts;
+	int64_t values[] = {11, 12};
+	size_t truncated = 0U;
+
+	ts_events_reset();
+
+	zassert_equal(zdb_init(&ev_db, &g_ev_cfg), ZDB_OK, "init failed");
+	zassert_equal(zdb_ts_open(&ev_db, "t_rcv", &ts), ZDB_OK, "open failed");
+
+	ts_append_fixed(&ts, values, ARRAY_SIZE(values), 3000U);
+	zassert_equal(zdb_ts_flush_sync(&ts, K_SECONDS(2)), ZDB_OK, "flush failed");
+
+	zassert_equal(zdb_ts_recover_stream(&ts, &truncated), ZDB_OK, "recover failed");
+	zassert_true(g_recover_events > 0U, "recover ran without reporting");
 
 	(void)zdb_ts_close(&ts);
 	(void)zdb_deinit(&ev_db);

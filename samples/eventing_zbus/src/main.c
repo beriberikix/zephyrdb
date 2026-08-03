@@ -31,6 +31,22 @@ static const char *kv_event_type_str(zdb_event_type_t type)
 		return "SET";
 	case ZDB_EVENT_KV_DELETE:
 		return "DELETE";
+	case ZDB_EVENT_KV_INDEX_FULL:
+		return "INDEX_FULL";
+	default:
+		return "UNKNOWN";
+	}
+}
+
+static const char *core_event_type_str(zdb_core_event_type_t type)
+{
+	switch (type) {
+	case ZDB_CORE_EVENT_INIT:
+		return "INIT";
+	case ZDB_CORE_EVENT_DEINIT:
+		return "DEINIT";
+	case ZDB_CORE_EVENT_HEALTH:
+		return "HEALTH";
 	default:
 		return "UNKNOWN";
 	}
@@ -45,6 +61,10 @@ static const char *ts_event_type_str(zdb_ts_event_type_t type)
 		return "FLUSH";
 	case ZDB_TS_EVENT_RECOVER:
 		return "RECOVER";
+	case ZDB_TS_EVENT_ROLLOVER:
+		return "ROLLOVER";
+	case ZDB_TS_EVENT_WATERMARK:
+		return "WATERMARK";
 	default:
 		return "UNKNOWN";
 	}
@@ -107,8 +127,8 @@ static int print_latest_kv_event(const char *label)
 
 	printk("eventing_zbus: %s type=%s ns=%s key=%s len=%u status=%d ts_ms=%llu\n", label,
 	       kv_event_type_str(event.type),
-	       (event.namespace_name != NULL) ? event.namespace_name : "(null)",
-	       (event.key != NULL) ? event.key : "(null)",
+	       event.namespace_name,
+	       event.key,
 	       (unsigned int)event.value_len, (int)event.status,
 	       (unsigned long long)event.timestamp_ms);
 	return 0;
@@ -128,7 +148,7 @@ static int print_latest_ts_event(const char *label)
 	printk("eventing_zbus: %s type=%s stream=%s sample_ts=%llu sample_val=%lld "
 	       "flushed=%u truncated=%u status=%d ts_ms=%llu\n",
 	       label, ts_event_type_str(event.type),
-	       (event.stream_name != NULL) ? event.stream_name : "(null)",
+	       event.stream_name,
 	       (unsigned long long)event.sample_ts_ms, (long long)event.sample_value,
 	       (unsigned int)event.flushed_bytes, (unsigned int)event.truncated_bytes,
 	       (int)event.status, (unsigned long long)event.timestamp_ms);
@@ -148,10 +168,28 @@ static int print_latest_doc_event(const char *label)
 
 	printk("eventing_zbus: %s type=%s collection=%s doc=%s fields=%u bytes=%u status=%d ts_ms=%llu\n",
 	       label, doc_event_type_str(event.type),
-	       (event.collection_name != NULL) ? event.collection_name : "(null)",
-	       (event.document_id != NULL) ? event.document_id : "(null)",
+	       event.collection_name,
+	       event.document_id,
 	       (unsigned int)event.field_count, (unsigned int)event.serialized_bytes,
 	       (int)event.status, (unsigned long long)event.timestamp_ms);
+	return 0;
+}
+
+static int print_latest_core_event(const char *label)
+{
+	zdb_core_event_t event;
+	int rc;
+
+	rc = zbus_chan_read(&zdb_core_event_chan, &event, K_NO_WAIT);
+	if (rc != 0) {
+		printk("eventing_zbus: %s read failed rc=%d\n", label, rc);
+		return rc;
+	}
+
+	printk("eventing_zbus: %s type=%s health=%s prev=%s status=%d ts_ms=%llu\n", label,
+	       core_event_type_str(event.type), zdb_health_str(event.health),
+	       zdb_health_str(event.prev_health), (int)event.status,
+	       (unsigned long long)event.timestamp_ms);
 	return 0;
 }
 
@@ -179,6 +217,12 @@ int main(void)
 	rc = zdb_init(&g_db, &g_cfg);
 	if (rc != ZDB_OK) {
 		printk("eventing_zbus: zdb_init failed rc=%d\n", (int)rc);
+		return 1;
+	}
+
+	/* Instance events need no data model — the channel carries them regardless. */
+	event_rc = print_latest_core_event("event after init");
+	if (event_rc != 0) {
 		return 1;
 	}
 
@@ -210,28 +254,49 @@ int main(void)
 		return 1;
 	}
 
+	/*
+	 * The board overlay mounts LittleFS at /lfs, so these are expected to
+	 * work rather than be skipped — a skip here would mean the sample was
+	 * demonstrating nothing.
+	 */
 	rc = zdb_ts_open(&g_db, "metrics", &ts);
-	if (rc == ZDB_OK) {
-		rc = zdb_ts_append_i64(&ts, &sample);
-		if (rc == ZDB_OK) {
-			event_rc = print_latest_ts_event("event after ts append");
-			if (event_rc != 0) {
-				return 1;
-			}
-		}
-
-		rc = zdb_ts_flush_sync(&ts, K_SECONDS(2));
-		if (rc == ZDB_OK) {
-			event_rc = print_latest_ts_event("event after ts flush");
-			if (event_rc != 0) {
-				return 1;
-			}
-		}
-		(void)zdb_ts_close(&ts);
-	} else {
-		printk("eventing_zbus: ts_open skipped rc=%d (filesystem setup may be required)\n",
-		       (int)rc);
+	if (rc != ZDB_OK) {
+		printk("eventing_zbus: ts_open failed rc=%d\n", (int)rc);
+		return 1;
 	}
+
+	rc = zdb_ts_append_i64(&ts, &sample);
+	if (rc != ZDB_OK) {
+		printk("eventing_zbus: ts_append failed rc=%d\n", (int)rc);
+		return 1;
+	}
+	event_rc = print_latest_ts_event("event after ts append");
+	if (event_rc != 0) {
+		return 1;
+	}
+
+	rc = zdb_ts_flush_sync(&ts, K_SECONDS(2));
+	if (rc != ZDB_OK) {
+		printk("eventing_zbus: ts_flush failed rc=%d\n", (int)rc);
+		return 1;
+	}
+	event_rc = print_latest_ts_event("event after ts flush");
+	if (event_rc != 0) {
+		return 1;
+	}
+
+	/* A consumer checkpoint is a persistent write, and reports as one. */
+	rc = zdb_ts_watermark_set(&ts, sample.ts_ms);
+	if (rc != ZDB_OK) {
+		printk("eventing_zbus: watermark_set failed rc=%d\n", (int)rc);
+		return 1;
+	}
+	event_rc = print_latest_ts_event("event after ts watermark");
+	if (event_rc != 0) {
+		return 1;
+	}
+
+	(void)zdb_ts_close(&ts);
 
 	rc = zdb_doc_create(&g_db, "users", "u1", &doc);
 	if (rc != ZDB_OK) {
@@ -248,24 +313,34 @@ int main(void)
 	(void)zdb_doc_field_set_bool(&doc, "active", true);
 
 	rc = zdb_doc_save(&doc);
-	if (rc == ZDB_OK) {
-		event_rc = print_latest_doc_event("event after doc save");
-		if (event_rc != 0) {
-			return 1;
-		}
+	if (rc != ZDB_OK) {
+		printk("eventing_zbus: doc_save failed rc=%d\n", (int)rc);
+		return 1;
+	}
+	event_rc = print_latest_doc_event("event after doc save");
+	if (event_rc != 0) {
+		return 1;
+	}
 
-		rc = zdb_doc_delete(&g_db, "users", "u1");
-		if (rc == ZDB_OK) {
-			event_rc = print_latest_doc_event("event after doc delete");
-			if (event_rc != 0) {
-				return 1;
-			}
-		}
+	rc = zdb_doc_delete(&g_db, "users", "u1");
+	if (rc != ZDB_OK) {
+		printk("eventing_zbus: doc_delete failed rc=%d\n", (int)rc);
+		return 1;
+	}
+	event_rc = print_latest_doc_event("event after doc delete");
+	if (event_rc != 0) {
+		return 1;
 	}
 	(void)zdb_doc_close(&doc);
 
-	printk("eventing_zbus: PASS\n");
 	(void)zdb_kv_close(&kv);
 	(void)zdb_deinit(&g_db);
+
+	event_rc = print_latest_core_event("event after deinit");
+	if (event_rc != 0) {
+		return 1;
+	}
+
+	printk("eventing_zbus: PASS\n");
 	return 0;
 }
