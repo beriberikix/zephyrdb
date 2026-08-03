@@ -24,7 +24,8 @@
 #include <flatcc/flatcc_builder.h>
 #endif
 
-static uint32_t zdb_fnv1a32(const char *s)
+/* Used for filesystem-backed stream paths, which FCB does not build. */
+__maybe_unused static uint32_t zdb_fnv1a32(const char *s)
 {
 	uint32_t hash = 0x811C9DC5u;
 
@@ -638,7 +639,8 @@ static zdb_status_t zdb_ts_record_decode_as(zdb_t *db, uint16_t version, uint64_
 }
 #endif /* ZDB_TS_USE_LITTLEFS */
 
-static bool zdb_ts_agg_update(zdb_ts_agg_t agg, double sample, uint32_t *points, double *acc)
+/* Only the aggregate scan uses this, and FCB has no aggregate scan. */
+__maybe_unused static bool zdb_ts_agg_update(zdb_ts_agg_t agg, double sample, uint32_t *points, double *acc)
 {
 	if ((*points) == 0U) {
 		*acc = sample;
@@ -1300,7 +1302,8 @@ static zdb_status_t zdb_ts_ensure_stream_header(zdb_t *db, const char *stream_na
  * zdb_ts_window_match() accepts: an all-zero window, and an open-ended upper
  * bound expressed either as 0 or UINT64_MAX (ZDB_TS_WINDOW_ALL).
  */
-static bool zdb_ts_window_is_unbounded(zdb_ts_window_t window)
+/* Only the aggregate scan uses this, and FCB has no aggregate scan. */
+__maybe_unused static bool zdb_ts_window_is_unbounded(zdb_ts_window_t window)
 {
 	return (window.from_ts_ms == 0U) &&
 	       ((window.to_ts_ms == 0U) || (window.to_ts_ms == UINT64_MAX));
@@ -1357,7 +1360,14 @@ static void zdb_ts_flush_work_handler(struct k_work *work)
 		status = zdb_status_from_errno(rc);
 	}
 #else
+	/*
+	 * Flushing is a no-op on a write-through backend, so nothing below
+	 * reads these and there is no flush event to emit.
+	 */
 	ARG_UNUSED(rc);
+	ARG_UNUSED(flushed_bytes);
+	ARG_UNUSED(flushed_stream);
+	ARG_UNUSED(status);
 #endif
 	ctx->flush_pending = false;
 	k_sem_give(&ctx->flush_done);
@@ -1725,7 +1735,10 @@ zdb_status_t zdb_ts_append_i64(zdb_ts_t *ts, const zdb_ts_sample_i64_t *sample)
 	}
 #endif
 
+/* Every "goto out" above belongs to the buffered path, which FCB does not use. */
+#if !ZDB_TS_USE_FCB
 out:
+#endif
 #if defined(CONFIG_ZDB_EVENTING) && (CONFIG_ZDB_EVENTING)
 	zdb_emit_ts_event(ts->db, ZDB_TS_EVENT_APPEND, ts->stream_name, sample->ts_ms,
 			  sample->value, 0U, 0U, status);
